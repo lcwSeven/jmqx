@@ -1,0 +1,10 @@
+spring:
+  main:
+    web-application-type: none
+
+jmqtt:
+  broker:
+    host: 0.0.0.0
+    port: 1883
+    boss-threads: 1
+    worker-threads: 0
