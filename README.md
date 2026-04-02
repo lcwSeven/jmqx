@@ -1,21 +1,21 @@
 # jmqtt
 
-`jmqtt` 是一个基于 Java + Netty + Spring Boot 的 MQTT Broker 多模块工程。
+`jmqtt` 是一个基于 Java + Netty 的 MQTT Broker 单模块工程。
 
 ## 项目结构分析
 
-- `jmqtt-common`: 通用配置与工具类（如 `BrokerProperties`、Topic 匹配器）。
-- `jmqtt-protocol`: 协议扩展点（当前提供 `ClientAuthenticator` 认证接口）。
-- `jmqtt-session`: 客户端会话管理（`SessionRegistry` + 内存实现）。
-- `jmqtt-router`: 订阅路由管理（topic filter 到 clientId 的匹配）。
-- `jmqtt-store`: retained message 存储（内存实现）。
-- `jmqtt-broker`: MQTT 协议处理核心（CONNECT / SUBSCRIBE / PUBLISH / PINGREQ / DISCONNECT）。
-- `jmqtt-transport`: Netty TCP Server 与 MQTT 编解码、消息分发。
-- `jmqtt-app`: Spring Boot 启动模块，负责 Bean 装配与生命周期管理。
+- `src/main/java/com/jmqtt/common`: 通用配置与工具类（如 `BrokerProperties`、Topic 匹配器）。
+- `src/main/java/com/jmqtt/protocol`: 协议扩展点（当前提供 `ClientAuthenticator` 认证接口）。
+- `src/main/java/com/jmqtt/session`: 客户端会话管理（`SessionRegistry` + 内存实现）。
+- `src/main/java/com/jmqtt/router`: 订阅路由管理（topic filter 到 clientId 的匹配）。
+- `src/main/java/com/jmqtt/store`: retained message 存储（内存实现）。
+- `src/main/java/com/jmqtt/broker`: MQTT 协议处理核心（CONNECT / SUBSCRIBE / PUBLISH / PINGREQ / DISCONNECT）。
+- `src/main/java/com/jmqtt/transport`: Netty TCP Server 与 MQTT 编解码、消息分发。
+- `src/main/java/com/jmqtt/JmqttApplication.java`: 程序启动入口。
 
 ## 当前已填充能力
 
-- 多模块 Maven 依赖关系已补齐，并统一继承父工程。
+- 单模块 Maven 结构。
 - 可启动的 MQTT TCP 服务端（默认 `0.0.0.0:1883`）。
 - 支持消息流程：
   - CONNECT + CONNACK
@@ -34,18 +34,16 @@
 
 ```bash
 mvn -DskipTests compile
-mvn -pl jmqtt-app spring-boot:run
+mvn exec:java
 ```
 
 ## 配置
 
-`jmqtt-app/src/main/resources/application.yml`:
+可通过 JVM 参数覆盖默认监听地址与端口：
 
-```yaml
-jmqtt:
-  broker:
-    host: 0.0.0.0
-    port: 1883
-    boss-threads: 1
-    worker-threads: 0
+```bash
+-Djmqtt.broker.host=0.0.0.0
+-Djmqtt.broker.port=1883
+-Djmqtt.broker.bossThreads=1
+-Djmqtt.broker.workerThreads=0
 ```
