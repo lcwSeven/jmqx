@@ -1,11 +1,11 @@
-/**
- * @author liucaiwen
- * @date 2026/4/2
- */
 package com.jmqtt.common;
 
 import java.util.Objects;
 
+/**
+ * @author liucaiwen
+ * @date 2026/4/2
+ */
 public final class TopicMatcher {
     private TopicMatcher() {
     }

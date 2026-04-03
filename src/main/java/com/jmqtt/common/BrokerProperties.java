@@ -1,11 +1,11 @@
+package com.jmqtt.common;
+
 /**
  * @author liucaiwen
  * @date 2026/4/2
  */
-package com.jmqtt.common;
-
 public class BrokerProperties {
-    private String host = "0.0.0.0";
+    private String host = "localhost";
     private int port = 1883;
     private int bossThreads = 1;
     private int workerThreads = 0;

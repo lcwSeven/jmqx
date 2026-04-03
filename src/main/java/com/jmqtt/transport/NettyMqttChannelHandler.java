@@ -1,7 +1,3 @@
-/**
- * @author liucaiwen
- * @date 2026/4/2
- */
 package com.jmqtt.transport;
 
 import com.jmqtt.broker.BrokerMessageHandler;
@@ -9,7 +5,16 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.handler.codec.mqtt.MqttMessage;
 
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
+/**
+ * @author liucaiwen
+ * @date 2026/4/2
+ */
 public class NettyMqttChannelHandler extends SimpleChannelInboundHandler<MqttMessage> {
+    private static final Logger LOG = Logger.getLogger(NettyMqttChannelHandler.class.getName());
+
     private final BrokerMessageHandler brokerMessageHandler;
 
     public NettyMqttChannelHandler(BrokerMessageHandler brokerMessageHandler) {
@@ -17,17 +22,25 @@ public class NettyMqttChannelHandler extends SimpleChannelInboundHandler<MqttMes
     }
 
     @Override
+    public void channelActive(ChannelHandlerContext ctx) {
+        LOG.info(() -> "[CONNECT] accepted remote=" + ctx.channel().remoteAddress());
+    }
+
+    @Override
     protected void channelRead0(ChannelHandlerContext ctx, MqttMessage message) {
+        LOG.fine(() -> "[RECV] remote=" + ctx.channel().remoteAddress() + ", type=" + message.fixedHeader().messageType());
         brokerMessageHandler.onMessage(ctx, message);
     }
 
     @Override
     public void channelInactive(ChannelHandlerContext ctx) {
+        LOG.info(() -> "[DISCONNECT] remote=" + ctx.channel().remoteAddress());
         brokerMessageHandler.onDisconnect(ctx.channel());
     }
 
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+        LOG.log(Level.WARNING, "[ERROR] remote=" + ctx.channel().remoteAddress() + ", message=" + cause.getMessage(), cause);
         brokerMessageHandler.onDisconnect(ctx.channel());
         ctx.close();
     }

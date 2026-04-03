@@ -1,11 +1,11 @@
-/**
- * @author liucaiwen
- * @date 2026/4/2
- */
 package com.jmqtt.session;
 
 import java.util.Optional;
 
+/**
+ * @author liucaiwen
+ * @date 2026/4/2
+ */
 public interface SessionRegistry {
     void register(ClientSession session);
 

@@ -1,12 +1,12 @@
-/**
- * @author liucaiwen
- * @date 2026/4/2
- */
 package com.jmqtt.router;
 
 import java.util.Map;
 import java.util.Set;
 
+/**
+ * @author liucaiwen
+ * @date 2026/4/2
+ */
 public interface SubscriptionRegistry {
     void subscribe(String clientId, String topicFilter, int qos);
 

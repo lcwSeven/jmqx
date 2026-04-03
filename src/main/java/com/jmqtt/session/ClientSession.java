@@ -1,13 +1,13 @@
-/**
- * @author liucaiwen
- * @date 2026/4/2
- */
 package com.jmqtt.session;
 
 import io.netty.channel.Channel;
 
 import java.time.Instant;
 
+/**
+ * @author liucaiwen
+ * @date 2026/4/2
+ */
 public class ClientSession {
     private final String clientId;
     private final Channel channel;

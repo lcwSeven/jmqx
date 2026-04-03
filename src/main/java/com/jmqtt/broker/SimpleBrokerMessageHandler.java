@@ -1,7 +1,3 @@
-/**
- * @author liucaiwen
- * @date 2026/4/2
- */
 package com.jmqtt.broker;
 
 import com.jmqtt.protocol.ClientAuthenticator;
@@ -33,8 +29,14 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.logging.Logger;
 
+/**
+ * @author liucaiwen
+ * @date 2026/4/2
+ */
 public class SimpleBrokerMessageHandler implements BrokerMessageHandler {
+    private static final Logger LOG = Logger.getLogger(SimpleBrokerMessageHandler.class.getName());
     private static final AttributeKey<String> CLIENT_ID = AttributeKey.valueOf("jmqtt.clientId");
     private static final AttributeKey<Boolean> CLEAN_SESSION = AttributeKey.valueOf("jmqtt.cleanSession");
 
@@ -44,11 +46,10 @@ public class SimpleBrokerMessageHandler implements BrokerMessageHandler {
     private final ClientAuthenticator clientAuthenticator;
 
     public SimpleBrokerMessageHandler(
-        SessionRegistry sessionRegistry,
-        SubscriptionRegistry subscriptionRegistry,
-        RetainedMessageStore retainedMessageStore,
-        ClientAuthenticator clientAuthenticator
-    ) {
+            SessionRegistry sessionRegistry,
+            SubscriptionRegistry subscriptionRegistry,
+            RetainedMessageStore retainedMessageStore,
+            ClientAuthenticator clientAuthenticator) {
         this.sessionRegistry = sessionRegistry;
         this.subscriptionRegistry = subscriptionRegistry;
         this.retainedMessageStore = retainedMessageStore;
@@ -58,6 +59,7 @@ public class SimpleBrokerMessageHandler implements BrokerMessageHandler {
     @Override
     public void onMessage(ChannelHandlerContext ctx, MqttMessage message) {
         if (message.decoderResult().isFailure()) {
+            LOG.warning(() -> "[PROTO] decode failed, remote=" + ctx.channel().remoteAddress());
             ctx.close();
             return;
         }
@@ -68,10 +70,16 @@ public class SimpleBrokerMessageHandler implements BrokerMessageHandler {
             case SUBSCRIBE -> handleSubscribe(ctx, (MqttSubscribeMessage) message);
             case UNSUBSCRIBE -> handleUnsubscribe(ctx, (MqttUnsubscribeMessage) message);
             case PUBLISH -> handlePublish(ctx, (MqttPublishMessage) message);
-            case PINGREQ -> ctx.writeAndFlush(new MqttMessage(
-                new MqttFixedHeader(MqttMessageType.PINGRESP, false, MqttQoS.AT_MOST_ONCE, false, 0)
-            ));
-            case DISCONNECT -> ctx.close();
+            case PINGREQ -> {
+                LOG.fine(() -> "[PING] clientId=" + currentClientId(ctx.channel()));
+                ctx.writeAndFlush(new MqttMessage(
+                        new MqttFixedHeader(MqttMessageType.PINGRESP, false, MqttQoS.AT_MOST_ONCE, false, 0)
+                ));
+            }
+            case DISCONNECT -> {
+                LOG.info(() -> "[DISCONNECT] clientId=" + currentClientId(ctx.channel()));
+                ctx.close();
+            }
             default -> {
             }
         }
@@ -89,21 +97,24 @@ public class SimpleBrokerMessageHandler implements BrokerMessageHandler {
         if (cleanSession) {
             subscriptionRegistry.removeClient(clientId);
         }
+        LOG.info(() -> "[SESSION] offline clientId=" + clientId + ", cleanSession=" + cleanSession);
     }
 
     private void handleConnect(ChannelHandlerContext ctx, MqttConnectMessage message) {
         String clientId = message.payload().clientIdentifier();
         if (clientId == null || clientId.isBlank()) {
+            LOG.warning(() -> "[CONNECT] rejected empty clientId, remote=" + ctx.channel().remoteAddress());
             rejectConnection(ctx, MqttConnectReturnCode.CONNECTION_REFUSED_IDENTIFIER_REJECTED);
             return;
         }
 
         String username = message.payload().userName();
         String password = message.payload().passwordInBytes() == null
-            ? null
-            : new String(message.payload().passwordInBytes(), StandardCharsets.UTF_8);
+                ? null
+                : new String(message.payload().passwordInBytes(), StandardCharsets.UTF_8);
 
         if (!clientAuthenticator.authenticate(username, password)) {
+            LOG.warning(() -> "[CONNECT] auth failed clientId=" + clientId + ", username=" + username);
             rejectConnection(ctx, MqttConnectReturnCode.CONNECTION_REFUSED_BAD_USER_NAME_OR_PASSWORD);
             return;
         }
@@ -114,9 +125,10 @@ public class SimpleBrokerMessageHandler implements BrokerMessageHandler {
         ctx.channel().attr(CLEAN_SESSION).set(cleanSession);
 
         ctx.writeAndFlush(MqttMessageBuilders.connAck()
-            .sessionPresent(false)
-            .returnCode(MqttConnectReturnCode.CONNECTION_ACCEPTED)
-            .build());
+                .sessionPresent(false)
+                .returnCode(MqttConnectReturnCode.CONNECTION_ACCEPTED)
+                .build());
+        LOG.info(() -> "[CONNECT] accepted clientId=" + clientId + ", cleanSession=" + cleanSession);
     }
 
     private void handleSubscribe(ChannelHandlerContext ctx, MqttSubscribeMessage message) {
@@ -132,11 +144,16 @@ public class SimpleBrokerMessageHandler implements BrokerMessageHandler {
             subscriptionRegistry.subscribe(clientId, subscription.topicName(), qos);
             grantedQos.add(qos);
             replayRetained(ctx.channel(), subscription.topicName());
+            LOG.info(() -> "[SUBSCRIBE] clientId=" + clientId + ", topicFilter=" + subscription.topicName() + ", qos=" + qos);
         }
 
         MqttMessageBuilders.SubAckBuilder subAckBuilder = MqttMessageBuilders.subAck()
-            .packetId(message.variableHeader().messageId());
-        grantedQos.forEach(subAckBuilder::addGrantedQos);
+                .packetId(message.variableHeader().messageId());
+
+        grantedQos.forEach(qos -> {
+            MqttQoS mqttQoS = MqttQoS.valueOf(qos);
+            subAckBuilder.addGrantedQos(mqttQoS);
+        });
         ctx.writeAndFlush(subAckBuilder.build());
     }
 
@@ -149,6 +166,7 @@ public class SimpleBrokerMessageHandler implements BrokerMessageHandler {
 
         message.payload().topics().forEach(topicFilter -> subscriptionRegistry.unsubscribe(clientId, topicFilter));
         ctx.writeAndFlush(MqttMessageBuilders.unsubAck().packetId(message.variableHeader().messageId()).build());
+        LOG.info(() -> "[UNSUBSCRIBE] clientId=" + clientId + ", topics=" + message.payload().topics());
     }
 
     private void handlePublish(ChannelHandlerContext ctx, MqttPublishMessage message) {
@@ -161,6 +179,8 @@ public class SimpleBrokerMessageHandler implements BrokerMessageHandler {
         }
 
         routeMessage(topic, payload);
+        LOG.info(() -> "[PUBLISH] clientId=" + currentClientId(ctx.channel()) + ", topic=" + topic
+                + ", qos=" + qos + ", retain=" + message.fixedHeader().isRetain() + ", bytes=" + payload.length);
 
         if (qos == 1) {
             ctx.writeAndFlush(MqttMessageBuilders.pubAck().packetId(message.variableHeader().packetId()).build());
@@ -169,6 +189,7 @@ public class SimpleBrokerMessageHandler implements BrokerMessageHandler {
 
     private void routeMessage(String topic, byte[] payload) {
         Set<String> subscribers = subscriptionRegistry.findSubscribers(topic);
+        LOG.fine(() -> "[ROUTE] topic=" + topic + ", subscribers=" + subscribers.size());
         for (String subscriber : subscribers) {
             Optional<ClientSession> sessionOptional = sessionRegistry.get(subscriber);
             if (sessionOptional.isEmpty()) {
@@ -181,11 +202,11 @@ public class SimpleBrokerMessageHandler implements BrokerMessageHandler {
             }
 
             channel.writeAndFlush(MqttMessageBuilders.publish()
-                .topicName(topic)
-                .retained(false)
-                .qos(MqttQoS.AT_MOST_ONCE)
-                .payload(Unpooled.wrappedBuffer(payload))
-                .build());
+                    .topicName(topic)
+                    .retained(false)
+                    .qos(MqttQoS.AT_MOST_ONCE)
+                    .payload(Unpooled.wrappedBuffer(payload))
+                    .build());
         }
     }
 
@@ -193,17 +214,17 @@ public class SimpleBrokerMessageHandler implements BrokerMessageHandler {
         List<RetainedMessage> retainedMessages = retainedMessageStore.findByTopicFilter(topicFilter);
         for (RetainedMessage retained : retainedMessages) {
             channel.writeAndFlush(MqttMessageBuilders.publish()
-                .topicName(retained.getTopic())
-                .retained(true)
-                .qos(MqttQoS.AT_MOST_ONCE)
-                .payload(Unpooled.wrappedBuffer(retained.getPayload()))
-                .build());
+                    .topicName(retained.getTopic())
+                    .retained(true)
+                    .qos(MqttQoS.AT_MOST_ONCE)
+                    .payload(Unpooled.wrappedBuffer(retained.getPayload()))
+                    .build());
         }
     }
 
     private void rejectConnection(ChannelHandlerContext ctx, MqttConnectReturnCode returnCode) {
         ctx.writeAndFlush(MqttMessageBuilders.connAck().sessionPresent(false).returnCode(returnCode).build())
-            .addListener(future -> ctx.close());
+                .addListener(future -> ctx.close());
     }
 
     private String currentClientId(Channel channel) {

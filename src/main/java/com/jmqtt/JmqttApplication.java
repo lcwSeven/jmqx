@@ -1,7 +1,3 @@
-/**
- * @author liucaiwen
- * @date 2026/4/2
- */
 package com.jmqtt;
 
 import com.jmqtt.broker.BrokerMessageHandler;
@@ -16,6 +12,10 @@ import com.jmqtt.store.InMemoryRetainedMessageStore;
 import com.jmqtt.store.RetainedMessageStore;
 import com.jmqtt.transport.NettyMqttServer;
 
+/**
+ * @author liucaiwen
+ * @date 2026/4/2
+ */
 public class JmqttApplication {
     public static void main(String[] args) throws InterruptedException {
         BrokerProperties brokerProperties = loadBrokerPropertiesFromSystem();

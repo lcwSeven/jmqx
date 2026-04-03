@@ -1,9 +1,9 @@
+package com.jmqtt.store;
+
 /**
  * @author liucaiwen
  * @date 2026/4/2
  */
-package com.jmqtt.store;
-
 public class RetainedMessage {
     private final String topic;
     private final byte[] payload;

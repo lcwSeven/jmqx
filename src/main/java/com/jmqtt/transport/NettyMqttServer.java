@@ -1,7 +1,3 @@
-/**
- * @author liucaiwen
- * @date 2026/4/2
- */
 package com.jmqtt.transport;
 
 import com.jmqtt.broker.BrokerMessageHandler;
@@ -18,7 +14,15 @@ import io.netty.handler.codec.mqtt.MqttDecoder;
 import io.netty.handler.codec.mqtt.MqttEncoder;
 import io.netty.handler.timeout.IdleStateHandler;
 
+import java.util.logging.Logger;
+
+/**
+ * @author liucaiwen
+ * @date 2026/4/2
+ */
 public class NettyMqttServer {
+    private static final Logger LOG = Logger.getLogger(NettyMqttServer.class.getName());
+
     private final BrokerProperties properties;
     private final BrokerMessageHandler brokerMessageHandler;
 
@@ -57,20 +61,24 @@ public class NettyMqttServer {
             });
 
         serverChannel = bootstrap.bind(properties.getHost(), properties.getPort()).sync().channel();
+        LOG.info(() -> "[SERVER] started on " + properties.getHost() + ":" + properties.getPort());
     }
 
     public synchronized void stop() {
         if (serverChannel != null) {
             serverChannel.close();
             serverChannel = null;
+            LOG.info("[SERVER] channel closed");
         }
         if (workerGroup != null) {
             workerGroup.shutdownGracefully();
             workerGroup = null;
+            LOG.info("[SERVER] worker group stopped");
         }
         if (bossGroup != null) {
             bossGroup.shutdownGracefully();
             bossGroup = null;
+            LOG.info("[SERVER] boss group stopped");
         }
     }
 }

@@ -1,7 +1,3 @@
-/**
- * @author liucaiwen
- * @date 2026/4/2
- */
 package com.jmqtt.router;
 
 import com.jmqtt.common.TopicMatcher;
@@ -12,6 +8,10 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
+/**
+ * @author liucaiwen
+ * @date 2026/4/2
+ */
 public class InMemorySubscriptionRegistry implements SubscriptionRegistry {
     private final ConcurrentMap<String, ConcurrentMap<String, Integer>> subscriptionsByClient = new ConcurrentHashMap<>();
 
