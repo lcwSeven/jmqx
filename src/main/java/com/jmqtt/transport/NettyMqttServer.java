@@ -7,7 +7,8 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
-import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
+import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.handler.codec.mqtt.MqttDecoder;
@@ -40,10 +41,10 @@ public class NettyMqttServer {
             return;
         }
 
-        bossGroup = new NioEventLoopGroup(properties.getBossThreads());
-        workerGroup = properties.getWorkerThreads() > 0
-            ? new NioEventLoopGroup(properties.getWorkerThreads())
-            : new NioEventLoopGroup();
+        bossGroup = new MultiThreadIoEventLoopGroup(properties.getBossThreads(), NioIoHandler.newFactory());
+        int workerThreads = Math.max(properties.getWorkerThreads(), 0);
+        int readerIdleSeconds = Math.max(properties.getReaderIdleSeconds(), 0);
+        workerGroup = new MultiThreadIoEventLoopGroup(workerThreads, NioIoHandler.newFactory());
 
         ServerBootstrap bootstrap = new ServerBootstrap()
             .group(bossGroup, workerGroup)
@@ -53,7 +54,7 @@ public class NettyMqttServer {
                 @Override
                 protected void initChannel(SocketChannel ch) {
                     ch.pipeline()
-                        .addLast("idle-state", new IdleStateHandler(120, 0, 0))
+                        .addLast("idle-state", new IdleStateHandler(readerIdleSeconds, 0, 0))
                         .addLast("mqtt-decoder", new MqttDecoder())
                         .addLast("mqtt-encoder", MqttEncoder.INSTANCE)
                         .addLast("mqtt-handler", new NettyMqttChannelHandler(brokerMessageHandler));
@@ -61,7 +62,8 @@ public class NettyMqttServer {
             });
 
         serverChannel = bootstrap.bind(properties.getHost(), properties.getPort()).sync().channel();
-        LOG.info(() -> "[SERVER] started on " + properties.getHost() + ":" + properties.getPort());
+        LOG.info(() -> "[SERVER] started on " + properties.getHost() + ":" + properties.getPort()
+            + ", readerIdleSeconds=" + readerIdleSeconds);
     }
 
     public synchronized void stop() {

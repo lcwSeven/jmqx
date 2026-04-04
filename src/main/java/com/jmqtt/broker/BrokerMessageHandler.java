@@ -10,7 +10,7 @@ import io.netty.handler.codec.mqtt.MqttMessage;
  */
 public interface BrokerMessageHandler {
     /**
-     * 处理消息
+     * 处理连接消息
      * @param ctx ctx
      * @param message 消息
      */

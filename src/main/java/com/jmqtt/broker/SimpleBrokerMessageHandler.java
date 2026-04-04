@@ -1,5 +1,8 @@
 package com.jmqtt.broker;
 
+import com.jmqtt.acl.AclAction;
+import com.jmqtt.acl.AclAuthorizer;
+import com.jmqtt.acl.AclRequest;
 import com.jmqtt.protocol.ClientAuthenticator;
 import com.jmqtt.router.SubscriptionRegistry;
 import com.jmqtt.session.ClientSession;
@@ -44,16 +47,19 @@ public class SimpleBrokerMessageHandler implements BrokerMessageHandler {
     private final SubscriptionRegistry subscriptionRegistry;
     private final RetainedMessageStore retainedMessageStore;
     private final ClientAuthenticator clientAuthenticator;
+    private final AclAuthorizer aclAuthorizer;
 
     public SimpleBrokerMessageHandler(
             SessionRegistry sessionRegistry,
             SubscriptionRegistry subscriptionRegistry,
             RetainedMessageStore retainedMessageStore,
-            ClientAuthenticator clientAuthenticator) {
+            ClientAuthenticator clientAuthenticator,
+            AclAuthorizer aclAuthorizer) {
         this.sessionRegistry = sessionRegistry;
         this.subscriptionRegistry = subscriptionRegistry;
         this.retainedMessageStore = retainedMessageStore;
         this.clientAuthenticator = clientAuthenticator;
+        this.aclAuthorizer = aclAuthorizer;
     }
 
     @Override
@@ -140,11 +146,16 @@ public class SimpleBrokerMessageHandler implements BrokerMessageHandler {
 
         List<Integer> grantedQos = new ArrayList<>();
         for (MqttTopicSubscription subscription : message.payload().topicSubscriptions()) {
+            if (!isAllowed(clientId, subscription.topicFilter(), AclAction.SUBSCRIBE)) {
+                grantedQos.add(MqttQoS.FAILURE.value());
+                LOG.warning(() -> "[ACL] subscribe denied clientId=" + clientId + ", topicFilter=" + subscription.topicFilter());
+                continue;
+            }
             int qos = Math.min(subscription.qualityOfService().value(), 1);
-            subscriptionRegistry.subscribe(clientId, subscription.topicName(), qos);
+            subscriptionRegistry.subscribe(clientId, subscription.topicFilter(), qos);
             grantedQos.add(qos);
-            replayRetained(ctx.channel(), subscription.topicName());
-            LOG.info(() -> "[SUBSCRIBE] clientId=" + clientId + ", topicFilter=" + subscription.topicName() + ", qos=" + qos);
+            replayRetained(ctx.channel(), subscription.topicFilter());
+            LOG.info(() -> "[SUBSCRIBE] clientId=" + clientId + ", topicFilter=" + subscription.topicFilter() + ", qos=" + qos);
         }
 
         MqttMessageBuilders.SubAckBuilder subAckBuilder = MqttMessageBuilders.subAck()
@@ -173,13 +184,22 @@ public class SimpleBrokerMessageHandler implements BrokerMessageHandler {
         String topic = message.variableHeader().topicName();
         byte[] payload = ByteBufUtil.getBytes(message.payload());
         int qos = message.fixedHeader().qosLevel().value();
+        String clientId = currentClientId(ctx.channel());
+
+        if (!isAllowed(clientId, topic, AclAction.PUBLISH)) {
+            LOG.warning(() -> "[ACL] publish denied clientId=" + clientId + ", topic=" + topic);
+            if (qos == 1) {
+                ctx.writeAndFlush(MqttMessageBuilders.pubAck().packetId(message.variableHeader().packetId()).build());
+            }
+            return;
+        }
 
         if (message.fixedHeader().isRetain()) {
             retainedMessageStore.saveOrRemove(new RetainedMessage(topic, payload, qos, true));
         }
 
         routeMessage(topic, payload);
-        LOG.info(() -> "[PUBLISH] clientId=" + currentClientId(ctx.channel()) + ", topic=" + topic
+        LOG.info(() -> "[PUBLISH] clientId=" + clientId + ", topic=" + topic
                 + ", qos=" + qos + ", retain=" + message.fixedHeader().isRetain() + ", bytes=" + payload.length);
 
         if (qos == 1) {
@@ -233,5 +253,10 @@ public class SimpleBrokerMessageHandler implements BrokerMessageHandler {
             return null;
         }
         return clientId;
+    }
+
+    private boolean isAllowed(String clientId, String topic, AclAction action) {
+        String username = clientId == null ? null : sessionRegistry.get(clientId).map(ClientSession::getUsername).orElse(null);
+        return aclAuthorizer.isAllowed(new AclRequest(clientId, username, topic, action));
     }
 }

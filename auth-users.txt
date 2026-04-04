@@ -1,0 +1,4 @@
+# username:password
+admin:admin123
+alice:alice123
+guest:guest123

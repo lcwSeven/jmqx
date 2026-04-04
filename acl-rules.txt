@@ -1,0 +1,10 @@
+# effect action username topicFilter
+# action: publish | subscribe | *
+# username: specific username or *
+# topicFilter: mqtt topic filter (+/#), '*' means all topics
+
+allow publish alice sensor/#
+allow subscribe alice sensor/#
+deny publish guest secure/#
+deny subscribe guest secure/#
+allow * * #

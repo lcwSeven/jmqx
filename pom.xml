@@ -11,7 +11,7 @@
     <properties>
         <java.version>17</java.version>
         <maven.compiler.release>${java.version}</maven.compiler.release>
-        <netty.version>4.1.108.Final</netty.version>
+        <netty.version>4.2.5.Final</netty.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
 

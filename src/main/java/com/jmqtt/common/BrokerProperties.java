@@ -9,6 +9,7 @@ public class BrokerProperties {
     private int port = 1883;
     private int bossThreads = 1;
     private int workerThreads = 0;
+    private int readerIdleSeconds = 120;
 
     public String getHost() {
         return host;
@@ -40,5 +41,13 @@ public class BrokerProperties {
 
     public void setWorkerThreads(int workerThreads) {
         this.workerThreads = workerThreads;
+    }
+
+    public int getReaderIdleSeconds() {
+        return readerIdleSeconds;
+    }
+
+    public void setReaderIdleSeconds(int readerIdleSeconds) {
+        this.readerIdleSeconds = readerIdleSeconds;
     }
 }
