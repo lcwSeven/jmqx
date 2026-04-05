@@ -1,0 +1,64 @@
+package com.jmqtt.admin;
+
+import java.util.List;
+
+/**
+ * @author liucaiwen
+ * @date 2026/4/5
+ */
+public class AdminClientDetailResponse {
+    private String clientId;
+    private long onlineAtEpochMillis;
+    private String username;
+    private String serviceNodeIp;
+    private int keepAliveSeconds;
+    private List<AdminClientSubscriptionResponse> subscriptions;
+
+    public String getClientId() {
+        return clientId;
+    }
+
+    public void setClientId(String clientId) {
+        this.clientId = clientId;
+    }
+
+    public long getOnlineAtEpochMillis() {
+        return onlineAtEpochMillis;
+    }
+
+    public void setOnlineAtEpochMillis(long onlineAtEpochMillis) {
+        this.onlineAtEpochMillis = onlineAtEpochMillis;
+    }
+
+    public String getUsername() {
+        return username;
+    }
+
+    public void setUsername(String username) {
+        this.username = username;
+    }
+
+    public String getServiceNodeIp() {
+        return serviceNodeIp;
+    }
+
+    public void setServiceNodeIp(String serviceNodeIp) {
+        this.serviceNodeIp = serviceNodeIp;
+    }
+
+    public int getKeepAliveSeconds() {
+        return keepAliveSeconds;
+    }
+
+    public void setKeepAliveSeconds(int keepAliveSeconds) {
+        this.keepAliveSeconds = keepAliveSeconds;
+    }
+
+    public List<AdminClientSubscriptionResponse> getSubscriptions() {
+        return subscriptions;
+    }
+
+    public void setSubscriptions(List<AdminClientSubscriptionResponse> subscriptions) {
+        this.subscriptions = subscriptions;
+    }
+}

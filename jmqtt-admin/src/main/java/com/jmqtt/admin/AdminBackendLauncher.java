@@ -1,5 +1,7 @@
 package com.jmqtt.admin;
 
+import com.jmqtt.router.SubscriptionRegistry;
+import com.jmqtt.session.SessionRegistry;
 import com.jmqtt.transport.ConnectionMetrics;
 import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.builder.SpringApplicationBuilder;
@@ -16,16 +18,22 @@ public class AdminBackendLauncher {
     private final AdminProperties adminProperties;
     private final ConnectionMetrics connectionMetrics;
     private final RuntimeConfigService runtimeConfigService;
+    private final SessionRegistry sessionRegistry;
+    private final SubscriptionRegistry subscriptionRegistry;
     private ConfigurableApplicationContext context;
 
     public AdminBackendLauncher(
         AdminProperties adminProperties,
         ConnectionMetrics connectionMetrics,
-        RuntimeConfigService runtimeConfigService
+        RuntimeConfigService runtimeConfigService,
+        SessionRegistry sessionRegistry,
+        SubscriptionRegistry subscriptionRegistry
     ) {
         this.adminProperties = adminProperties;
         this.connectionMetrics = connectionMetrics;
         this.runtimeConfigService = runtimeConfigService;
+        this.sessionRegistry = sessionRegistry;
+        this.subscriptionRegistry = subscriptionRegistry;
     }
 
     public synchronized void start() {
@@ -44,7 +52,7 @@ public class AdminBackendLauncher {
             .initializers(appContext ->
                 appContext.getBeanFactory().registerSingleton(
                     "adminBackendState",
-                    new AdminBackendState(connectionMetrics, runtimeConfigService)
+                    new AdminBackendState(connectionMetrics, runtimeConfigService, sessionRegistry, subscriptionRegistry)
                 )
             )
             .run();

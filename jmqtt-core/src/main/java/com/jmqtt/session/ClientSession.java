@@ -13,13 +13,25 @@ public class ClientSession {
     private final Channel channel;
     private final boolean cleanSession;
     private final String username;
+    private final String serviceNodeIp;
+    private final int keepAliveSeconds;
     private final Instant connectedAt;
 
-    public ClientSession(String clientId, Channel channel, boolean cleanSession, String username, Instant connectedAt) {
+    public ClientSession(
+        String clientId,
+        Channel channel,
+        boolean cleanSession,
+        String username,
+        String serviceNodeIp,
+        int keepAliveSeconds,
+        Instant connectedAt
+    ) {
         this.clientId = clientId;
         this.channel = channel;
         this.cleanSession = cleanSession;
         this.username = username;
+        this.serviceNodeIp = serviceNodeIp;
+        this.keepAliveSeconds = keepAliveSeconds;
         this.connectedAt = connectedAt;
     }
 
@@ -37,6 +49,14 @@ public class ClientSession {
 
     public String getUsername() {
         return username;
+    }
+
+    public String getServiceNodeIp() {
+        return serviceNodeIp;
+    }
+
+    public int getKeepAliveSeconds() {
+        return keepAliveSeconds;
     }
 
     public Instant getConnectedAt() {

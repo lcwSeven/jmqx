@@ -1,5 +1,7 @@
 package com.jmqtt.session;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -22,6 +24,11 @@ public class InMemorySessionRegistry implements SessionRegistry {
     @Override
     public Optional<ClientSession> get(String clientId) {
         return Optional.ofNullable(sessions.get(clientId));
+    }
+
+    @Override
+    public List<ClientSession> list() {
+        return new ArrayList<>(sessions.values());
     }
 
     @Override

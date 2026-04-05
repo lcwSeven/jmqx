@@ -1,5 +1,6 @@
 package com.jmqtt.session;
 
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -10,6 +11,8 @@ public interface SessionRegistry {
     void register(ClientSession session);
 
     Optional<ClientSession> get(String clientId);
+
+    List<ClientSession> list();
 
     void remove(String clientId);
 }

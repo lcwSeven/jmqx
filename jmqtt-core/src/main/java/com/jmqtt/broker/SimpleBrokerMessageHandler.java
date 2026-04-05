@@ -29,6 +29,10 @@ import io.netty.handler.codec.mqtt.MqttTopicSubscription;
 import io.netty.handler.codec.mqtt.MqttUnsubscribeMessage;
 import io.netty.util.AttributeKey;
 
+import java.net.Inet4Address;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.SocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -132,7 +136,17 @@ public class SimpleBrokerMessageHandler implements BrokerMessageHandler, BrokerC
         }
 
         boolean cleanSession = message.variableHeader().isCleanSession();
-        sessionRegistry.register(new ClientSession(clientId, ctx.channel(), cleanSession, username, Instant.now()));
+        int keepAliveSeconds = Math.max(message.variableHeader().keepAliveTimeSeconds(), 0);
+        String serviceNodeIp = resolveServiceNodeIp(ctx.channel());
+        sessionRegistry.register(new ClientSession(
+            clientId,
+            ctx.channel(),
+            cleanSession,
+            username,
+            serviceNodeIp,
+            keepAliveSeconds,
+            Instant.now()
+        ));
         ctx.channel().attr(CLIENT_ID).set(clientId);
         ctx.channel().attr(CLEAN_SESSION).set(cleanSession);
 
@@ -140,7 +154,11 @@ public class SimpleBrokerMessageHandler implements BrokerMessageHandler, BrokerC
                 .sessionPresent(false)
                 .returnCode(MqttConnectReturnCode.CONNECTION_ACCEPTED)
                 .build());
-        LOG.info(() -> "[CONNECT] accepted clientId=" + clientId + ", cleanSession=" + cleanSession);
+        LOG.info(() -> "[CONNECT] accepted clientId=" + clientId
+            + ", username=" + username
+            + ", serviceNodeIp=" + serviceNodeIp
+            + ", cleanSession=" + cleanSession
+            + ", keepAliveSeconds=" + keepAliveSeconds);
     }
 
     /**
@@ -271,6 +289,34 @@ public class SimpleBrokerMessageHandler implements BrokerMessageHandler, BrokerC
     private boolean allowed(String clientId, String topic, AclAction action) {
         String username = clientId == null ? null : sessionRegistry.get(clientId).map(ClientSession::getUsername).orElse(null);
         return !aclAuthorizer.isAllowed(new AclRequest(clientId, username, topic, action));
+    }
+
+    private String resolveServiceNodeIp(Channel channel) {
+        String preferred = System.getProperty("jmqtt.node.ip");
+        if (preferred == null || preferred.isBlank()) {
+            preferred = System.getenv("JMQTT_NODE_IP");
+        }
+        if (preferred != null && !preferred.isBlank()) {
+            return preferred.trim();
+        }
+
+        SocketAddress localAddress = channel.localAddress();
+        if (localAddress instanceof InetSocketAddress inetSocketAddress) {
+            InetAddress inetAddress = inetSocketAddress.getAddress();
+            if (inetAddress != null && !inetAddress.isAnyLocalAddress()) {
+                return inetAddress.getHostAddress();
+            }
+        }
+
+        try {
+            InetAddress localHost = InetAddress.getLocalHost();
+            if (localHost instanceof Inet4Address) {
+                return localHost.getHostAddress();
+            }
+            return localHost.getHostAddress();
+        } catch (Exception ignored) {
+            return "unknown";
+        }
     }
 
     @Override

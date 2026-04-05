@@ -7,8 +7,7 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
-import io.netty.channel.MultiThreadIoEventLoopGroup;
-import io.netty.channel.nio.NioIoHandler;
+import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.handler.codec.mqtt.MqttDecoder;
@@ -23,6 +22,7 @@ import java.util.logging.Logger;
  */
 public class NettyMqttServer {
     private static final Logger LOG = Logger.getLogger(NettyMqttServer.class.getName());
+    private static final int MAX_MQTT_MESSAGE_SIZE = 256 * 1024;
 
     private final BrokerProperties properties;
     private final BrokerMessageHandler brokerMessageHandler;
@@ -47,10 +47,10 @@ public class NettyMqttServer {
             return;
         }
 
-        bossGroup = new MultiThreadIoEventLoopGroup(properties.getBossThreads(), NioIoHandler.newFactory());
+        bossGroup = new NioEventLoopGroup(properties.getBossThreads());
         int workerThreads = Math.max(properties.getWorkerThreads(), 0);
         int readerIdleSeconds = Math.max(properties.getReaderIdleSeconds(), 0);
-        workerGroup = new MultiThreadIoEventLoopGroup(workerThreads, NioIoHandler.newFactory());
+        workerGroup = new NioEventLoopGroup(workerThreads);
 
         ServerBootstrap bootstrap = new ServerBootstrap()
             .group(bossGroup, workerGroup)
@@ -61,7 +61,7 @@ public class NettyMqttServer {
                 protected void initChannel(SocketChannel ch) {
                     ch.pipeline()
                         .addLast("idle-state", new IdleStateHandler(readerIdleSeconds, 0, 0))
-                        .addLast("mqtt-decoder", new MqttDecoder())
+                        .addLast("mqtt-decoder", new MqttDecoder(MAX_MQTT_MESSAGE_SIZE))
                         .addLast("mqtt-encoder", MqttEncoder.INSTANCE)
                         .addLast("mqtt-handler", new NettyMqttChannelHandler(brokerMessageHandler, connectionMetrics));
                 }

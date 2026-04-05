@@ -83,7 +83,13 @@ public class JmqttApplication {
 
         AdminBackendLauncher adminBackendLauncher = null;
         if (adminProperties.isEnabled()) {
-            adminBackendLauncher = new AdminBackendLauncher(adminProperties, connectionMetrics, runtimeConfigService);
+            adminBackendLauncher = new AdminBackendLauncher(
+                adminProperties,
+                connectionMetrics,
+                runtimeConfigService,
+                sessionRegistry,
+                subscriptionRegistry
+            );
             adminBackendLauncher.start();
         }
 
@@ -105,7 +111,9 @@ public class JmqttApplication {
         System.out.println("CLUSTER enabled=" + clusterProperties.isEnabled() + ", nodeId=" + clusterProperties.getNodeId()
             + ", role=" + clusterProperties.getRole() + ", busType=" + clusterProperties.getBusType());
         if (adminProperties.isEnabled()) {
-            System.out.println("ADMIN panel: http://" + adminProperties.getHost() + ":" + adminProperties.getPort());
+            String adminDisplayHost = toDisplayHost(adminProperties.getHost());
+            System.out.println("ADMIN panel: http://" + adminDisplayHost + ":" + adminProperties.getPort());
+            System.out.println("ADMIN API: http://" + adminDisplayHost + ":" + adminProperties.getPort() + "/api/admin/status");
         }
 
         Thread.currentThread().join();
@@ -226,6 +234,16 @@ public class JmqttApplication {
             return defaultValue;
         }
         return raw;
+    }
+
+    private static String toDisplayHost(String host) {
+        if (host == null || host.isBlank()) {
+            return "127.0.0.1";
+        }
+        if ("0.0.0.0".equals(host) || "::".equals(host) || "::0".equals(host) || "*".equals(host)) {
+            return "127.0.0.1";
+        }
+        return host;
     }
 
     private static int getIntProperty(Properties config, String key, int defaultValue) {
