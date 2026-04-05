@@ -1,21 +1,20 @@
 # jmqtt
 
-`jmqtt` 是一个基于 Java + Netty 的 MQTT Broker 单模块工程。
+`jmqtt` 是一个基于 Java + Netty 的 MQTT Broker 多模块工程。
 
 ## 项目结构分析
 
-- `src/main/java/com/jmqtt/common`: 通用配置与工具类（如 `BrokerProperties`、Topic 匹配器）。
-- `src/main/java/com/jmqtt/protocol`: 协议扩展点（当前提供 `ClientAuthenticator` 认证接口）。
-- `src/main/java/com/jmqtt/session`: 客户端会话管理（`SessionRegistry` + 内存实现）。
-- `src/main/java/com/jmqtt/router`: 订阅路由管理（topic filter 到 clientId 的匹配）。
-- `src/main/java/com/jmqtt/store`: retained message 存储（内存实现）。
-- `src/main/java/com/jmqtt/broker`: MQTT 协议处理核心（CONNECT / SUBSCRIBE / PUBLISH / PINGREQ / DISCONNECT）。
-- `src/main/java/com/jmqtt/transport`: Netty TCP Server 与 MQTT 编解码、消息分发。
-- `src/main/java/com/jmqtt/JmqttApplication.java`: 程序启动入口。
+- `jmqtt-common`: 通用配置与工具类（`com.jmqtt.common`）。
+- `jmqtt-protocol`: 协议接口定义（`com.jmqtt.protocol`）。
+- `jmqtt-plugin`: Auth/ACL 插件实现与工厂（`com.jmqtt.auth`、`com.jmqtt.acl`）。
+- `jmqtt-core`: Broker 核心、会话、路由、存储、集群协调（`com.jmqtt.broker`、`session/router/store/cluster`）。
+- `jmqtt-transport`: Netty TCP 接入与连接指标（`com.jmqtt.transport`）。
+- `jmqtt-admin`: 管理后台模块（后端 SpringBoot + 前端 React）。
+- `jmqtt-app`: 启动装配模块（`com.jmqtt.JmqttApplication` + `jmqtt.properties`）。
 
 ## 当前已填充能力
 
-- 单模块 Maven 结构。
+- Maven 多模块结构。
 - 可启动的 MQTT TCP 服务端（默认 `0.0.0.0:1883`）。
 - 支持消息流程：
   - CONNECT + CONNACK
@@ -34,14 +33,116 @@
 
 ```bash
 mvn -DskipTests compile
-mvn exec:java
+mvn -pl jmqtt-app -am exec:java
 ```
 
 ## 配置
 
-默认配置文件：`src/main/resources/jmqtt.properties`
+默认配置文件：`jmqtt-app/src/main/resources/jmqtt.properties`
 
 配置优先级：`JVM 参数 > jmqtt.properties > 代码默认值`。
+
+## 管理后台
+
+管理后台采用前后端分离架构：
+
+- 后端：SpringBoot（模块 `jmqtt-admin`）
+- 前端：React（目录 `jmqtt-admin/frontend`）
+
+后端用于展示当前连接数，并支持在线修改：
+
+- `auth` 鉴权类型
+- `auth` 缓存时间（毫秒）
+- `acl` 鉴权类型
+- `acl` 缓存时间（毫秒）
+
+配置：
+
+```bash
+-Djmqtt.admin.enabled=true
+-Djmqtt.admin.host=0.0.0.0
+-Djmqtt.admin.port=18083
+```
+
+后端接口地址：`http://{host}:{port}/api/admin`
+
+后端运行方式：
+
+```bash
+mvn -pl jmqtt-app -am exec:java
+```
+
+前端运行方式：
+
+```bash
+cd jmqtt-admin/frontend
+npm install
+npm run dev
+```
+
+前端默认请求 `http://127.0.0.1:18083/api/admin`，也可以通过环境变量覆盖：
+
+```bash
+VITE_ADMIN_API_BASE=http://127.0.0.1:18083/api/admin
+```
+
+## 集群架构设计（多主多从）
+
+### 目标
+
+- 多节点横向扩展，任意主节点可接入客户端（多主）
+- 从节点用于故障切换与扩展读流量（多从）
+- 节点间消息复制与状态同步
+
+### 架构分层
+
+1. 接入层（MQTT Gateway）
+- 每个节点都提供 MQTT 接入能力
+- 建议前置 LB 做 4 层转发，生产环境开启粘性会话
+
+2. 数据层（路由与会话）
+- 会话状态、订阅关系、Retained 建议外部化（Redis/DB）
+- 离线消息与 QoS 状态建议用持久化存储（Redis Stream/Kafka/DB）
+
+3. 集群复制层（Cluster Bus）
+- 节点把本地发布消息复制到 Cluster Bus
+- 其他节点消费后投递给本地在线订阅者
+- 当前代码已提供总线抽象与协调器，默认 `local` 实现
+
+4. 控制层（管理与配置）
+- 管理后台用于查看连接数、在线调整鉴权类型和缓存
+- 后续可扩展为节点发现、配置中心、滚动发布
+
+### 一致性与角色建议
+
+- 元数据（订阅拓扑、节点信息）建议强一致（Raft/etcd）
+- 消息分发建议最终一致（低延迟优先）
+- 角色：
+  - `MASTER`：正常承载读写流量
+  - `SLAVE`：热备/只读或低优先级流量（按策略接流）
+
+### 当前代码已落地
+
+- 集群配置：
+  - `jmqtt.cluster.enabled`
+  - `jmqtt.cluster.nodeId`
+  - `jmqtt.cluster.role`
+  - `jmqtt.cluster.busType`
+  - `jmqtt.cluster.seedNodes`
+- 新增集群核心类（`com.jmqtt.cluster`）：
+  - `ClusterCoordinator`
+  - `ClusterMessageBus`
+  - `ClusterReplicator`
+  - `LocalClusterMessageBus`
+  - `ReloadableClusterReplicator`
+- Broker 已接入跨节点发布复制与远端消息本地投递入口
+
+### 下一步演进建议
+
+1. 增加 `redis` 或 `kafka` 的 `ClusterMessageBus` 实现（替代 `local`）
+2. 把 `SessionRegistry/SubscriptionRegistry/RetainedStore` 切换为分布式实现
+3. 引入节点注册与健康检查（心跳 + 剔除）
+4. 为跨节点消息增加去重键（messageId + sourceNodeId）和监控指标
 
 可通过 JVM 参数覆盖默认监听地址与端口：
 
@@ -69,10 +170,10 @@ Broker 已支持认证插件化，内置 5 种类型：
 
 ```bash
 -Djmqtt.auth.type=allow_all|http|file|redis|db
--Djmqtt.auth.cacheSeconds=60
+-Djmqtt.auth.cacheMillis=60000
 ```
 
-`jmqtt.auth.cacheSeconds` 为认证结果本地缓存秒数，默认 `60`；设为 `0` 可关闭缓存。
+`jmqtt.auth.cacheMillis` 为认证结果本地缓存毫秒数，默认 `60000`；设为 `0` 可关闭缓存。
 
 ### HTTP Auth
 
@@ -153,10 +254,10 @@ Broker 已支持 ACL 插件化，内置 4 种类型：
 ```bash
 -Djmqtt.acl.type=allow_all|http|redis|file
 -Djmqtt.acl.defaultAllow=false
--Djmqtt.acl.cacheSeconds=60
+-Djmqtt.acl.cacheMillis=60000
 ```
 
-`jmqtt.acl.cacheSeconds` 为 ACL 本地缓存秒数，默认 `60`；设为 `0` 可关闭缓存。
+`jmqtt.acl.cacheMillis` 为 ACL 本地缓存毫秒数，默认 `60000`；设为 `0` 可关闭缓存。
 
 ### HTTP ACL
 
