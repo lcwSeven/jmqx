@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 const apiBase = import.meta.env.VITE_ADMIN_API_BASE || "http://127.0.0.1:18083/api/admin";
 
 export default function App() {
-  const [menu, setMenu] = useState("overview");
+  const [menu, setMenu] = useState("clients");
   const [status, setStatus] = useState({
     connections: 0,
     authType: "-",
@@ -88,13 +88,7 @@ export default function App() {
     setUsernameQuery(usernameQueryInput.trim());
   }
 
-  async function submit() {
-    const payload = {};
-    if (form.authType) payload.authType = form.authType;
-    if (form.authCacheMillis !== "") payload.authCacheMillis = Number(form.authCacheMillis);
-    if (form.aclType) payload.aclType = form.aclType;
-    if (form.aclCacheMillis !== "") payload.aclCacheMillis = Number(form.aclCacheMillis);
-
+  async function submit(payload) {
     try {
       const resp = await fetch(`${apiBase}/config`, {
         method: "POST",
@@ -111,6 +105,20 @@ export default function App() {
     }
   }
 
+  async function submitAuthConfig() {
+    const payload = {};
+    if (form.authType) payload.authType = form.authType;
+    if (form.authCacheMillis !== "") payload.authCacheMillis = Number(form.authCacheMillis);
+    await submit(payload);
+  }
+
+  async function submitAclConfig() {
+    const payload = {};
+    if (form.aclType) payload.aclType = form.aclType;
+    if (form.aclCacheMillis !== "") payload.aclCacheMillis = Number(form.aclCacheMillis);
+    await submit(payload);
+  }
+
   function formatTime(epochMillis) {
     if (!epochMillis || Number.isNaN(epochMillis)) {
       return "-";
@@ -123,27 +131,33 @@ export default function App() {
       <aside className="sidebar">
         <div className="brand">JMQTT Admin</div>
         <button
-          className={`menu-item ${menu === "overview" ? "active" : ""}`}
-          onClick={() => setMenu("overview")}
-        >
-          系统配置
-        </button>
-        <button
           className={`menu-item ${menu === "clients" ? "active" : ""}`}
           onClick={() => setMenu("clients")}
         >
           客户端列表
         </button>
+        <div className="menu-group-title">安全设置</div>
+        <button
+          className={`submenu-item ${menu === "acl-auth" ? "active" : ""}`}
+          onClick={() => setMenu("acl-auth")}
+        >
+          ACL 鉴权
+        </button>
+        <button
+          className={`submenu-item ${menu === "conn-auth" ? "active" : ""}`}
+          onClick={() => setMenu("conn-auth")}
+        >
+          连接鉴权
+        </button>
       </aside>
 
       <main className="content">
-        {menu === "overview" ? (
+        {menu === "conn-auth" ? (
           <>
-            <h1>系统配置</h1>
+            <h1>连接鉴权</h1>
             <div className="card">
               <div>连接数: <strong>{status.connections}</strong></div>
-              <div>Auth: <strong>{status.authType}</strong> (cache={status.authCacheMillis}ms)</div>
-              <div>ACL: <strong>{status.aclType}</strong> (cache={status.aclCacheMillis}ms)</div>
+              <div>当前鉴权: <strong>{status.authType}</strong> (cache={status.authCacheMillis}ms)</div>
             </div>
 
             <div className="card">
@@ -165,7 +179,18 @@ export default function App() {
                 onChange={(e) => setForm({ ...form, authCacheMillis: e.target.value })}
                 placeholder="例如 60000"
               />
+              <button className="primary-btn" onClick={() => void submitAuthConfig()}>保存连接鉴权配置</button>
+            </div>
+          </>
+        ) : menu === "acl-auth" ? (
+          <>
+            <h1>ACL 鉴权</h1>
+            <div className="card">
+              <div>连接数: <strong>{status.connections}</strong></div>
+              <div>当前 ACL: <strong>{status.aclType}</strong> (cache={status.aclCacheMillis}ms)</div>
+            </div>
 
+            <div className="card">
               <label>ACL 鉴权类型</label>
               <select value={form.aclType} onChange={(e) => setForm({ ...form, aclType: e.target.value })}>
                 <option value="">不修改</option>
@@ -183,8 +208,7 @@ export default function App() {
                 onChange={(e) => setForm({ ...form, aclCacheMillis: e.target.value })}
                 placeholder="例如 60000"
               />
-
-              <button className="primary-btn" onClick={() => void submit()}>保存配置</button>
+              <button className="primary-btn" onClick={() => void submitAclConfig()}>保存 ACL 配置</button>
             </div>
           </>
         ) : (

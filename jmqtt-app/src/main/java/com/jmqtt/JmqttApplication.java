@@ -28,6 +28,7 @@ import com.jmqtt.store.InMemoryRetainedMessageStore;
 import com.jmqtt.store.RetainedMessageStore;
 import com.jmqtt.transport.ConnectionMetrics;
 import com.jmqtt.transport.NettyMqttServer;
+import com.jmqtt.transport.NettyMqttWebSocketServer;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -80,6 +81,12 @@ public class JmqttApplication {
 
         NettyMqttServer mqttServer = new NettyMqttServer(brokerProperties, brokerMessageHandler, connectionMetrics);
         mqttServer.start();
+        NettyMqttWebSocketServer mqttWebSocketServer = new NettyMqttWebSocketServer(
+            brokerProperties,
+            brokerMessageHandler,
+            connectionMetrics
+        );
+        mqttWebSocketServer.start();
 
         AdminBackendLauncher adminBackendLauncher = null;
         if (adminProperties.isEnabled()) {
@@ -103,9 +110,15 @@ public class JmqttApplication {
             if (finalClusterCoordinator != null) {
                 finalClusterCoordinator.stop();
             }
+            mqttWebSocketServer.stop();
             mqttServer.stop();
         }));
         System.out.println("JMQTT started on " + brokerProperties.getHost() + ":" + brokerProperties.getPort());
+        if (brokerProperties.isWebsocketEnabled()) {
+            String wsHost = toDisplayHost(brokerProperties.getWebsocketHost());
+            String wsPath = normalizeWebsocketPath(brokerProperties.getWebsocketPath());
+            System.out.println("JMQTT websocket: ws://" + wsHost + ":" + brokerProperties.getWebsocketPort() + wsPath);
+        }
         System.out.println("AUTH plugin: " + authProperties.getType());
         System.out.println("ACL plugin: " + aclProperties.getType());
         System.out.println("CLUSTER enabled=" + clusterProperties.isEnabled() + ", nodeId=" + clusterProperties.getNodeId()
@@ -137,6 +150,26 @@ public class JmqttApplication {
         properties.setBossThreads(getIntProperty(config, "jmqtt.broker.bossThreads", properties.getBossThreads()));
         properties.setWorkerThreads(getIntProperty(config, "jmqtt.broker.workerThreads", properties.getWorkerThreads()));
         properties.setReaderIdleSeconds(getIntProperty(config, "jmqtt.broker.readerIdleSeconds", properties.getReaderIdleSeconds()));
+        properties.setWebsocketEnabled(getBooleanProperty(
+            config,
+            "jmqtt.broker.websocket.enabled",
+            properties.isWebsocketEnabled()
+        ));
+        properties.setWebsocketHost(getStringProperty(
+            config,
+            "jmqtt.broker.websocket.host",
+            properties.getWebsocketHost()
+        ));
+        properties.setWebsocketPort(getIntProperty(
+            config,
+            "jmqtt.broker.websocket.port",
+            properties.getWebsocketPort()
+        ));
+        properties.setWebsocketPath(getStringProperty(
+            config,
+            "jmqtt.broker.websocket.path",
+            properties.getWebsocketPath()
+        ));
         return properties;
     }
 
@@ -244,6 +277,16 @@ public class JmqttApplication {
             return "127.0.0.1";
         }
         return host;
+    }
+
+    private static String normalizeWebsocketPath(String path) {
+        if (path == null || path.isBlank()) {
+            return "/mqtt";
+        }
+        if (path.startsWith("/")) {
+            return path;
+        }
+        return "/" + path;
     }
 
     private static int getIntProperty(Properties config, String key, int defaultValue) {

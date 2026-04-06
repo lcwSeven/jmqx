@@ -6,6 +6,7 @@ import com.jmqtt.acl.AclRequest;
 import com.jmqtt.cluster.BrokerClusterReceiver;
 import com.jmqtt.cluster.ClusterPublishMessage;
 import com.jmqtt.cluster.ClusterReplicator;
+import com.jmqtt.common.SharedSubscription;
 import com.jmqtt.protocol.ClientAuthenticator;
 import com.jmqtt.router.SubscriptionRegistry;
 import com.jmqtt.session.ClientSession;
@@ -176,16 +177,18 @@ public class SimpleBrokerMessageHandler implements BrokerMessageHandler, BrokerC
 
         List<Integer> grantedQos = new ArrayList<>();
         for (MqttTopicSubscription subscription : message.payload().topicSubscriptions()) {
-            if (allowed(clientId, subscription.topicFilter(), AclAction.SUBSCRIBE)) {
+            String topicFilter = subscription.topicFilter();
+            String normalizedFilter = SharedSubscription.normalizeTopicFilter(topicFilter);
+            if (allowed(clientId, normalizedFilter, AclAction.SUBSCRIBE)) {
                 grantedQos.add(MqttQoS.FAILURE.value());
-                LOG.warning(() -> "[ACL] subscribe denied clientId=" + clientId + ", topicFilter=" + subscription.topicFilter());
+                LOG.warning(() -> "[ACL] subscribe denied clientId=" + clientId + ", topicFilter=" + topicFilter);
                 continue;
             }
             int qos = Math.min(subscription.qualityOfService().value(), 1);
-            subscriptionRegistry.subscribe(clientId, subscription.topicFilter(), qos);
+            subscriptionRegistry.subscribe(clientId, topicFilter, qos);
             grantedQos.add(qos);
-            replayRetained(ctx.channel(), subscription.topicFilter());
-            LOG.info(() -> "[SUBSCRIBE] clientId=" + clientId + ", topicFilter=" + subscription.topicFilter() + ", qos=" + qos);
+            replayRetained(ctx.channel(), normalizedFilter);
+            LOG.info(() -> "[SUBSCRIBE] clientId=" + clientId + ", topicFilter=" + topicFilter + ", qos=" + qos);
         }
 
         MqttMessageBuilders.SubAckBuilder subAckBuilder = MqttMessageBuilders.subAck()

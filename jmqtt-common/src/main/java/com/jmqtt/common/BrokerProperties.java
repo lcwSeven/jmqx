@@ -10,6 +10,10 @@ public class BrokerProperties {
     private int bossThreads = 1;
     private int workerThreads = 0;
     private int readerIdleSeconds = 120;
+    private boolean websocketEnabled = true;
+    private String websocketHost = "0.0.0.0";
+    private int websocketPort = 8083;
+    private String websocketPath = "/mqtt";
 
     public String getHost() {
         return host;
@@ -49,5 +53,37 @@ public class BrokerProperties {
 
     public void setReaderIdleSeconds(int readerIdleSeconds) {
         this.readerIdleSeconds = readerIdleSeconds;
+    }
+
+    public boolean isWebsocketEnabled() {
+        return websocketEnabled;
+    }
+
+    public void setWebsocketEnabled(boolean websocketEnabled) {
+        this.websocketEnabled = websocketEnabled;
+    }
+
+    public String getWebsocketHost() {
+        return websocketHost;
+    }
+
+    public void setWebsocketHost(String websocketHost) {
+        this.websocketHost = websocketHost;
+    }
+
+    public int getWebsocketPort() {
+        return websocketPort;
+    }
+
+    public void setWebsocketPort(int websocketPort) {
+        this.websocketPort = websocketPort;
+    }
+
+    public String getWebsocketPath() {
+        return websocketPath;
+    }
+
+    public void setWebsocketPath(String websocketPath) {
+        this.websocketPath = websocketPath;
     }
 }

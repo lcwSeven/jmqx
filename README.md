@@ -23,6 +23,7 @@
   - PINGREQ + PINGRESP
   - DISCONNECT / 连接断开时会话清理
 - 支持 retained message 的保存、删除（空 payload）与订阅回放。
+- 支持共享订阅（`$share/{group}/{topicFilter}`），同组内消息按轮询投递到一个客户端。
 - 提供认证插件化能力（`allow_all/http/file/redis/db`）。
 
 ## 启动方式
@@ -152,9 +153,20 @@ VITE_ADMIN_API_BASE=http://127.0.0.1:18083/api/admin
 -Djmqtt.broker.bossThreads=1
 -Djmqtt.broker.workerThreads=0
 -Djmqtt.broker.readerIdleSeconds=120
+-Djmqtt.broker.websocket.enabled=true
+-Djmqtt.broker.websocket.host=0.0.0.0
+-Djmqtt.broker.websocket.port=8083
+-Djmqtt.broker.websocket.path=/mqtt
 ```
 
 `jmqtt.broker.readerIdleSeconds` 为读空闲超时秒数，设为 `0` 可关闭空闲连接检测。
+`jmqtt.broker.websocket.enabled=false` 可关闭 websocket 接入。
+
+WebSocket MQTT 接入地址示例：
+
+```text
+ws://127.0.0.1:8083/mqtt
+```
 
 ## 用户密码认证插件化
 
