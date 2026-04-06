@@ -1,0 +1,38 @@
+package com.jmqx.session;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+
+/**
+ * @author liucaiwen
+ * @date 2026/4/2
+ */
+public class InMemorySessionRegistry implements SessionRegistry {
+    private final ConcurrentMap<String, ClientSession> sessions = new ConcurrentHashMap<>();
+
+    @Override
+    public void register(ClientSession session) {
+        ClientSession previous = sessions.put(session.clientId(), session);
+        if (previous != null && previous.channel().isActive()) {
+            previous.channel().close();
+        }
+    }
+
+    @Override
+    public Optional<ClientSession> get(String clientId) {
+        return Optional.ofNullable(sessions.get(clientId));
+    }
+
+    @Override
+    public List<ClientSession> list() {
+        return new ArrayList<>(sessions.values());
+    }
+
+    @Override
+    public void remove(String clientId) {
+        sessions.remove(clientId);
+    }
+}

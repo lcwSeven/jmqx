@@ -1,16 +1,16 @@
-# jmqtt
+# jmqx
 
-`jmqtt` 是一个基于 Java + Netty 的 MQTT Broker 多模块工程。
+`jmqx` 是一个基于 Java + Netty 的 MQTT Broker 多模块工程。
 
 ## 项目结构分析
 
-- `jmqtt-common`: 通用配置与工具类（`com.jmqtt.common`）。
-- `jmqtt-protocol`: 协议接口定义（`com.jmqtt.protocol`）。
-- `jmqtt-plugin`: Auth/ACL 插件实现与工厂（`com.jmqtt.auth`、`com.jmqtt.acl`）。
-- `jmqtt-core`: Broker 核心、会话、路由、存储、集群协调（`com.jmqtt.broker`、`session/router/store/cluster`）。
-- `jmqtt-transport`: Netty TCP 接入与连接指标（`com.jmqtt.transport`）。
-- `jmqtt-admin`: 管理后台模块（后端 SpringBoot + 前端 React）。
-- `jmqtt-app`: 启动装配模块（`com.jmqtt.JmqttApplication` + `jmqtt.properties`）。
+- `jmqx-common`: 通用配置与工具类（`com.jmqx.common`）。
+- `jmqx-protocol`: 协议接口定义（`com.jmqx.protocol`）。
+- `jmqx-plugin`: Auth/ACL 插件实现与工厂（`com.jmqx.auth`、`com.jmqx.acl`）。
+- `jmqx-core`: Broker 核心、会话、路由、存储、集群协调（`com.jmqx.broker`、`session/router/store/cluster`）。
+- `jmqx-transport`: Netty TCP 接入与连接指标（`com.jmqx.transport`）。
+- `jmqx-admin`: 管理后台模块（后端 SpringBoot + 前端 React）。
+- `jmqx-app`: 启动装配模块（`com.jmqx.JmqxApplication` + `jmqx.properties`）。
 
 ## 当前已填充能力
 
@@ -34,21 +34,21 @@
 
 ```bash
 mvn -DskipTests compile
-mvn -pl jmqtt-app -am exec:java
+mvn -pl jmqx-app -am exec:java
 ```
 
 ## 配置
 
-默认配置文件：`jmqtt-app/src/main/resources/jmqtt.properties`
+默认配置文件：`jmqx-app/src/main/resources/jmqx.properties`
 
-配置优先级：`JVM 参数 > jmqtt.properties > 代码默认值`。
+配置优先级：`JVM 参数 > jmqx.properties > 代码默认值`。
 
 ## 管理后台
 
 管理后台采用前后端分离架构：
 
-- 后端：SpringBoot（模块 `jmqtt-admin`）
-- 前端：React（目录 `jmqtt-admin/frontend`）
+- 后端：SpringBoot（模块 `jmqx-admin`）
+- 前端：React（目录 `jmqx-admin/frontend`）
 
 后端用于展示当前连接数，并支持在线修改：
 
@@ -60,9 +60,9 @@ mvn -pl jmqtt-app -am exec:java
 配置：
 
 ```bash
--Djmqtt.admin.enabled=true
--Djmqtt.admin.host=0.0.0.0
--Djmqtt.admin.port=18083
+-Djmqx.admin.enabled=true
+-Djmqx.admin.host=0.0.0.0
+-Djmqx.admin.port=18083
 ```
 
 后端接口地址：`http://{host}:{port}/api/admin`
@@ -70,13 +70,13 @@ mvn -pl jmqtt-app -am exec:java
 后端运行方式：
 
 ```bash
-mvn -pl jmqtt-app -am exec:java
+mvn -pl jmqx-app -am exec:java
 ```
 
 前端运行方式：
 
 ```bash
-cd jmqtt-admin/frontend
+cd jmqx-admin/frontend
 npm install
 npm run dev
 ```
@@ -125,12 +125,12 @@ VITE_ADMIN_API_BASE=http://127.0.0.1:18083/api/admin
 ### 当前代码已落地
 
 - 集群配置：
-  - `jmqtt.cluster.enabled`
-  - `jmqtt.cluster.nodeId`
-  - `jmqtt.cluster.role`
-  - `jmqtt.cluster.busType`
-  - `jmqtt.cluster.seedNodes`
-- 新增集群核心类（`com.jmqtt.cluster`）：
+  - `jmqx.cluster.enabled`
+  - `jmqx.cluster.nodeId`
+  - `jmqx.cluster.role`
+  - `jmqx.cluster.busType`
+  - `jmqx.cluster.seedNodes`
+- 新增集群核心类（`com.jmqx.cluster`）：
   - `ClusterCoordinator`
   - `ClusterMessageBus`
   - `ClusterReplicator`
@@ -148,19 +148,19 @@ VITE_ADMIN_API_BASE=http://127.0.0.1:18083/api/admin
 可通过 JVM 参数覆盖默认监听地址与端口：
 
 ```bash
--Djmqtt.broker.host=0.0.0.0
--Djmqtt.broker.port=1883
--Djmqtt.broker.bossThreads=1
--Djmqtt.broker.workerThreads=0
--Djmqtt.broker.readerIdleSeconds=120
--Djmqtt.broker.websocket.enabled=true
--Djmqtt.broker.websocket.host=0.0.0.0
--Djmqtt.broker.websocket.port=8083
--Djmqtt.broker.websocket.path=/mqtt
+-Djmqx.broker.host=0.0.0.0
+-Djmqx.broker.port=1883
+-Djmqx.broker.bossThreads=1
+-Djmqx.broker.workerThreads=0
+-Djmqx.broker.readerIdleSeconds=120
+-Djmqx.broker.websocket.enabled=true
+-Djmqx.broker.websocket.host=0.0.0.0
+-Djmqx.broker.websocket.port=8083
+-Djmqx.broker.websocket.path=/mqtt
 ```
 
-`jmqtt.broker.readerIdleSeconds` 为读空闲超时秒数，设为 `0` 可关闭空闲连接检测。
-`jmqtt.broker.websocket.enabled=false` 可关闭 websocket 接入。
+`jmqx.broker.readerIdleSeconds` 为读空闲超时秒数，设为 `0` 可关闭空闲连接检测。
+`jmqx.broker.websocket.enabled=false` 可关闭 websocket 接入。
 
 WebSocket MQTT 接入地址示例：
 
@@ -181,18 +181,18 @@ Broker 已支持认证插件化，内置 5 种类型：
 公共参数：
 
 ```bash
--Djmqtt.auth.type=allow_all|http|file|redis|db
--Djmqtt.auth.cacheMillis=60000
+-Djmqx.auth.type=allow_all|http|file|redis|db
+-Djmqx.auth.cacheMillis=60000
 ```
 
-`jmqtt.auth.cacheMillis` 为认证结果本地缓存毫秒数，默认 `60000`；设为 `0` 可关闭缓存。
+`jmqx.auth.cacheMillis` 为认证结果本地缓存毫秒数，默认 `60000`；设为 `0` 可关闭缓存。
 
 ### HTTP Auth
 
 ```bash
--Djmqtt.auth.type=http
--Djmqtt.auth.http.url=http://127.0.0.1:8080/auth/check
--Djmqtt.auth.http.timeoutMs=2000
+-Djmqx.auth.type=http
+-Djmqx.auth.http.url=http://127.0.0.1:8080/auth/check
+-Djmqx.auth.http.timeoutMs=2000
 ```
 
 请求体示例：
@@ -209,8 +209,8 @@ Broker 已支持认证插件化，内置 5 种类型：
 ### File Auth
 
 ```bash
--Djmqtt.auth.type=file
--Djmqtt.auth.file.path=auth-users.txt
+-Djmqx.auth.type=file
+-Djmqx.auth.file.path=auth-users.txt
 ```
 
 文件格式（每行一条）：
@@ -223,31 +223,31 @@ admin:admin123
 ### Redis Auth
 
 ```bash
--Djmqtt.auth.type=redis
--Djmqtt.auth.redis.host=127.0.0.1
--Djmqtt.auth.redis.port=6379
--Djmqtt.auth.redis.password=
--Djmqtt.auth.redis.db=0
--Djmqtt.auth.redis.keyPrefix=jmqtt:auth
--Djmqtt.auth.redis.timeoutMs=2000
+-Djmqx.auth.type=redis
+-Djmqx.auth.redis.host=127.0.0.1
+-Djmqx.auth.redis.port=6379
+-Djmqx.auth.redis.password=
+-Djmqx.auth.redis.db=0
+-Djmqx.auth.redis.keyPrefix=jmqx:auth
+-Djmqx.auth.redis.timeoutMs=2000
 ```
 
 键格式：`{prefix}:{username}`，值为明文密码。示例：
 
 ```text
-jmqtt:auth:alice = alice123
-jmqtt:auth:admin = admin123
+jmqx:auth:alice = alice123
+jmqx:auth:admin = admin123
 ```
 
 ### DB Auth
 
 ```bash
--Djmqtt.auth.type=db
--Djmqtt.auth.db.driver=com.mysql.cj.jdbc.Driver
--Djmqtt.auth.db.url=jdbc:mysql://127.0.0.1:3306/jmqtt
--Djmqtt.auth.db.user=root
--Djmqtt.auth.db.password=123456
--Djmqtt.auth.db.query=SELECT password FROM mqtt_user WHERE username = ?
+-Djmqx.auth.type=db
+-Djmqx.auth.db.driver=com.mysql.cj.jdbc.Driver
+-Djmqx.auth.db.url=jdbc:mysql://127.0.0.1:3306/jmqx
+-Djmqx.auth.db.user=root
+-Djmqx.auth.db.password=123456
+-Djmqx.auth.db.query=SELECT password FROM mqtt_user WHERE username = ?
 ```
 
 默认读取 SQL 第一列作为用户密码，并与客户端密码做等值比较。
@@ -264,19 +264,19 @@ Broker 已支持 ACL 插件化，内置 4 种类型：
 公共参数：
 
 ```bash
--Djmqtt.acl.type=allow_all|http|redis|file
--Djmqtt.acl.defaultAllow=false
--Djmqtt.acl.cacheMillis=60000
+-Djmqx.acl.type=allow_all|http|redis|file
+-Djmqx.acl.defaultAllow=false
+-Djmqx.acl.cacheMillis=60000
 ```
 
-`jmqtt.acl.cacheMillis` 为 ACL 本地缓存毫秒数，默认 `60000`；设为 `0` 可关闭缓存。
+`jmqx.acl.cacheMillis` 为 ACL 本地缓存毫秒数，默认 `60000`；设为 `0` 可关闭缓存。
 
 ### HTTP ACL
 
 ```bash
--Djmqtt.acl.type=http
--Djmqtt.acl.http.url=http://127.0.0.1:8080/acl/check
--Djmqtt.acl.http.timeoutMs=2000
+-Djmqx.acl.type=http
+-Djmqx.acl.http.url=http://127.0.0.1:8080/acl/check
+-Djmqx.acl.http.timeoutMs=2000
 ```
 
 请求体示例：
@@ -293,13 +293,13 @@ Broker 已支持 ACL 插件化，内置 4 种类型：
 ### Redis ACL
 
 ```bash
--Djmqtt.acl.type=redis
--Djmqtt.acl.redis.host=127.0.0.1
--Djmqtt.acl.redis.port=6379
--Djmqtt.acl.redis.password=
--Djmqtt.acl.redis.db=0
--Djmqtt.acl.redis.keyPrefix=jmqtt:acl
--Djmqtt.acl.redis.timeoutMs=2000
+-Djmqx.acl.type=redis
+-Djmqx.acl.redis.host=127.0.0.1
+-Djmqx.acl.redis.port=6379
+-Djmqx.acl.redis.password=
+-Djmqx.acl.redis.db=0
+-Djmqx.acl.redis.keyPrefix=jmqx:acl
+-Djmqx.acl.redis.timeoutMs=2000
 ```
 
 键格式：
@@ -309,10 +309,10 @@ Broker 已支持 ACL 插件化，内置 4 种类型：
 示例：
 
 ```text
-jmqtt:acl:publish:alice:sensor/temp = allow
-jmqtt:acl:publish:alice:* = deny
-jmqtt:acl:subscribe:alice:sensor/# = allow
-jmqtt:acl:subscribe:*:* = deny
+jmqx:acl:publish:alice:sensor/temp = allow
+jmqx:acl:publish:alice:* = deny
+jmqx:acl:subscribe:alice:sensor/# = allow
+jmqx:acl:subscribe:*:* = deny
 ```
 
 值支持：`allow/deny/true/false/1/0`。
@@ -322,8 +322,8 @@ jmqtt:acl:subscribe:*:* = deny
 ### File ACL
 
 ```bash
--Djmqtt.acl.type=file
--Djmqtt.acl.file.path=acl-rules.txt
+-Djmqx.acl.type=file
+-Djmqx.acl.file.path=acl-rules.txt
 ```
 
 规则文件格式（每行一条）：

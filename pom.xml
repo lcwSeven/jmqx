@@ -3,19 +3,20 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>com.jmqtt</groupId>
-    <artifactId>jmqtt</artifactId>
+    <groupId>com.jmqx</groupId>
+    <artifactId>jmqx</artifactId>
+    <name>jmqx</name>
     <version>1.0-SNAPSHOT</version>
     <packaging>pom</packaging>
 
     <modules>
-        <module>jmqtt-common</module>
-        <module>jmqtt-protocol</module>
-        <module>jmqtt-plugin</module>
-        <module>jmqtt-core</module>
-        <module>jmqtt-transport</module>
-        <module>jmqtt-admin</module>
-        <module>jmqtt-app</module>
+        <module>jmqx-common</module>
+        <module>jmqx-protocol</module>
+        <module>jmqx-plugin</module>
+        <module>jmqx-core</module>
+        <module>jmqx-transport</module>
+        <module>jmqx-admin</module>
+        <module>jmqx-app</module>
     </modules>
 
     <properties>
