@@ -10,6 +10,7 @@ public class AdminClientDetailResponse {
     private String clientId;
     private long onlineAtEpochMillis;
     private String username;
+    private String connectionType;
     private String serviceNodeIp;
     private int keepAliveSeconds;
     private List<AdminClientSubscriptionResponse> subscriptions;
@@ -36,6 +37,14 @@ public class AdminClientDetailResponse {
 
     public void setUsername(String username) {
         this.username = username;
+    }
+
+    public String getConnectionType() {
+        return connectionType;
+    }
+
+    public void setConnectionType(String connectionType) {
+        this.connectionType = connectionType;
     }
 
     public String getServiceNodeIp() {

@@ -45,9 +45,9 @@ public class AdminController {
         String usernameQuery = normalize(username);
 
         return state.getSessionRegistry().list().stream()
-            .filter(session -> containsIgnoreCase(session.getClientId(), clientIdQuery))
-            .filter(session -> containsIgnoreCase(session.getUsername(), usernameQuery))
-            .sorted(Comparator.comparing(ClientSession::getConnectedAt).reversed())
+            .filter(session -> containsIgnoreCase(session.clientId(), clientIdQuery))
+            .filter(session -> containsIgnoreCase(session.username(), usernameQuery))
+            .sorted(Comparator.comparing(ClientSession::connectedAt).reversed())
             .map(this::toClientResponse)
             .toList();
     }
@@ -58,11 +58,12 @@ public class AdminController {
             .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "client not found: " + clientId));
 
         AdminClientDetailResponse detail = new AdminClientDetailResponse();
-        detail.setClientId(session.getClientId());
-        detail.setUsername(session.getUsername());
-        detail.setServiceNodeIp(session.getServiceNodeIp());
-        detail.setKeepAliveSeconds(session.getKeepAliveSeconds());
-        detail.setOnlineAtEpochMillis(session.getConnectedAt().toEpochMilli());
+        detail.setClientId(session.clientId());
+        detail.setUsername(session.username());
+        detail.setConnectionType(session.connectionType());
+        detail.setServiceNodeIp(session.serviceNodeIp());
+        detail.setKeepAliveSeconds(session.keepAliveSeconds());
+        detail.setOnlineAtEpochMillis(session.connectedAt().toEpochMilli());
         detail.setSubscriptions(toSubscriptionList(state.getSubscriptionRegistry().findSubscriptions(clientId)));
         return detail;
     }
@@ -111,11 +112,12 @@ public class AdminController {
 
     private AdminClientResponse toClientResponse(ClientSession session) {
         AdminClientResponse resp = new AdminClientResponse();
-        resp.setClientId(session.getClientId());
-        resp.setUsername(session.getUsername());
-        resp.setServiceNodeIp(session.getServiceNodeIp());
-        resp.setKeepAliveSeconds(session.getKeepAliveSeconds());
-        resp.setOnlineAtEpochMillis(session.getConnectedAt().toEpochMilli());
+        resp.setClientId(session.clientId());
+        resp.setUsername(session.username());
+        resp.setConnectionType(session.connectionType());
+        resp.setServiceNodeIp(session.serviceNodeIp());
+        resp.setKeepAliveSeconds(session.keepAliveSeconds());
+        resp.setOnlineAtEpochMillis(session.connectedAt().toEpochMilli());
         return resp;
     }
 

@@ -225,6 +225,7 @@ export default function App() {
                       <div className="kv-line"><span>客户端 ID:</span><strong>{detail.clientId || "-"}</strong></div>
                       <div className="kv-line"><span>上线时间:</span><strong>{formatTime(detail.onlineAtEpochMillis)}</strong></div>
                       <div className="kv-line"><span>用户名:</span><strong>{detail.username || "-"}</strong></div>
+                      <div className="kv-line"><span>连接方式:</span><strong>{detail.connectionType || "-"}</strong></div>
                       <div className="kv-line"><span>服务节点 IP:</span><strong>{detail.serviceNodeIp || "-"}</strong></div>
                       <div className="kv-line"><span>Keepalive(秒):</span><strong>{detail.keepAliveSeconds}</strong></div>
                     </>
@@ -289,6 +290,7 @@ export default function App() {
                         <th>客户端 ID</th>
                         <th>上线时间</th>
                         <th>用户名</th>
+                        <th>连接方式</th>
                         <th>服务节点 IP</th>
                         <th>Keepalive(秒)</th>
                       </tr>
@@ -296,7 +298,7 @@ export default function App() {
                     <tbody>
                       {clients.length === 0 ? (
                         <tr>
-                          <td colSpan={5} className="empty">暂无匹配客户端</td>
+                          <td colSpan={6} className="empty">暂无匹配客户端</td>
                         </tr>
                       ) : (
                         clients.map((item) => (
@@ -308,6 +310,7 @@ export default function App() {
                             <td>{item.clientId || "-"}</td>
                             <td>{formatTime(item.onlineAtEpochMillis)}</td>
                             <td>{item.username || "-"}</td>
+                            <td>{item.connectionType || "-"}</td>
                             <td>{item.serviceNodeIp || "-"}</td>
                             <td>{item.keepAliveSeconds}</td>
                           </tr>

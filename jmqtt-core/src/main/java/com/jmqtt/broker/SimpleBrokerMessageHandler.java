@@ -50,6 +50,8 @@ public class SimpleBrokerMessageHandler implements BrokerMessageHandler, BrokerC
     private static final Logger LOG = Logger.getLogger(SimpleBrokerMessageHandler.class.getName());
     private static final AttributeKey<String> CLIENT_ID = AttributeKey.valueOf("jmqtt.clientId");
     private static final AttributeKey<Boolean> CLEAN_SESSION = AttributeKey.valueOf("jmqtt.cleanSession");
+    private static final AttributeKey<String> WS_USERNAME = AttributeKey.valueOf("jmqtt.ws.username");
+    private static final AttributeKey<String> CONNECTION_TYPE = AttributeKey.valueOf("jmqtt.connectionType");
 
     private final SessionRegistry sessionRegistry;
     private final SubscriptionRegistry subscriptionRegistry;
@@ -125,13 +127,23 @@ public class SimpleBrokerMessageHandler implements BrokerMessageHandler, BrokerC
             return;
         }
 
-        String username = message.payload().userName();
+        String username = normalize(message.payload().userName());
+        if (username == null) {
+            username = normalize(ctx.channel().attr(WS_USERNAME).get());
+        }
+        if (username == null) {
+            username = clientId;
+        }
+        String connectionType = normalize(ctx.channel().attr(CONNECTION_TYPE).get());
+        if (connectionType == null) {
+            connectionType = "mqtt";
+        }
         String password = message.payload().passwordInBytes() == null
                 ? null
                 : new String(message.payload().passwordInBytes(), StandardCharsets.UTF_8);
 
         if (!clientAuthenticator.authenticate(clientId, username, password)) {
-            LOG.warning(() -> "[CONNECT] auth failed clientId=" + clientId + ", username=" + username);
+            LOG.warning("[CONNECT] auth failed clientId=" + clientId + ", username=" + username);
             rejectConnection(ctx, MqttConnectReturnCode.CONNECTION_REFUSED_BAD_USER_NAME_OR_PASSWORD);
             return;
         }
@@ -142,6 +154,7 @@ public class SimpleBrokerMessageHandler implements BrokerMessageHandler, BrokerC
         sessionRegistry.register(new ClientSession(
             clientId,
             ctx.channel(),
+            connectionType,
             cleanSession,
             username,
             serviceNodeIp,
@@ -155,7 +168,8 @@ public class SimpleBrokerMessageHandler implements BrokerMessageHandler, BrokerC
                 .sessionPresent(false)
                 .returnCode(MqttConnectReturnCode.CONNECTION_ACCEPTED)
                 .build());
-        LOG.info(() -> "[CONNECT] accepted clientId=" + clientId
+        LOG.info("[CONNECT] accepted clientId=" + clientId
+            + ", connectionType=" + connectionType
             + ", username=" + username
             + ", serviceNodeIp=" + serviceNodeIp
             + ", cleanSession=" + cleanSession
@@ -250,7 +264,7 @@ public class SimpleBrokerMessageHandler implements BrokerMessageHandler, BrokerC
                 continue;
             }
 
-            Channel channel = sessionOptional.get().getChannel();
+            Channel channel = sessionOptional.get().channel();
             if (!channel.isActive()) {
                 continue;
             }
@@ -289,8 +303,15 @@ public class SimpleBrokerMessageHandler implements BrokerMessageHandler, BrokerC
         return clientId;
     }
 
+    private String normalize(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        return value;
+    }
+
     private boolean allowed(String clientId, String topic, AclAction action) {
-        String username = clientId == null ? null : sessionRegistry.get(clientId).map(ClientSession::getUsername).orElse(null);
+        String username = clientId == null ? null : sessionRegistry.get(clientId).map(ClientSession::username).orElse(null);
         return !aclAuthorizer.isAllowed(new AclRequest(clientId, username, topic, action));
     }
 

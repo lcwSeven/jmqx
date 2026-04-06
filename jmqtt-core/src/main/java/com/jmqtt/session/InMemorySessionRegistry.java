@@ -15,9 +15,9 @@ public class InMemorySessionRegistry implements SessionRegistry {
 
     @Override
     public void register(ClientSession session) {
-        ClientSession previous = sessions.put(session.getClientId(), session);
-        if (previous != null && previous.getChannel().isActive()) {
-            previous.getChannel().close();
+        ClientSession previous = sessions.put(session.clientId(), session);
+        if (previous != null && previous.channel().isActive()) {
+            previous.channel().close();
         }
     }
 

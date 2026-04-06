@@ -13,6 +13,7 @@ import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.handler.codec.mqtt.MqttDecoder;
 import io.netty.handler.codec.mqtt.MqttEncoder;
 import io.netty.handler.timeout.IdleStateHandler;
+import io.netty.util.AttributeKey;
 
 import java.util.logging.Logger;
 
@@ -23,6 +24,7 @@ import java.util.logging.Logger;
 public class NettyMqttServer {
     private static final Logger LOG = Logger.getLogger(NettyMqttServer.class.getName());
     private static final int MAX_MQTT_MESSAGE_SIZE = 256 * 1024;
+    private static final AttributeKey<String> CONNECTION_TYPE = AttributeKey.valueOf("jmqtt.connectionType");
 
     private final BrokerProperties properties;
     private final BrokerMessageHandler brokerMessageHandler;
@@ -59,6 +61,7 @@ public class NettyMqttServer {
             .childHandler(new ChannelInitializer<SocketChannel>() {
                 @Override
                 protected void initChannel(SocketChannel ch) {
+                    ch.attr(CONNECTION_TYPE).set("mqtt");
                     ch.pipeline()
                         .addLast("idle-state", new IdleStateHandler(readerIdleSeconds, 0, 0))
                         .addLast("mqtt-decoder", new MqttDecoder(MAX_MQTT_MESSAGE_SIZE))

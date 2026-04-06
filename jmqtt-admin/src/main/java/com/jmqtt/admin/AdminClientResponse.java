@@ -8,6 +8,7 @@ public class AdminClientResponse {
     private String clientId;
     private long onlineAtEpochMillis;
     private String username;
+    private String connectionType;
     private String serviceNodeIp;
     private int keepAliveSeconds;
 
@@ -33,6 +34,14 @@ public class AdminClientResponse {
 
     public void setUsername(String username) {
         this.username = username;
+    }
+
+    public String getConnectionType() {
+        return connectionType;
+    }
+
+    public void setConnectionType(String connectionType) {
+        this.connectionType = connectionType;
     }
 
     public String getServiceNodeIp() {
