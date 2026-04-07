@@ -10,6 +10,9 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**
+ * Auth provider 装配工厂。
+ * 支持内置插件、SPI 扩展、链式鉴权以及统一缓存包装。
+ *
  * @author liucaiwen
  * @date 2026/4/4
  */
@@ -22,6 +25,7 @@ public final class AuthProviderFactory {
         registerBuiltins(plugins);
         loadExtensions(plugins);
 
+        // 先构建真实 provider，再按需统一加缓存，避免每个插件都重复实现缓存逻辑。
         AuthProvider delegate = createDelegate(properties, plugins);
         if (properties.getCacheMillis() <= 0) {
             return delegate;
@@ -35,6 +39,7 @@ public final class AuthProviderFactory {
     ) {
         List<String> chainTypes = parseChain(properties.getChain());
         if (!chainTypes.isEmpty()) {
+            // 链式模式下只保留配置中显式存在的插件，顺序完全以配置为准。
             List<AuthProvider> chain = chainTypes.stream()
                 .map(plugins::get)
                 .filter(Objects::nonNull)
@@ -60,6 +65,7 @@ public final class AuthProviderFactory {
         if (plugin != null) {
             return plugin;
         }
+        // 未识别类型兜底为 allow_all，避免启动期因为配置错误直接崩溃。
         return plugins.get("allow_all");
     }
 

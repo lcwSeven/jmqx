@@ -3,6 +3,8 @@ package com.jmqx.broker;
 import com.jmqx.acl.AclAction;
 import com.jmqx.acl.AclAuthorizer;
 import com.jmqx.acl.AclRequest;
+import com.jmqx.bridge.BridgeMessage;
+import com.jmqx.bridge.MessageBridge;
 import com.jmqx.cluster.BrokerClusterReceiver;
 import com.jmqx.cluster.ClusterPublishMessage;
 import com.jmqx.cluster.ClusterReplicator;
@@ -44,11 +46,14 @@ import java.util.Set;
 import java.util.logging.Logger;
 
 /**
+ * MQTT 核心消息处理器。
+ * 负责连接鉴权、会话建立、订阅管理、消息路由、ACL 校验和集群复制。
+ *
  * @author liucaiwen
  * @date 2026/4/2
  */
-public class SimpleBrokerMessageHandler implements BrokerMessageHandler, BrokerClusterReceiver {
-    private static final Logger LOG = Logger.getLogger(SimpleBrokerMessageHandler.class.getName());
+public class MqttBrokerMessageHandler implements BrokerMessageHandler, BrokerClusterReceiver {
+    private static final Logger LOG = Logger.getLogger(MqttBrokerMessageHandler.class.getName());
     private static final AttributeKey<String> CLIENT_ID = AttributeKey.valueOf("jmqx.clientId");
     private static final AttributeKey<Boolean> CLEAN_SESSION = AttributeKey.valueOf("jmqx.cleanSession");
     private static final AttributeKey<String> WS_USERNAME = AttributeKey.valueOf("jmqx.ws.username");
@@ -60,20 +65,23 @@ public class SimpleBrokerMessageHandler implements BrokerMessageHandler, BrokerC
     private final ClientAuthenticator clientAuthenticator;
     private final AclAuthorizer aclAuthorizer;
     private final ClusterReplicator clusterReplicator;
+    private final MessageBridge messageBridge;
 
-    public SimpleBrokerMessageHandler(
+    public MqttBrokerMessageHandler(
             SessionRegistry sessionRegistry,
             SubscriptionRegistry subscriptionRegistry,
             RetainedMessageStore retainedMessageStore,
             ClientAuthenticator clientAuthenticator,
             AclAuthorizer aclAuthorizer,
-            ClusterReplicator clusterReplicator) {
+            ClusterReplicator clusterReplicator,
+            MessageBridge messageBridge) {
         this.sessionRegistry = sessionRegistry;
         this.subscriptionRegistry = subscriptionRegistry;
         this.retainedMessageStore = retainedMessageStore;
         this.clientAuthenticator = clientAuthenticator;
         this.aclAuthorizer = aclAuthorizer;
         this.clusterReplicator = clusterReplicator;
+        this.messageBridge = messageBridge == null ? MessageBridge.NOOP : messageBridge;
     }
 
     @Override
@@ -84,6 +92,7 @@ public class SimpleBrokerMessageHandler implements BrokerMessageHandler, BrokerC
             return;
         }
 
+        // MQTT 控制报文统一在这里分发，底层 transport 只负责把报文安全地交上来。
         MqttMessageType messageType = message.fixedHeader().messageType();
         switch (messageType) {
             case CONNECT -> handleConnect(ctx, (MqttConnectMessage) message);
@@ -112,6 +121,7 @@ public class SimpleBrokerMessageHandler implements BrokerMessageHandler, BrokerC
             return;
         }
 
+        // cleanSession 断开时直接清理订阅，持久会话则只移除在线 channel。
         boolean cleanSession = Optional.ofNullable(channel.attr(CLEAN_SESSION).get()).orElse(false);
         sessionRegistry.remove(clientId);
         if (cleanSession) {
@@ -143,6 +153,7 @@ public class SimpleBrokerMessageHandler implements BrokerMessageHandler, BrokerC
                 ? null
                 : new String(message.payload().passwordInBytes(), StandardCharsets.UTF_8);
 
+        // 连接鉴权统一收敛在这里，WebSocket 握手阶段传过来的用户名也在这里一并复用。
         if (!clientAuthenticator.authenticate(clientId, username, password)) {
             LOG.warning("[CONNECT] auth failed clientId=" + clientId + ", username=" + username);
             rejectConnection(ctx, MqttConnectReturnCode.CONNECTION_REFUSED_BAD_USER_NAME_OR_PASSWORD);
@@ -202,6 +213,7 @@ public class SimpleBrokerMessageHandler implements BrokerMessageHandler, BrokerC
             int qos = Math.min(subscription.qualityOfService().value(), 1);
             subscriptionRegistry.subscribe(clientId, topicFilter, qos);
             grantedQos.add(qos);
+            // MQTT 规范要求新订阅完成后立即回放匹配的 retained 消息。
             replayRetained(ctx.channel(), normalizedFilter);
             LOG.info(() -> "[SUBSCRIBE] clientId=" + clientId + ", topicFilter=" + topicFilter + ", qos=" + qos);
         }
@@ -246,8 +258,17 @@ public class SimpleBrokerMessageHandler implements BrokerMessageHandler, BrokerC
             retainedMessageStore.saveOrRemove(new RetainedMessage(topic, payload, qos, true));
         }
 
+        // 本节点先完成本地投递，再复制到集群，保证单节点场景路径最短。
         routeMessage(topic, payload);
         clusterReplicator.replicatePublish(topic, payload, qos, message.fixedHeader().isRetain());
+        messageBridge.publish(new BridgeMessage(
+            clientId,
+            topic,
+            payload,
+            qos,
+            message.fixedHeader().isRetain(),
+            System.currentTimeMillis()
+        ));
         LOG.info(() -> "[PUBLISH] clientId=" + clientId + ", topic=" + topic
                 + ", qos=" + qos + ", retain=" + message.fixedHeader().isRetain() + ", bytes=" + payload.length);
 

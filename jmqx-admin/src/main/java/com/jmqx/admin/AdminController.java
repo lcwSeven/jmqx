@@ -20,6 +20,9 @@ import static org.springframework.http.HttpStatus.BAD_REQUEST;
 import static org.springframework.http.HttpStatus.NOT_FOUND;
 
 /**
+ * 独立 admin 的聚合入口。
+ * 负责节点管理、集群状态聚合、客户端查询以及配置透传。
+ *
  * @author liucaiwen
  * @date 2026/4/5
  */
@@ -57,6 +60,7 @@ public class AdminController {
         List<AdminStatusResponse> statuses = new ArrayList<>();
         int online = 0;
         int totalConnections = 0;
+        // 这里逐个拉取节点状态并做轻量聚合，保持控制面实现简单直接。
         for (ManagedNode node : nodes) {
             try {
                 AdminStatusResponse status = nodeProxyClient.fetchStatus(node);
@@ -108,6 +112,7 @@ public class AdminController {
         String usernameQuery = normalize(username);
         List<ManagedNode> targets = resolveNodes(nodeId);
         List<AdminClientResponse> result = new ArrayList<>();
+        // 客户端列表允许按节点聚合查询，节点离线时直接跳过，避免影响整体结果。
         for (ManagedNode node : targets) {
             try {
                 result.addAll(nodeProxyClient.fetchClients(node, clientIdQuery, usernameQuery));
@@ -143,6 +148,7 @@ public class AdminController {
             throw new ResponseStatusException(BAD_REQUEST, "no target node");
         }
         try {
+            // 配置变更不在 admin 本地落地，而是原样透传到目标 broker 节点热更新。
             return nodeProxyClient.updateConfig(node, request);
         } catch (IOException | InterruptedException e) {
             throw new ResponseStatusException(BAD_REQUEST, "update node config failed: " + e.getMessage());

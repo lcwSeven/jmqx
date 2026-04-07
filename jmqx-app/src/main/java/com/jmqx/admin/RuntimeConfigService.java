@@ -8,6 +8,8 @@ import com.jmqx.auth.AuthProviderFactory;
 import com.jmqx.auth.ReloadableAuthProvider;
 
 /**
+ * 维护当前节点的运行时 Auth/ACL 配置，并负责在配置变化时热替换插件实现。
+ *
  * @author liucaiwen
  * @date 2026/4/7
  */
@@ -63,6 +65,7 @@ public class RuntimeConfigService {
         boolean authChanged = false;
         boolean aclChanged = false;
 
+        // Auth 相关配置统一先更新内存配置，再在末尾一次性重建 provider，避免中间态生效。
         if (authType != null && !authType.isBlank()) {
             applyAuthType(authType);
             authChanged = true;
@@ -132,6 +135,7 @@ public class RuntimeConfigService {
             authChanged = true;
         }
 
+        // ACL 也采用同样的延迟重建策略，减少多字段更新时的重复构造。
         if (aclType != null && !aclType.isBlank()) {
             aclProperties.setType(aclType);
             aclChanged = true;
@@ -212,6 +216,7 @@ public class RuntimeConfigService {
     private void applyAuthType(String authTypeRaw) {
         String value = authTypeRaw.trim();
         if (value.contains(",")) {
+            // 允许前端直接把链式配置塞到 authType，保持接口兼容。
             authProperties.setChain(value);
             String[] parts = value.split(",");
             authProperties.setType(parts.length == 0 ? "allow_all" : parts[0].trim());
@@ -225,6 +230,7 @@ public class RuntimeConfigService {
         String value = authChainRaw == null ? "" : authChainRaw.trim();
         authProperties.setChain(value);
         if (!value.isBlank()) {
+            // type 始终保存链路第一跳，便于老逻辑和日志继续读取一个主类型。
             String[] parts = value.split(",");
             if (parts.length > 0) {
                 authProperties.setType(parts[0].trim());

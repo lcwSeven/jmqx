@@ -268,6 +268,55 @@ jmqx:auth:admin = admin123
 
 默认读取 SQL 第一列作为用户密码，并与客户端密码做等值比较。
 
+## 消息桥接（Kafka / RocketMQ / MySQL）
+
+Broker 在处理到 `PUBLISH` 后，除了本地路由和集群复制，还可以把消息桥接转发到外部系统。
+
+- 支持类型：`kafka`、`rocketmq`、`mysql`
+- 支持多目标并行：`jmqx.bridge.types=kafka,rocketmq,mysql`
+- 支持异步投递：基于 Disruptor RingBuffer（无锁）+ worker 线程（队列满时丢弃并记录日志）
+
+公共参数：
+
+```bash
+-Djmqx.bridge.enabled=true
+-Djmqx.bridge.types=kafka,rocketmq,mysql
+-Djmqx.bridge.async=true
+-Djmqx.bridge.async.queueCapacity=10000
+-Djmqx.bridge.async.workerCount=1
+```
+
+Kafka 参数：
+
+```bash
+-Djmqx.bridge.kafka.bootstrapServers=127.0.0.1:9092
+-Djmqx.bridge.kafka.topic=jmqx-messages
+-Djmqx.bridge.kafka.acks=1
+-Djmqx.bridge.kafka.clientId=jmqx-bridge
+-Djmqx.bridge.kafka.compressionType=none
+```
+
+RocketMQ 参数：
+
+```bash
+-Djmqx.bridge.rocketmq.nameServer=127.0.0.1:9876
+-Djmqx.bridge.rocketmq.producerGroup=jmqx-bridge-group
+-Djmqx.bridge.rocketmq.topic=JMQX_MESSAGES
+-Djmqx.bridge.rocketmq.syncSend=false
+-Djmqx.bridge.rocketmq.timeoutMs=3000
+```
+
+MySQL 参数：
+
+```bash
+-Djmqx.bridge.mysql.driver=com.mysql.cj.jdbc.Driver
+-Djmqx.bridge.mysql.url=jdbc:mysql://127.0.0.1:3306/jmqx
+-Djmqx.bridge.mysql.user=root
+-Djmqx.bridge.mysql.password=123456
+-Djmqx.bridge.mysql.table=jmqx_bridge_message
+-Djmqx.bridge.mysql.autoCreateTable=true
+```
+
 ## ACL 插件化鉴权
 
 Broker 已支持 ACL 插件化，内置 4 种类型：

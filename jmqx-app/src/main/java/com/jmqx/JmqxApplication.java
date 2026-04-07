@@ -10,7 +10,10 @@ import com.jmqx.auth.AuthProperties;
 import com.jmqx.auth.AuthProviderFactory;
 import com.jmqx.auth.AuthRequest;
 import com.jmqx.auth.ReloadableAuthProvider;
-import com.jmqx.broker.SimpleBrokerMessageHandler;
+import com.jmqx.broker.MqttBrokerMessageHandler;
+import com.jmqx.bridge.BridgeProperties;
+import com.jmqx.bridge.MessageBridge;
+import com.jmqx.bridge.MessageBridgeFactory;
 import com.jmqx.cluster.ClusterCoordinator;
 import com.jmqx.cluster.ClusterMessageBus;
 import com.jmqx.cluster.ClusterProperties;
@@ -35,6 +38,8 @@ import java.io.InputStream;
 import java.util.Properties;
 
 /**
+ * 应用启动装配入口，负责把 broker、插件、集群和节点管理 API 组装起来。
+ *
  * @author liucaiwen
  * @date 2026/4/2
  */
@@ -44,6 +49,7 @@ public class JmqxApplication {
         BrokerProperties brokerProperties = loadBrokerProperties(config);
         AuthProperties authProperties = loadAuthProperties(config);
         AclProperties aclProperties = loadAclProperties(config);
+        BridgeProperties bridgeProperties = loadBridgeProperties(config);
         NodeAdminProperties nodeAdminProperties = loadNodeAdminProperties(config);
         ClusterProperties clusterProperties = loadClusterProperties(config);
         SessionRegistry sessionRegistry = new InMemorySessionRegistry();
@@ -60,16 +66,19 @@ public class JmqxApplication {
             authProvider,
             aclAuthorizer
         );
+        MessageBridge messageBridge = MessageBridgeFactory.create(bridgeProperties);
 
+        // 集群复制器默认先使用空实现，只有在开启集群时才切到真实协调器。
         ReloadableClusterReplicator clusterReplicator = new ReloadableClusterReplicator(new NoopClusterReplicator());
 
-        SimpleBrokerMessageHandler brokerMessageHandler = new SimpleBrokerMessageHandler(
+        MqttBrokerMessageHandler brokerMessageHandler = new MqttBrokerMessageHandler(
                 sessionRegistry,
                 subscriptionRegistry,
                 retainedMessageStore,
                 clientAuthenticator,
                 aclAuthorizer,
-                clusterReplicator
+                clusterReplicator,
+                messageBridge
         );
         ClusterCoordinator clusterCoordinator = null;
         if (clusterProperties.isEnabled()) {
@@ -79,6 +88,7 @@ public class JmqxApplication {
             clusterCoordinator.start();
         }
 
+        // 先启动 MQTT TCP，再按需启动 WebSocket 接入。
         NettyMqttServer mqttServer = new NettyMqttServer(brokerProperties, brokerMessageHandler, connectionMetrics);
         mqttServer.start();
         NettyMqttWebSocketServer mqttWebSocketServer = new NettyMqttWebSocketServer(
@@ -90,6 +100,7 @@ public class JmqxApplication {
 
         NodeAdminHttpServer nodeAdminHttpServer = null;
         if (nodeAdminProperties.isEnabled()) {
+            // 节点管理 API 只暴露当前节点运行状态和在线热更新能力，供独立 admin 聚合使用。
             nodeAdminHttpServer = new NodeAdminHttpServer(
                 nodeAdminProperties,
                 connectionMetrics,
@@ -111,6 +122,7 @@ public class JmqxApplication {
             if (finalClusterCoordinator != null) {
                 finalClusterCoordinator.stop();
             }
+            messageBridge.close();
             mqttWebSocketServer.stop();
             mqttServer.stop();
         }));
@@ -122,6 +134,7 @@ public class JmqxApplication {
         }
         System.out.println("AUTH plugin: " + authProperties.getType());
         System.out.println("ACL plugin: " + aclProperties.getType());
+        System.out.println("BRIDGE enabled=" + bridgeProperties.isEnabled() + ", types=" + bridgeProperties.getTypes());
         System.out.println("CLUSTER enabled=" + clusterProperties.isEnabled() + ", nodeId=" + clusterProperties.getNodeId()
             + ", role=" + clusterProperties.getRole() + ", busType=" + clusterProperties.getBusType());
         if (nodeAdminProperties.isEnabled()) {
@@ -249,6 +262,107 @@ public class JmqxApplication {
         return properties;
     }
 
+    private static BridgeProperties loadBridgeProperties(Properties config) {
+        BridgeProperties properties = new BridgeProperties();
+        properties.setEnabled(getBooleanProperty(config, "jmqx.bridge.enabled", properties.isEnabled()));
+        properties.setTypes(getStringProperty(config, "jmqx.bridge.types", properties.getTypes()));
+        properties.setAsync(getBooleanProperty(config, "jmqx.bridge.async", properties.isAsync()));
+        properties.setAsyncQueueCapacity(getIntProperty(
+            config,
+            "jmqx.bridge.async.queueCapacity",
+            properties.getAsyncQueueCapacity()
+        ));
+        properties.setAsyncWorkerCount(getIntProperty(
+            config,
+            "jmqx.bridge.async.workerCount",
+            properties.getAsyncWorkerCount()
+        ));
+
+        properties.setKafkaBootstrapServers(getStringProperty(
+            config,
+            "jmqx.bridge.kafka.bootstrapServers",
+            properties.getKafkaBootstrapServers()
+        ));
+        properties.setKafkaTopic(getStringProperty(
+            config,
+            "jmqx.bridge.kafka.topic",
+            properties.getKafkaTopic()
+        ));
+        properties.setKafkaAcks(getStringProperty(
+            config,
+            "jmqx.bridge.kafka.acks",
+            properties.getKafkaAcks()
+        ));
+        properties.setKafkaClientId(getStringProperty(
+            config,
+            "jmqx.bridge.kafka.clientId",
+            properties.getKafkaClientId()
+        ));
+        properties.setKafkaCompressionType(getStringProperty(
+            config,
+            "jmqx.bridge.kafka.compressionType",
+            properties.getKafkaCompressionType()
+        ));
+
+        properties.setRocketmqNameServer(getStringProperty(
+            config,
+            "jmqx.bridge.rocketmq.nameServer",
+            properties.getRocketmqNameServer()
+        ));
+        properties.setRocketmqProducerGroup(getStringProperty(
+            config,
+            "jmqx.bridge.rocketmq.producerGroup",
+            properties.getRocketmqProducerGroup()
+        ));
+        properties.setRocketmqTopic(getStringProperty(
+            config,
+            "jmqx.bridge.rocketmq.topic",
+            properties.getRocketmqTopic()
+        ));
+        properties.setRocketmqSyncSend(getBooleanProperty(
+            config,
+            "jmqx.bridge.rocketmq.syncSend",
+            properties.isRocketmqSyncSend()
+        ));
+        properties.setRocketmqTimeoutMs(getIntProperty(
+            config,
+            "jmqx.bridge.rocketmq.timeoutMs",
+            properties.getRocketmqTimeoutMs()
+        ));
+
+        properties.setMysqlDriver(getStringProperty(
+            config,
+            "jmqx.bridge.mysql.driver",
+            properties.getMysqlDriver()
+        ));
+        properties.setMysqlUrl(getStringProperty(
+            config,
+            "jmqx.bridge.mysql.url",
+            properties.getMysqlUrl()
+        ));
+        properties.setMysqlUser(getStringProperty(
+            config,
+            "jmqx.bridge.mysql.user",
+            properties.getMysqlUser()
+        ));
+        properties.setMysqlPassword(getStringProperty(
+            config,
+            "jmqx.bridge.mysql.password",
+            properties.getMysqlPassword()
+        ));
+        properties.setMysqlTable(getStringProperty(
+            config,
+            "jmqx.bridge.mysql.table",
+            properties.getMysqlTable()
+        ));
+        properties.setMysqlAutoCreateTable(getBooleanProperty(
+            config,
+            "jmqx.bridge.mysql.autoCreateTable",
+            properties.isMysqlAutoCreateTable()
+        ));
+        return properties;
+    }
+
     private static ClusterProperties loadClusterProperties(Properties config) {
         ClusterProperties properties = new ClusterProperties();
         properties.setEnabled(getBooleanProperty(config, "jmqx.cluster.enabled", properties.isEnabled()));
@@ -265,8 +379,7 @@ public class JmqxApplication {
     }
 
     private static ClusterMessageBus buildClusterMessageBus(ClusterProperties properties) {
-        // Stage-1 cluster implementation: local bus skeleton.
-        // Future bus types (redis/kafka/nats/grpc) should be wired here.
+        // 当前先保留总线抽象，后续接 Redis/Kafka/NATS/gRPC 时只需要替换这里的实现装配。
         return new LocalClusterMessageBus();
     }
 
@@ -331,6 +444,7 @@ public class JmqxApplication {
         try {
             int value = Integer.parseInt(raw);
             if (legacyKey.endsWith("cacheSeconds")) {
+                // 兼容旧配置，自动把秒级配置折算成毫秒。
                 return Math.max(value, 0) * 1000;
             }
             return value;

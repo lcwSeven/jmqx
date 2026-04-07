@@ -23,6 +23,9 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
+ * 当前 broker 节点暴露的轻量管理接口。
+ * 独立 admin 通过这里采集状态、客户端列表和下发热更新配置。
+ *
  * @author liucaiwen
  * @date 2026/4/7
  */
@@ -106,6 +109,7 @@ public class NodeAdminHttpServer {
                 return;
             }
             if ("POST".equalsIgnoreCase(method) && "/config".equals(route)) {
+                // 这里直接接收完整配置快照并热更新，避免 MQTT 节点因为安全配置调整而重启。
                 ConfigUpdateRequest request = objectMapper.readValue(exchange.getRequestBody(), ConfigUpdateRequest.class);
                 runtimeConfigService.update(
                     request.authType,
@@ -167,6 +171,7 @@ public class NodeAdminHttpServer {
         String clientIdQuery = normalize(params.get("clientId"));
         String usernameQuery = normalize(params.get("username"));
 
+        // 管理台聚合时会频繁轮询这里，因此只返回必要字段，保持接口轻量。
         return sessionRegistry.list().stream()
             .filter(session -> containsIgnoreCase(session.clientId(), clientIdQuery))
             .filter(session -> containsIgnoreCase(session.username(), usernameQuery))

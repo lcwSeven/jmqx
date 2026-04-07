@@ -9,6 +9,9 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 /**
+ * admin 进程内的节点注册表。
+ * 当前使用内存存储，适合单实例控制台；后续如果做高可用可以替换成数据库或配置中心。
+ *
  * @author liucaiwen
  * @date 2026/4/7
  */
@@ -55,6 +58,7 @@ public class NodeRegistryService {
         if (raw == null || raw.isBlank()) {
             return;
         }
+        // 约定格式为 name=url,name=url，方便通过 properties 快速预置节点。
         String[] parts = raw.split(",");
         for (String part : parts) {
             if (part == null || part.isBlank()) {
@@ -99,6 +103,7 @@ public class NodeRegistryService {
         if (!nodes.containsKey(candidate)) {
             return candidate;
         }
+        // 名称重复时自动补随机后缀，避免用户手工维护唯一 ID。
         while (true) {
             String next = candidate + "-" + UUID.randomUUID().toString().substring(0, 6);
             if (!nodes.containsKey(next)) {

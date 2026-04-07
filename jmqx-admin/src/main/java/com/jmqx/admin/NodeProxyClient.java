@@ -15,6 +15,9 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
+ * admin 到 broker 节点的 HTTP 代理客户端。
+ * admin 自己不保存节点运行态，只负责把请求代理到目标节点并补充节点元数据。
+ *
  * @author liucaiwen
  * @date 2026/4/7
  */
@@ -48,6 +51,7 @@ public class NodeProxyClient {
         String clientId,
         String username
     ) throws IOException, InterruptedException {
+        // 查询参数只在需要时拼上，避免生成冗余 URL。
         StringBuilder url = new StringBuilder(node.getBaseUrl()).append("/clients");
         boolean hasQuery = false;
         if (clientId != null && !clientId.isBlank()) {
@@ -111,6 +115,7 @@ public class NodeProxyClient {
         if (code >= 200 && code < 300) {
             return;
         }
+        // 统一把下游错误转成 IOException，便于上层按“节点不可用”处理。
         throw new IOException("HTTP " + code + ": " + response.body());
     }
 
