@@ -5,13 +5,12 @@ import com.jmqx.acl.AclAuthorizer;
 import com.jmqx.acl.AclRequest;
 import com.jmqx.bridge.BridgeMessage;
 import com.jmqx.bridge.MessageBridge;
-import com.jmqx.cluster.BrokerClusterReceiver;
-import com.jmqx.cluster.ClusterPublishMessage;
-import com.jmqx.cluster.ClusterReplicator;
 import com.jmqx.common.SharedSubscription;
 import com.jmqx.protocol.BrokerMessageHandler;
 import com.jmqx.protocol.ClientAuthenticator;
+import com.jmqx.router.SharedSubscriptionManager;
 import com.jmqx.router.SubscriptionRegistry;
+import com.jmqx.router.SubscriptionMatchResult;
 import com.jmqx.session.ClientSession;
 import com.jmqx.session.SessionRegistry;
 import com.jmqx.store.RetainedMessage;
@@ -47,12 +46,12 @@ import java.util.logging.Logger;
 
 /**
  * MQTT 核心消息处理器。
- * 负责连接鉴权、会话建立、订阅管理、消息路由、ACL 校验和集群复制。
+ * 负责连接鉴权、会话建立、订阅管理、消息路由和 ACL 校验。
  *
  * @author liucaiwen
  * @date 2026/4/2
  */
-public class MqttBrokerMessageHandler implements BrokerMessageHandler, BrokerClusterReceiver {
+public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     private static final Logger LOG = Logger.getLogger(MqttBrokerMessageHandler.class.getName());
     private static final AttributeKey<String> CLIENT_ID = AttributeKey.valueOf("jmqx.clientId");
     private static final AttributeKey<Boolean> CLEAN_SESSION = AttributeKey.valueOf("jmqx.cleanSession");
@@ -69,7 +68,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler, BrokerClu
     private final RetainedMessageStore retainedMessageStore;
     private final ClientAuthenticator clientAuthenticator;
     private final AclAuthorizer aclAuthorizer;
-    private final ClusterReplicator clusterReplicator;
+    private final SharedSubscriptionManager sharedSubscriptionManager;
     private final MessageBridge messageBridge;
 
     public MqttBrokerMessageHandler(
@@ -78,14 +77,16 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler, BrokerClu
             RetainedMessageStore retainedMessageStore,
             ClientAuthenticator clientAuthenticator,
             AclAuthorizer aclAuthorizer,
-            ClusterReplicator clusterReplicator,
+            SharedSubscriptionManager sharedSubscriptionManager,
             MessageBridge messageBridge) {
         this.sessionRegistry = sessionRegistry;
         this.subscriptionRegistry = subscriptionRegistry;
         this.retainedMessageStore = retainedMessageStore;
         this.clientAuthenticator = clientAuthenticator;
         this.aclAuthorizer = aclAuthorizer;
-        this.clusterReplicator = clusterReplicator;
+        this.sharedSubscriptionManager = sharedSubscriptionManager == null
+            ? new SharedSubscriptionManager()
+            : sharedSubscriptionManager;
         this.messageBridge = messageBridge == null ? MessageBridge.NOOP : messageBridge;
     }
 
@@ -143,6 +144,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler, BrokerClu
 
         sessionRegistry.remove(clientId);
         if (cleanSession) {
+            sharedSubscriptionManager.removeClient(clientId);
             subscriptionRegistry.removeClient(clientId);
         }
         publishClientLifecycleEvent(
@@ -255,6 +257,13 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler, BrokerClu
                 continue;
             }
             int qos = Math.min(subscription.qualityOfService().value(), 1);
+            SharedSubscription.Parsed shared = SharedSubscription.parse(topicFilter);
+            if (shared != null && !sharedSubscriptionManager.register(shared.group(), clientId)) {
+                grantedQos.add(MqttQoS.FAILURE.value());
+                LOG.warning(() -> "[SHARED] subscribe rejected by group limit clientId=" + clientId
+                    + ", group=" + shared.group() + ", topicFilter=" + topicFilter);
+                continue;
+            }
             subscriptionRegistry.subscribe(clientId, topicFilter, qos);
             grantedQos.add(qos);
             // MQTT 规范要求新订阅完成后立即回放匹配的 retained 消息。
@@ -279,7 +288,13 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler, BrokerClu
             return;
         }
 
-        message.payload().topics().forEach(topicFilter -> subscriptionRegistry.unsubscribe(clientId, topicFilter));
+        message.payload().topics().forEach(topicFilter -> {
+            SharedSubscription.Parsed shared = SharedSubscription.parse(topicFilter);
+            if (shared != null) {
+                sharedSubscriptionManager.unregister(shared.group(), clientId);
+            }
+            subscriptionRegistry.unsubscribe(clientId, topicFilter);
+        });
         ctx.writeAndFlush(MqttMessageBuilders.unsubAck().packetId(message.variableHeader().messageId()).build());
         LOG.info(() -> "[UNSUBSCRIBE] clientId=" + clientId + ", topics=" + message.payload().topics());
     }
@@ -299,12 +314,14 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler, BrokerClu
         }
 
         if (message.fixedHeader().isRetain()) {
+            // 判断是否为保留消息
             retainedMessageStore.saveOrRemove(new RetainedMessage(topic, payload, qos, true));
         }
 
-        // 本节点先完成本地投递，再复制到集群，保证单节点场景路径最短。
+        // 单机模式下先完成本地投递，再写桥接通道。
         routeMessage(topic, payload);
-        clusterReplicator.replicatePublish(topic, payload, qos, message.fixedHeader().isRetain());
+
+        // 消息桥接到对应消息队列
         messageBridge.publish(new BridgeMessage(
             clientId,
             topic,
@@ -383,7 +400,6 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler, BrokerClu
             retainedMessageStore.saveOrRemove(new RetainedMessage(topic, payload, qos, true));
         }
         routeMessage(topic, payload);
-        clusterReplicator.replicatePublish(topic, payload, qos, retain);
         messageBridge.publish(new BridgeMessage(
             sourceClientId,
             topic,
@@ -395,7 +411,14 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler, BrokerClu
     }
 
     private void routeMessage(String topic, byte[] payload) {
-        Set<String> subscribers = subscriptionRegistry.findSubscribers(topic);
+        SubscriptionMatchResult matchResult = subscriptionRegistry.findSubscriptionMatch(topic);
+        Set<String> subscribers = new java.util.LinkedHashSet<>(matchResult.getDirectSubscribers());
+        matchResult.getSharedSubscribersByGroup().forEach((group, candidates) -> {
+            String selected = sharedSubscriptionManager.selectSubscriber(group, candidates, sessionRegistry);
+            if (selected != null) {
+                subscribers.add(selected);
+            }
+        });
         LOG.fine(() -> "[ROUTE] topic=" + topic + ", subscribers=" + subscribers.size());
         for (String subscriber : subscribers) {
             Optional<ClientSession> sessionOptional = sessionRegistry.get(subscriber);
@@ -489,18 +512,6 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler, BrokerClu
         } catch (Exception ignored) {
             return "unknown";
         }
-    }
-
-    @Override
-    public void onClusterPublish(ClusterPublishMessage message) {
-        if (message.isRetain()) {
-            retainedMessageStore.saveOrRemove(
-                new RetainedMessage(message.getTopic(), message.getPayload(), message.getQos(), true)
-            );
-        }
-        routeMessage(message.getTopic(), message.getPayload());
-        LOG.info(() -> "[CLUSTER] deliver topic=" + message.getTopic() + ", qos=" + message.getQos()
-            + ", sourceNode=" + message.getSourceNodeId());
     }
 
     /**

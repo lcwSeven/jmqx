@@ -7,7 +7,7 @@
 - `jmqx-common`: 通用配置与工具类（`com.jmqx.common`）。
 - `jmqx-protocol`: 核心协议边界接口（`com.jmqx.protocol`，如 `ClientAuthenticator`、`BrokerMessageHandler`），用于解耦 `transport` 与 `core`。
 - `jmqx-plugin`: Auth/ACL 插件实现与工厂（`com.jmqx.auth`、`com.jmqx.acl`）。
-- `jmqx-core`: Broker 核心、会话、路由、存储、集群协调（`com.jmqx.broker`、`session/router/store/cluster`）。
+- `jmqx-core`: Broker 核心、会话、路由、存储（`com.jmqx.broker`、`session/router/store`）。
 - `jmqx-transport`: Netty TCP 接入与连接指标（`com.jmqx.transport`）。
 - `jmqx-admin`: 管理后台模块（后端 SpringBoot + 前端 React）。
 - `jmqx-app`: 启动装配模块（`com.jmqx.JmqxApplication` + `jmqx.properties`）。
@@ -104,69 +104,18 @@ npm run dev
 VITE_ADMIN_API_BASE=http://127.0.0.1:18083/api/admin
 ```
 
-## 集群架构设计（多主多从）
+## 当前定位
 
-### 目标
-
-- 多节点横向扩展，任意主节点可接入客户端（多主）
-- 从节点用于故障切换与扩展读流量（多从）
-- 节点间消息复制与状态同步
-
-### 架构分层
-
-1. 接入层（MQTT Gateway）
-- 每个节点都提供 MQTT 接入能力
-- 建议前置 LB 做 4 层转发，生产环境开启粘性会话
-
-2. 数据层（路由与会话）
-- 会话状态、订阅关系、Retained 建议外部化（Redis/DB）
-- 离线消息与 QoS 状态建议用持久化存储（Redis Stream/Kafka/DB）
-
-3. 集群复制层（Cluster Bus）
-- 节点把本地发布消息复制到 Cluster Bus
-- 其他节点消费后投递给本地在线订阅者
-- 当前代码已提供总线抽象与协调器，默认 `local` 实现
-
-4. 控制层（管理与配置）
-- 管理后台用于查看连接数、在线调整鉴权类型和缓存
-- 后续可扩展为节点发现、配置中心、滚动发布
-
-### 一致性与角色建议
-
-- 元数据（订阅拓扑、节点信息）建议强一致（Raft/etcd）
-- 消息分发建议最终一致（低延迟优先）
-- 角色：
-  - `MASTER`：正常承载读写流量
-  - `SLAVE`：热备/只读或低优先级流量（按策略接流）
-
-### 当前代码已落地
-
-- 集群配置：
-  - `jmqx.cluster.enabled`
-  - `jmqx.cluster.nodeId`
-  - `jmqx.cluster.role`
-  - `jmqx.cluster.busType`
-  - `jmqx.cluster.seedNodes`
-- 新增集群核心类（`com.jmqx.cluster`）：
-  - `ClusterCoordinator`
-  - `ClusterMessageBus`
-  - `ClusterReplicator`
-  - `LocalClusterMessageBus`
-  - `ReloadableClusterReplicator`
-- Broker 已接入跨节点发布复制与远端消息本地投递入口
-
-### 下一步演进建议
-
-1. 增加 `redis` 或 `kafka` 的 `ClusterMessageBus` 实现（替代 `local`）
-2. 把 `SessionRegistry/SubscriptionRegistry/RetainedStore` 切换为分布式实现
-3. 引入节点注册与健康检查（心跳 + 剔除）
-4. 为跨节点消息增加去重键（messageId + sourceNodeId）和监控指标
+当前版本专注单机稳定性与性能，不包含集群复制逻辑。
 
 可通过 JVM 参数覆盖默认监听地址与端口：
 
 ```bash
 -Djmqx.broker.host=0.0.0.0
 -Djmqx.broker.port=1883
+-Djmqx.broker.mqtts.enabled=false
+-Djmqx.broker.mqtts.host=0.0.0.0
+-Djmqx.broker.mqtts.port=8883
 -Djmqx.broker.bossThreads=1
 -Djmqx.broker.workerThreads=0
 -Djmqx.broker.readerIdleSeconds=120
@@ -174,15 +123,51 @@ VITE_ADMIN_API_BASE=http://127.0.0.1:18083/api/admin
 -Djmqx.broker.websocket.host=0.0.0.0
 -Djmqx.broker.websocket.port=8083
 -Djmqx.broker.websocket.path=/mqtt
+-Djmqx.broker.wss.enabled=false
+-Djmqx.broker.wss.host=0.0.0.0
+-Djmqx.broker.wss.port=8084
+-Djmqx.broker.wss.path=/mqtt
+-Djmqx.broker.tls.certChainFile=/path/to/server.crt
+-Djmqx.broker.tls.privateKeyFile=/path/to/server.key
+-Djmqx.broker.tls.privateKeyPassword=
 ```
 
 `jmqx.broker.readerIdleSeconds` 为读空闲超时秒数，设为 `0` 可关闭空闲连接检测。
 `jmqx.broker.websocket.enabled=false` 可关闭 websocket 接入。
+`jmqx.broker.mqtts.enabled=true` 或 `jmqx.broker.wss.enabled=true` 后，需要同时配置 TLS 证书与私钥路径。
+
+Retained 内存保护配置（默认启用）：
+
+```bash
+-Djmqx.retained.rocksdb.path=data/retained-rocksdb
+-Djmqx.retained.maxEntries=100000
+-Djmqx.retained.maxBytes=268435456
+-Djmqx.retained.maxPayloadBytes=1048576
+-Djmqx.retained.overflowStrategy=evict_lru
+```
+
+`jmqx.retained.overflowStrategy` 支持：
+- `evict_lru`：超限时按 LRU 淘汰旧 retained（默认）
+- `reject_new`：超限时拒绝新 retained 写入
+
+Shared subscription manager:
+
+```bash
+-Djmqx.shared.maxSubscribersPerGroup=1000
+-Djmqx.shared.slowConsumerStrikeThreshold=3
+```
 
 WebSocket MQTT 接入地址示例：
 
 ```text
 ws://127.0.0.1:8083/mqtt
+```
+
+MQTTS / WSS 接入地址示例：
+
+```text
+mqtts://127.0.0.1:8883
+wss://127.0.0.1:8084/mqtt
 ```
 
 ## 用户密码认证插件化
@@ -274,7 +259,7 @@ jmqx:auth:admin = admin123
 
 ## 消息桥接（Kafka / RocketMQ / MySQL）
 
-Broker 在处理到 `PUBLISH` 后，除了本地路由和集群复制，还可以把消息桥接转发到外部系统。
+Broker 在处理到 `PUBLISH` 后，除了本地路由，还可以把消息桥接转发到外部系统。
 
 - 支持类型：`kafka`、`rocketmq`、`mysql`
 - 支持多目标并行：`jmqx.bridge.types=kafka,rocketmq,mysql`

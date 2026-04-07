@@ -10,4 +10,11 @@ public interface RetainedMessageStore {
     void saveOrRemove(RetainedMessage message);
 
     List<RetainedMessage> findByTopicFilter(String topicFilter);
+
+    default RetainedStoreMetrics metrics() {
+        return RetainedStoreMetrics.EMPTY;
+    }
+
+    default void close() {
+    }
 }

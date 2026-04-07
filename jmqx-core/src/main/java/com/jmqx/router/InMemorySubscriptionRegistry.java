@@ -7,12 +7,10 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -22,7 +20,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * 数据结构说明：
  * 1. subscriptionsByClient：客户端 -> 订阅过滤器/QoS，主要用于管理后台查询和 removeClient 快速清理。
  * 2. root(TopicTrieNode)：按 topic filter 分层索引，主要用于 publish 时快速匹配订阅者。
- * 3. sharedGroupIndexes：共享订阅组轮询游标，保证同组内近似均衡分发。
+ * 3. 共享订阅候选集合：由 Trie 返回候选客户端，具体选举逻辑由 SharedSubscriptionManager 处理。
  *
  * @author liucaiwen
  * @date 2026/4/2
@@ -32,11 +30,6 @@ public class InMemorySubscriptionRegistry implements SubscriptionRegistry {
      * 客户端维度的订阅快照：clientId -> (topicFilter -> qos)。
      */
     private final ConcurrentMap<String, ClientSubscriptions> subscriptionsByClient = new ConcurrentHashMap<>();
-
-    /**
-     * 共享订阅组轮询索引：group -> nextIndex。
-     */
-    private final ConcurrentMap<String, AtomicInteger> sharedGroupIndexes = new ConcurrentHashMap<>();
 
     /**
      * Topic Trie 根节点。
@@ -83,25 +76,24 @@ public class InMemorySubscriptionRegistry implements SubscriptionRegistry {
     }
 
     /**
-     * 根据发布 topic 匹配订阅者。
-     * 普通订阅全部命中；共享订阅按 group 只挑选一个客户端返回。
+     * 根据发布 topic 匹配订阅者（兼容旧接口）。
+     * 这里返回普通订阅 + 共享候选全集，实际共享选举由 SharedSubscriptionManager 执行。
      */
     @Override
     public Set<String> findSubscribers(String topic) {
+        SubscriptionMatchResult matchResult = findSubscriptionMatch(topic);
+        Set<String> result = new LinkedHashSet<>(matchResult.getDirectSubscribers());
+        matchResult.getSharedSubscribersByGroup().values().forEach(result::addAll);
+        return result;
+    }
+
+    @Override
+    public SubscriptionMatchResult findSubscriptionMatch(String topic) {
         Set<String> directSubscribers = new LinkedHashSet<>();
         Map<String, Set<String>> sharedSubscribersByGroup = new HashMap<>();
         String[] topicLevels = splitLevels(topic);
         collectMatches(root, topicLevels, 0, directSubscribers, sharedSubscribersByGroup);
-
-        // 共享订阅同组内只选择一个客户端，普通订阅则全部下发。
-        Set<String> result = new LinkedHashSet<>(directSubscribers);
-        sharedSubscribersByGroup.forEach((group, candidates) -> {
-            String selected = pickSharedSubscriber(group, candidates);
-            if (selected != null) {
-                result.add(selected);
-            }
-        });
-        return result;
+        return new SubscriptionMatchResult(directSubscribers, sharedSubscribersByGroup);
     }
 
     /**
@@ -244,20 +236,6 @@ public class InMemorySubscriptionRegistry implements SubscriptionRegistry {
      */
     private static String[] splitLevels(String topic) {
         return topic.split("/", -1);
-    }
-
-    /**
-     * 共享订阅组内选择一个客户端。
-     * 当前实现按组内候选做轮询，不保证强一致，仅保证单节点内近似均衡。
-     */
-    private String pickSharedSubscriber(String group, Set<String> candidates) {
-        if (candidates == null || candidates.isEmpty()) {
-            return null;
-        }
-        List<String> list = new ArrayList<>(candidates);
-        AtomicInteger idx = sharedGroupIndexes.computeIfAbsent(group, ignored -> new AtomicInteger(0));
-        int current = Math.floorMod(idx.getAndIncrement(), list.size());
-        return list.get(current);
     }
 
     /**

@@ -14,31 +14,26 @@ import com.jmqx.broker.MqttBrokerMessageHandler;
 import com.jmqx.bridge.BridgeProperties;
 import com.jmqx.bridge.MessageBridge;
 import com.jmqx.bridge.MessageBridgeFactory;
-import com.jmqx.cluster.ClusterCoordinator;
-import com.jmqx.cluster.ClusterMessageBus;
-import com.jmqx.cluster.ClusterProperties;
-import com.jmqx.cluster.ClusterRole;
-import com.jmqx.cluster.LocalClusterMessageBus;
-import com.jmqx.cluster.NoopClusterReplicator;
-import com.jmqx.cluster.ReloadableClusterReplicator;
 import com.jmqx.common.BrokerProperties;
 import com.jmqx.protocol.ClientAuthenticator;
 import com.jmqx.router.InMemorySubscriptionRegistry;
+import com.jmqx.router.SharedSubscriptionManager;
 import com.jmqx.router.SubscriptionRegistry;
 import com.jmqx.session.InMemorySessionRegistry;
 import com.jmqx.session.SessionRegistry;
-import com.jmqx.store.InMemoryRetainedMessageStore;
+import com.jmqx.store.RocksDbRetainedMessageStore;
 import com.jmqx.store.RetainedMessageStore;
+import com.jmqx.store.RetainedOverflowStrategy;
+import com.jmqx.store.RetainedStoreProperties;
 import com.jmqx.transport.ConnectionMetrics;
-import com.jmqx.transport.NettyMqttServer;
-import com.jmqx.transport.NettyMqttWebSocketServer;
+import com.jmqx.transport.NettyMqttEndpointServer;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.Properties;
 
 /**
- * 应用启动装配入口，负责把 broker、插件、集群和节点管理 API 组装起来。
+ * 应用启动装配入口，负责把 broker、插件和节点管理 API 组装起来。
  *
  * @author liucaiwen
  * @date 2026/4/2
@@ -50,26 +45,30 @@ public class JmqxApplication {
         AuthProperties authProperties = loadAuthProperties(config);
         AclProperties aclProperties = loadAclProperties(config);
         BridgeProperties bridgeProperties = loadBridgeProperties(config);
+        RetainedStoreProperties retainedStoreProperties = loadRetainedStoreProperties(config);
         NodeAdminProperties nodeAdminProperties = loadNodeAdminProperties(config);
-        ClusterProperties clusterProperties = loadClusterProperties(config);
+        int sharedMaxSubscribers = getIntProperty(config, "jmqx.shared.maxSubscribersPerGroup", 1000);
+        int sharedSlowThreshold = getIntProperty(config, "jmqx.shared.slowConsumerStrikeThreshold", 3);
+        String nodeId = getStringProperty(config, "jmqx.node.id", "node-1");
         SessionRegistry sessionRegistry = new InMemorySessionRegistry();
         SubscriptionRegistry subscriptionRegistry = new InMemorySubscriptionRegistry();
-        RetainedMessageStore retainedMessageStore = new InMemoryRetainedMessageStore();
+        SharedSubscriptionManager sharedSubscriptionManager = new SharedSubscriptionManager(
+            sharedMaxSubscribers,
+            sharedSlowThreshold
+        );
+        RetainedMessageStore retainedMessageStore = buildRetainedMessageStore(retainedStoreProperties);
         ReloadableAuthProvider authProvider = new ReloadableAuthProvider(AuthProviderFactory.create(authProperties));
         ClientAuthenticator clientAuthenticator = (clientId, username, password) ->
                 authProvider.authenticate(new AuthRequest(clientId, username, password));
         ReloadableAclAuthorizer aclAuthorizer = new ReloadableAclAuthorizer(AclAuthorizerFactory.create(aclProperties));
         ConnectionMetrics connectionMetrics = new ConnectionMetrics();
         RuntimeConfigService runtimeConfigService = new RuntimeConfigService(
-            authProperties,
-            aclProperties,
-            authProvider,
-            aclAuthorizer
+                authProperties,
+                aclProperties,
+                authProvider,
+                aclAuthorizer
         );
         MessageBridge messageBridge = MessageBridgeFactory.create(bridgeProperties);
-
-        // 集群复制器默认先使用空实现，只有在开启集群时才切到真实协调器。
-        ReloadableClusterReplicator clusterReplicator = new ReloadableClusterReplicator(new NoopClusterReplicator());
 
         MqttBrokerMessageHandler brokerMessageHandler = new MqttBrokerMessageHandler(
                 sessionRegistry,
@@ -77,66 +76,132 @@ public class JmqxApplication {
                 retainedMessageStore,
                 clientAuthenticator,
                 aclAuthorizer,
-                clusterReplicator,
+                sharedSubscriptionManager,
                 messageBridge
         );
-        ClusterCoordinator clusterCoordinator = null;
-        if (clusterProperties.isEnabled()) {
-            ClusterMessageBus messageBus = buildClusterMessageBus(clusterProperties);
-            clusterCoordinator = new ClusterCoordinator(clusterProperties, messageBus, brokerMessageHandler);
-            clusterReplicator.setDelegate(clusterCoordinator);
-            clusterCoordinator.start();
-        }
 
         // 先启动 MQTT TCP，再按需启动 WebSocket 接入。
-        NettyMqttServer mqttServer = new NettyMqttServer(brokerProperties, brokerMessageHandler, connectionMetrics);
+        NettyMqttEndpointServer mqttServer = new NettyMqttEndpointServer(
+                brokerProperties,
+                brokerMessageHandler,
+                connectionMetrics,
+                new NettyMqttEndpointServer.EndpointSpec(
+                        true,
+                        brokerProperties.getHost(),
+                        brokerProperties.getPort(),
+                        false,
+                        false,
+                        null,
+                        "mqtt",
+                        "MQTT"
+                )
+        );
         mqttServer.start();
-        NettyMqttWebSocketServer mqttWebSocketServer = new NettyMqttWebSocketServer(
-            brokerProperties,
-            brokerMessageHandler,
-            connectionMetrics
+        // 支持 MQTTS 的服务启动
+        NettyMqttEndpointServer mqttTlsServer = new NettyMqttEndpointServer(
+                brokerProperties,
+                brokerMessageHandler,
+                connectionMetrics,
+                new NettyMqttEndpointServer.EndpointSpec(
+                        brokerProperties.isMqttsEnabled(),
+                        brokerProperties.getMqttsHost(),
+                        brokerProperties.getMqttsPort(),
+                        true,
+                        false,
+                        null,
+                        "mqtts",
+                        "MQTTS"
+                )
+        );
+        mqttTlsServer.start();
+        // 支持 ws 的服务启动
+        NettyMqttEndpointServer mqttWebSocketServer = new NettyMqttEndpointServer(
+                brokerProperties,
+                brokerMessageHandler,
+                connectionMetrics,
+                new NettyMqttEndpointServer.EndpointSpec(
+                        brokerProperties.isWebsocketEnabled(),
+                        brokerProperties.getWebsocketHost(),
+                        brokerProperties.getWebsocketPort(),
+                        false,
+                        true,
+                        brokerProperties.getWebsocketPath(),
+                        "websocket",
+                        "WS"
+                )
         );
         mqttWebSocketServer.start();
+        // 支持 wss 的服务启动
+        NettyMqttEndpointServer mqttWssServer = new NettyMqttEndpointServer(
+                brokerProperties,
+                brokerMessageHandler,
+                connectionMetrics,
+                new NettyMqttEndpointServer.EndpointSpec(
+                        brokerProperties.isWssEnabled(),
+                        brokerProperties.getWssHost(),
+                        brokerProperties.getWssPort(),
+                        true,
+                        true,
+                        brokerProperties.getWssPath(),
+                        "wss",
+                        "WSS"
+                )
+        );
+        mqttWssServer.start();
 
         NodeAdminHttpServer nodeAdminHttpServer = null;
         if (nodeAdminProperties.isEnabled()) {
             // 节点管理 API 只暴露当前节点运行状态和在线热更新能力，供独立 admin 聚合使用。
             nodeAdminHttpServer = new NodeAdminHttpServer(
-                nodeAdminProperties,
-                connectionMetrics,
-                runtimeConfigService,
-                sessionRegistry,
-                subscriptionRegistry,
-                clusterProperties.getNodeId()
+                    nodeAdminProperties,
+                    connectionMetrics,
+                    runtimeConfigService,
+                    sessionRegistry,
+                    subscriptionRegistry,
+                    nodeId
             );
             nodeAdminHttpServer.start();
         }
 
         NodeAdminHttpServer finalNodeAdminHttpServer = nodeAdminHttpServer;
-        ClusterCoordinator finalClusterCoordinator = clusterCoordinator;
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             if (finalNodeAdminHttpServer != null) {
                 finalNodeAdminHttpServer.stop();
             }
-            if (finalClusterCoordinator != null) {
-                finalClusterCoordinator.stop();
-            }
+            retainedMessageStore.close();
             messageBridge.close();
+            mqttWssServer.stop();
             mqttWebSocketServer.stop();
+            mqttTlsServer.stop();
             mqttServer.stop();
         }));
         System.out.println("JMQX started on " + brokerProperties.getHost() + ":" + brokerProperties.getPort());
+        if (brokerProperties.isMqttsEnabled()) {
+            String mqttsHost = toDisplayHost(brokerProperties.getMqttsHost());
+            System.out.println("JMQX mqtts: mqtts://" + mqttsHost + ":" + brokerProperties.getMqttsPort());
+        }
         if (brokerProperties.isWebsocketEnabled()) {
             String wsHost = toDisplayHost(brokerProperties.getWebsocketHost());
             String wsPath = normalizeWebsocketPath(brokerProperties.getWebsocketPath());
             System.out.println("JMQX websocket: ws://" + wsHost + ":" + brokerProperties.getWebsocketPort() + wsPath);
         }
+        if (brokerProperties.isWssEnabled()) {
+            String wssHost = toDisplayHost(brokerProperties.getWssHost());
+            String wssPath = normalizeWebsocketPath(brokerProperties.getWssPath());
+            System.out.println("JMQX wss: wss://" + wssHost + ":" + brokerProperties.getWssPort() + wssPath);
+        }
         System.out.println("AUTH plugin: " + authProperties.getType());
         System.out.println("ACL plugin: " + aclProperties.getType());
         System.out.println("BRIDGE enabled=" + bridgeProperties.isEnabled() + ", types=" + bridgeProperties.getTypes());
-        System.out.println("CLUSTER enabled=" + clusterProperties.isEnabled() + ", nodeId=" + clusterProperties.getNodeId()
-            + ", role=" + clusterProperties.getRole() + ", busType=" + clusterProperties.getBusType());
+        System.out.println("RETAINED maxEntries=" + retainedStoreProperties.getMaxEntries()
+            + ", maxBytes=" + retainedStoreProperties.getMaxBytes()
+            + ", maxPayloadBytes=" + retainedStoreProperties.getMaxPayloadBytes()
+            + ", rocksdbPath=" + retainedStoreProperties.getRocksdbPath()
+            + ", overflowStrategy=" + retainedStoreProperties.getOverflowStrategy());
+        System.out.println("SHARED maxSubscribersPerGroup=" + sharedMaxSubscribers
+            + ", slowConsumerStrikeThreshold=" + sharedSlowThreshold);
+        System.out.println("NODE id=" + nodeId);
         if (nodeAdminProperties.isEnabled()) {
             String adminDisplayHost = toDisplayHost(nodeAdminProperties.getHost());
             System.out.println("NODE ADMIN API: http://" + adminDisplayHost + ":" + nodeAdminProperties.getPort() + "/api/admin/status");
@@ -160,28 +225,78 @@ public class JmqxApplication {
         BrokerProperties properties = new BrokerProperties();
         properties.setHost(getStringProperty(config, "jmqx.broker.host", properties.getHost()));
         properties.setPort(getIntProperty(config, "jmqx.broker.port", properties.getPort()));
+        properties.setMqttsEnabled(getBooleanProperty(
+                config,
+                "jmqx.broker.mqtts.enabled",
+                properties.isMqttsEnabled()
+        ));
+        properties.setMqttsHost(getStringProperty(
+                config,
+                "jmqx.broker.mqtts.host",
+                properties.getMqttsHost()
+        ));
+        properties.setMqttsPort(getIntProperty(
+                config,
+                "jmqx.broker.mqtts.port",
+                properties.getMqttsPort()
+        ));
         properties.setBossThreads(getIntProperty(config, "jmqx.broker.bossThreads", properties.getBossThreads()));
         properties.setWorkerThreads(getIntProperty(config, "jmqx.broker.workerThreads", properties.getWorkerThreads()));
         properties.setReaderIdleSeconds(getIntProperty(config, "jmqx.broker.readerIdleSeconds", properties.getReaderIdleSeconds()));
         properties.setWebsocketEnabled(getBooleanProperty(
-            config,
-            "jmqx.broker.websocket.enabled",
-            properties.isWebsocketEnabled()
+                config,
+                "jmqx.broker.websocket.enabled",
+                properties.isWebsocketEnabled()
         ));
         properties.setWebsocketHost(getStringProperty(
-            config,
-            "jmqx.broker.websocket.host",
-            properties.getWebsocketHost()
+                config,
+                "jmqx.broker.websocket.host",
+                properties.getWebsocketHost()
         ));
         properties.setWebsocketPort(getIntProperty(
-            config,
-            "jmqx.broker.websocket.port",
-            properties.getWebsocketPort()
+                config,
+                "jmqx.broker.websocket.port",
+                properties.getWebsocketPort()
         ));
         properties.setWebsocketPath(getStringProperty(
-            config,
-            "jmqx.broker.websocket.path",
-            properties.getWebsocketPath()
+                config,
+                "jmqx.broker.websocket.path",
+                properties.getWebsocketPath()
+        ));
+        properties.setWssEnabled(getBooleanProperty(
+                config,
+                "jmqx.broker.wss.enabled",
+                properties.isWssEnabled()
+        ));
+        properties.setWssHost(getStringProperty(
+                config,
+                "jmqx.broker.wss.host",
+                properties.getWssHost()
+        ));
+        properties.setWssPort(getIntProperty(
+                config,
+                "jmqx.broker.wss.port",
+                properties.getWssPort()
+        ));
+        properties.setWssPath(getStringProperty(
+                config,
+                "jmqx.broker.wss.path",
+                properties.getWssPath()
+        ));
+        properties.setTlsCertChainFile(getStringProperty(
+                config,
+                "jmqx.broker.tls.certChainFile",
+                properties.getTlsCertChainFile()
+        ));
+        properties.setTlsPrivateKeyFile(getStringProperty(
+                config,
+                "jmqx.broker.tls.privateKeyFile",
+                properties.getTlsPrivateKeyFile()
+        ));
+        properties.setTlsPrivateKeyPassword(getStringProperty(
+                config,
+                "jmqx.broker.tls.privateKeyPassword",
+                properties.getTlsPrivateKeyPassword()
         ));
         return properties;
     }
@@ -191,10 +306,10 @@ public class JmqxApplication {
         properties.setType(getStringProperty(config, "jmqx.auth.type", properties.getType()));
         properties.setChain(getStringProperty(config, "jmqx.auth.chain", properties.getChain()));
         properties.setCacheMillis(getIntProperty(
-            config,
-            "jmqx.auth.cacheMillis",
-            "jmqx.auth.cacheSeconds",
-            properties.getCacheMillis()
+                config,
+                "jmqx.auth.cacheMillis",
+                "jmqx.auth.cacheSeconds",
+                properties.getCacheMillis()
         ));
 
         properties.setHttpUrl(getStringProperty(config, "jmqx.auth.http.url", properties.getHttpUrl()));
@@ -222,10 +337,10 @@ public class JmqxApplication {
         properties.setType(getStringProperty(config, "jmqx.acl.type", properties.getType()));
         properties.setDefaultAllow(getBooleanProperty(config, "jmqx.acl.defaultAllow", properties.isDefaultAllow()));
         properties.setCacheMillis(getIntProperty(
-            config,
-            "jmqx.acl.cacheMillis",
-            "jmqx.acl.cacheSeconds",
-            properties.getCacheMillis()
+                config,
+                "jmqx.acl.cacheMillis",
+                "jmqx.acl.cacheSeconds",
+                properties.getCacheMillis()
         ));
 
         properties.setHttpUrl(getStringProperty(config, "jmqx.acl.http.url", properties.getHttpUrl()));
@@ -245,19 +360,19 @@ public class JmqxApplication {
     private static NodeAdminProperties loadNodeAdminProperties(Properties config) {
         NodeAdminProperties properties = new NodeAdminProperties();
         properties.setEnabled(getBooleanProperty(
-            config,
-            "jmqx.nodeAdmin.enabled",
-            getBooleanProperty(config, "jmqx.admin.enabled", properties.isEnabled())
+                config,
+                "jmqx.nodeAdmin.enabled",
+                getBooleanProperty(config, "jmqx.admin.enabled", properties.isEnabled())
         ));
         properties.setHost(getStringProperty(
-            config,
-            "jmqx.nodeAdmin.host",
-            getStringProperty(config, "jmqx.admin.host", properties.getHost())
+                config,
+                "jmqx.nodeAdmin.host",
+                getStringProperty(config, "jmqx.admin.host", properties.getHost())
         ));
         properties.setPort(getIntProperty(
-            config,
-            "jmqx.nodeAdmin.port",
-            getIntProperty(config, "jmqx.admin.port", properties.getPort())
+                config,
+                "jmqx.nodeAdmin.port",
+                getIntProperty(config, "jmqx.admin.port", properties.getPort())
         ));
         return properties;
     }
@@ -268,119 +383,132 @@ public class JmqxApplication {
         properties.setTypes(getStringProperty(config, "jmqx.bridge.types", properties.getTypes()));
         properties.setAsync(getBooleanProperty(config, "jmqx.bridge.async", properties.isAsync()));
         properties.setAsyncQueueCapacity(getIntProperty(
-            config,
-            "jmqx.bridge.async.queueCapacity",
-            properties.getAsyncQueueCapacity()
+                config,
+                "jmqx.bridge.async.queueCapacity",
+                properties.getAsyncQueueCapacity()
         ));
         properties.setAsyncWorkerCount(getIntProperty(
-            config,
-            "jmqx.bridge.async.workerCount",
-            properties.getAsyncWorkerCount()
+                config,
+                "jmqx.bridge.async.workerCount",
+                properties.getAsyncWorkerCount()
         ));
 
         properties.setKafkaBootstrapServers(getStringProperty(
-            config,
-            "jmqx.bridge.kafka.bootstrapServers",
-            properties.getKafkaBootstrapServers()
+                config,
+                "jmqx.bridge.kafka.bootstrapServers",
+                properties.getKafkaBootstrapServers()
         ));
         properties.setKafkaTopic(getStringProperty(
-            config,
-            "jmqx.bridge.kafka.topic",
-            properties.getKafkaTopic()
+                config,
+                "jmqx.bridge.kafka.topic",
+                properties.getKafkaTopic()
         ));
         properties.setKafkaAcks(getStringProperty(
-            config,
-            "jmqx.bridge.kafka.acks",
-            properties.getKafkaAcks()
+                config,
+                "jmqx.bridge.kafka.acks",
+                properties.getKafkaAcks()
         ));
         properties.setKafkaClientId(getStringProperty(
-            config,
-            "jmqx.bridge.kafka.clientId",
-            properties.getKafkaClientId()
+                config,
+                "jmqx.bridge.kafka.clientId",
+                properties.getKafkaClientId()
         ));
         properties.setKafkaCompressionType(getStringProperty(
-            config,
-            "jmqx.bridge.kafka.compressionType",
-            properties.getKafkaCompressionType()
+                config,
+                "jmqx.bridge.kafka.compressionType",
+                properties.getKafkaCompressionType()
         ));
 
         properties.setRocketmqNameServer(getStringProperty(
-            config,
-            "jmqx.bridge.rocketmq.nameServer",
-            properties.getRocketmqNameServer()
+                config,
+                "jmqx.bridge.rocketmq.nameServer",
+                properties.getRocketmqNameServer()
         ));
         properties.setRocketmqProducerGroup(getStringProperty(
-            config,
-            "jmqx.bridge.rocketmq.producerGroup",
-            properties.getRocketmqProducerGroup()
+                config,
+                "jmqx.bridge.rocketmq.producerGroup",
+                properties.getRocketmqProducerGroup()
         ));
         properties.setRocketmqTopic(getStringProperty(
-            config,
-            "jmqx.bridge.rocketmq.topic",
-            properties.getRocketmqTopic()
+                config,
+                "jmqx.bridge.rocketmq.topic",
+                properties.getRocketmqTopic()
         ));
         properties.setRocketmqSyncSend(getBooleanProperty(
-            config,
-            "jmqx.bridge.rocketmq.syncSend",
-            properties.isRocketmqSyncSend()
+                config,
+                "jmqx.bridge.rocketmq.syncSend",
+                properties.isRocketmqSyncSend()
         ));
         properties.setRocketmqTimeoutMs(getIntProperty(
-            config,
-            "jmqx.bridge.rocketmq.timeoutMs",
-            properties.getRocketmqTimeoutMs()
+                config,
+                "jmqx.bridge.rocketmq.timeoutMs",
+                properties.getRocketmqTimeoutMs()
         ));
 
         properties.setMysqlDriver(getStringProperty(
-            config,
-            "jmqx.bridge.mysql.driver",
-            properties.getMysqlDriver()
+                config,
+                "jmqx.bridge.mysql.driver",
+                properties.getMysqlDriver()
         ));
         properties.setMysqlUrl(getStringProperty(
-            config,
-            "jmqx.bridge.mysql.url",
-            properties.getMysqlUrl()
+                config,
+                "jmqx.bridge.mysql.url",
+                properties.getMysqlUrl()
         ));
         properties.setMysqlUser(getStringProperty(
-            config,
-            "jmqx.bridge.mysql.user",
-            properties.getMysqlUser()
+                config,
+                "jmqx.bridge.mysql.user",
+                properties.getMysqlUser()
         ));
         properties.setMysqlPassword(getStringProperty(
-            config,
-            "jmqx.bridge.mysql.password",
-            properties.getMysqlPassword()
+                config,
+                "jmqx.bridge.mysql.password",
+                properties.getMysqlPassword()
         ));
         properties.setMysqlTable(getStringProperty(
-            config,
-            "jmqx.bridge.mysql.table",
-            properties.getMysqlTable()
+                config,
+                "jmqx.bridge.mysql.table",
+                properties.getMysqlTable()
         ));
         properties.setMysqlAutoCreateTable(getBooleanProperty(
-            config,
-            "jmqx.bridge.mysql.autoCreateTable",
-            properties.isMysqlAutoCreateTable()
+                config,
+                "jmqx.bridge.mysql.autoCreateTable",
+                properties.isMysqlAutoCreateTable()
         ));
         return properties;
     }
 
-    private static ClusterProperties loadClusterProperties(Properties config) {
-        ClusterProperties properties = new ClusterProperties();
-        properties.setEnabled(getBooleanProperty(config, "jmqx.cluster.enabled", properties.isEnabled()));
-        properties.setNodeId(getStringProperty(config, "jmqx.cluster.nodeId", properties.getNodeId()));
-        String role = getStringProperty(config, "jmqx.cluster.role", properties.getRole().name());
-        try {
-            properties.setRole(ClusterRole.valueOf(role.toUpperCase()));
-        } catch (IllegalArgumentException ignored) {
-            properties.setRole(ClusterRole.MASTER);
-        }
-        properties.setBusType(getStringProperty(config, "jmqx.cluster.busType", properties.getBusType()));
-        properties.setSeedNodes(getStringProperty(config, "jmqx.cluster.seedNodes", properties.getSeedNodes()));
+    private static RetainedStoreProperties loadRetainedStoreProperties(Properties config) {
+        RetainedStoreProperties properties = new RetainedStoreProperties();
+        properties.setRocksdbPath(getStringProperty(
+            config,
+            "jmqx.retained.rocksdb.path",
+            properties.getRocksdbPath()
+        ));
+        properties.setMaxEntries(getIntProperty(
+            config,
+            "jmqx.retained.maxEntries",
+            properties.getMaxEntries()
+        ));
+        properties.setMaxBytes(getLongProperty(
+            config,
+            "jmqx.retained.maxBytes",
+            properties.getMaxBytes()
+        ));
+        properties.setMaxPayloadBytes(getIntProperty(
+            config,
+            "jmqx.retained.maxPayloadBytes",
+            properties.getMaxPayloadBytes()
+        ));
+        properties.setOverflowStrategy(RetainedOverflowStrategy.parse(
+            getStringProperty(config, "jmqx.retained.overflowStrategy", properties.getOverflowStrategy().name()),
+            properties.getOverflowStrategy()
+        ));
         return properties;
     }
 
-    private static ClusterMessageBus buildClusterMessageBus(ClusterProperties properties) {
-        // 当前先保留总线抽象，后续接 Redis/Kafka/NATS/gRPC 时只需要替换这里的实现装配。
-        return new LocalClusterMessageBus();
+    private static RetainedMessageStore buildRetainedMessageStore(RetainedStoreProperties properties) {
+        return new RocksDbRetainedMessageStore(properties);
     }
 
     private static String getStringProperty(Properties config, String key, String defaultValue) {
@@ -419,6 +547,15 @@ public class JmqxApplication {
         String raw = getStringProperty(config, key, Integer.toString(defaultValue));
         try {
             return Integer.parseInt(raw);
+        } catch (NumberFormatException ignored) {
+            return defaultValue;
+        }
+    }
+
+    private static long getLongProperty(Properties config, String key, long defaultValue) {
+        String raw = getStringProperty(config, key, Long.toString(defaultValue));
+        try {
+            return Long.parseLong(raw);
         } catch (NumberFormatException ignored) {
             return defaultValue;
         }

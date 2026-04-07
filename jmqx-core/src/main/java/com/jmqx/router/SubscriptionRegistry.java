@@ -16,5 +16,7 @@ public interface SubscriptionRegistry {
 
     Set<String> findSubscribers(String topic);
 
+    SubscriptionMatchResult findSubscriptionMatch(String topic);
+
     Map<String, Integer> findSubscriptions(String clientId);
 }
