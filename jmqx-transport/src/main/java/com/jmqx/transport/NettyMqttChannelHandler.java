@@ -1,6 +1,6 @@
 package com.jmqx.transport;
 
-import com.jmqx.broker.BrokerMessageHandler;
+import com.jmqx.protocol.BrokerMessageHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.handler.codec.mqtt.MqttMessage;

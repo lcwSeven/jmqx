@@ -109,6 +109,16 @@ input, select {
   border-radius: 6px;
 }
 
+textarea {
+  width: 420px;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid #cad3df;
+  border-radius: 6px;
+  font-family: Menlo, Monaco, Consolas, "Courier New", monospace;
+}
+
 .primary-btn {
   margin-top: 14px;
   border: 0;

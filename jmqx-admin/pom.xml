@@ -13,23 +13,21 @@
 
     <dependencies>
         <dependency>
-            <groupId>com.jmqx</groupId>
-            <artifactId>jmqx-core</artifactId>
-            <version>${project.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>com.jmqx</groupId>
-            <artifactId>jmqx-plugin</artifactId>
-            <version>${project.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>com.jmqx</groupId>
-            <artifactId>jmqx-transport</artifactId>
-            <version>${project.version}</version>
-        </dependency>
-        <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
     </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.6.1</version>
+                <configuration>
+                    <mainClass>com.jmqx.admin.AdminBackendApplication</mainClass>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
 </project>

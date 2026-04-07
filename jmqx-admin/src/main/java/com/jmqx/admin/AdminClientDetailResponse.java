@@ -7,6 +7,8 @@ import java.util.List;
  * @date 2026/4/5
  */
 public class AdminClientDetailResponse {
+    private String nodeId;
+    private String nodeName;
     private String clientId;
     private long onlineAtEpochMillis;
     private String username;
@@ -14,6 +16,22 @@ public class AdminClientDetailResponse {
     private String serviceNodeIp;
     private int keepAliveSeconds;
     private List<AdminClientSubscriptionResponse> subscriptions;
+
+    public String getNodeId() {
+        return nodeId;
+    }
+
+    public void setNodeId(String nodeId) {
+        this.nodeId = nodeId;
+    }
+
+    public String getNodeName() {
+        return nodeName;
+    }
+
+    public void setNodeName(String nodeName) {
+        this.nodeName = nodeName;
+    }
 
     public String getClientId() {
         return clientId;

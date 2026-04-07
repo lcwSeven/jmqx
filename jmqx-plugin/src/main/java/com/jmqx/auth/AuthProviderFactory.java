@@ -1,9 +1,13 @@
 package com.jmqx.auth;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.ServiceLoader;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * @author liucaiwen
@@ -14,20 +18,49 @@ public final class AuthProviderFactory {
     }
 
     public static AuthProvider create(AuthProperties properties) {
-        String type = normalizeType(properties.getType());
         Map<String, AuthProviderPlugin> plugins = new HashMap<>();
         registerBuiltins(plugins);
         loadExtensions(plugins);
 
-        AuthProviderPlugin plugin = plugins.get(type);
-        if (plugin == null) {
-            plugin = plugins.get("allow_all");
-        }
-        AuthProvider delegate = plugin.create(properties);
+        AuthProvider delegate = createDelegate(properties, plugins);
         if (properties.getCacheMillis() <= 0) {
             return delegate;
         }
         return new CachedAuthProvider(delegate, properties.getCacheMillis());
+    }
+
+    private static AuthProvider createDelegate(
+        AuthProperties properties,
+        Map<String, AuthProviderPlugin> plugins
+    ) {
+        List<String> chainTypes = parseChain(properties.getChain());
+        if (!chainTypes.isEmpty()) {
+            List<AuthProvider> chain = chainTypes.stream()
+                .map(plugins::get)
+                .filter(Objects::nonNull)
+                .map(plugin -> plugin.create(properties))
+                .collect(Collectors.toList());
+            return new ChainedAuthProvider(chain);
+        }
+        return resolvePlugin(plugins, normalizeType(properties.getType())).create(properties);
+    }
+
+    private static List<String> parseChain(String chainRaw) {
+        if (chainRaw == null || chainRaw.isBlank()) {
+            return List.of();
+        }
+        return Stream.of(chainRaw.split(","))
+            .map(AuthProviderFactory::normalizeChainType)
+            .filter(type -> !type.isBlank())
+            .collect(Collectors.toList());
+    }
+
+    private static AuthProviderPlugin resolvePlugin(Map<String, AuthProviderPlugin> plugins, String type) {
+        AuthProviderPlugin plugin = plugins.get(type);
+        if (plugin != null) {
+            return plugin;
+        }
+        return plugins.get("allow_all");
     }
 
     private static void registerBuiltins(Map<String, AuthProviderPlugin> plugins) {
@@ -48,6 +81,13 @@ public final class AuthProviderFactory {
     private static String normalizeType(String type) {
         if (type == null || type.isBlank()) {
             return "allow_all";
+        }
+        return type.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private static String normalizeChainType(String type) {
+        if (type == null) {
+            return "";
         }
         return type.trim().toLowerCase(Locale.ROOT);
     }

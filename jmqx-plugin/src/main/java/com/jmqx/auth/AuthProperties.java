@@ -6,6 +6,7 @@ package com.jmqx.auth;
  */
 public class AuthProperties {
     private String type = "allow_all";
+    private String chain = "";
     private int cacheMillis = 60_000;
 
     private String httpUrl = "";
@@ -32,6 +33,14 @@ public class AuthProperties {
 
     public void setType(String type) {
         this.type = type;
+    }
+
+    public String getChain() {
+        return chain;
+    }
+
+    public void setChain(String chain) {
+        this.chain = chain;
     }
 
     public int getCacheMillis() {

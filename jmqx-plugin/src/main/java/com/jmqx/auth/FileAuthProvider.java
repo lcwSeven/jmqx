@@ -25,15 +25,20 @@ public class FileAuthProvider implements AuthProvider {
 
     @Override
     public boolean authenticate(AuthRequest request) {
+        return authenticateDecision(request) == AuthDecision.ALLOW;
+    }
+
+    @Override
+    public AuthDecision authenticateDecision(AuthRequest request) {
         String username = request.getUsername();
         if (username == null || username.isBlank()) {
-            return false;
+            return AuthDecision.DENY;
         }
         String expected = userPasswordMap.get(username);
         if (expected == null) {
-            return false;
+            return AuthDecision.NOT_FOUND;
         }
-        return expected.equals(request.getPassword());
+        return expected.equals(request.getPassword()) ? AuthDecision.ALLOW : AuthDecision.DENY;
     }
 
     private Map<String, String> loadUsers(Path path) {

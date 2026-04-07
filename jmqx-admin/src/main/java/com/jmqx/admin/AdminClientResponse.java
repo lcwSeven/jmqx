@@ -5,12 +5,30 @@ package com.jmqx.admin;
  * @date 2026/4/5
  */
 public class AdminClientResponse {
+    private String nodeId;
+    private String nodeName;
     private String clientId;
     private long onlineAtEpochMillis;
     private String username;
     private String connectionType;
     private String serviceNodeIp;
     private int keepAliveSeconds;
+
+    public String getNodeId() {
+        return nodeId;
+    }
+
+    public void setNodeId(String nodeId) {
+        this.nodeId = nodeId;
+    }
+
+    public String getNodeName() {
+        return nodeName;
+    }
+
+    public void setNodeName(String nodeName) {
+        this.nodeName = nodeName;
+    }
 
     public String getClientId() {
         return clientId;

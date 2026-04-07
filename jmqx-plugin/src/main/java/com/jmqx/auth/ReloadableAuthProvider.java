@@ -19,4 +19,9 @@ public class ReloadableAuthProvider implements AuthProvider {
     public boolean authenticate(AuthRequest request) {
         return delegate.authenticate(request);
     }
+
+    @Override
+    public AuthDecision authenticateDecision(AuthRequest request) {
+        return delegate.authenticateDecision(request);
+    }
 }

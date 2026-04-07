@@ -5,7 +5,7 @@
 ## 项目结构分析
 
 - `jmqx-common`: 通用配置与工具类（`com.jmqx.common`）。
-- `jmqx-protocol`: 协议接口定义（`com.jmqx.protocol`）。
+- `jmqx-protocol`: 核心协议边界接口（`com.jmqx.protocol`，如 `ClientAuthenticator`、`BrokerMessageHandler`），用于解耦 `transport` 与 `core`。
 - `jmqx-plugin`: Auth/ACL 插件实现与工厂（`com.jmqx.auth`、`com.jmqx.acl`）。
 - `jmqx-core`: Broker 核心、会话、路由、存储、集群协调（`com.jmqx.broker`、`session/router/store/cluster`）。
 - `jmqx-transport`: Netty TCP 接入与连接指标（`com.jmqx.transport`）。
@@ -45,35 +45,48 @@ mvn -pl jmqx-app -am exec:java
 
 ## 管理后台
 
-管理后台采用前后端分离架构：
+当前采用“控制面独立 + 数据面轻量管理 API”的模式：
 
-- 后端：SpringBoot（模块 `jmqx-admin`）
-- 前端：React（目录 `jmqx-admin/frontend`）
+- `jmqx-app` 提供轻量节点管理接口（默认 `http://127.0.0.1:28083/api/admin`）
+- `jmqx-admin` 独立启动，聚合一个或多个 `jmqx` 节点并提供页面
 
-后端用于展示当前连接数，并支持在线修改：
-
-- `auth` 鉴权类型
-- `auth` 缓存时间（毫秒）
-- `acl` 鉴权类型
-- `acl` 缓存时间（毫秒）
-
-配置：
-
-```bash
--Djmqx.admin.enabled=true
--Djmqx.admin.host=0.0.0.0
--Djmqx.admin.port=18083
-```
-
-后端接口地址：`http://{host}:{port}/api/admin`
-
-后端运行方式：
+### 启动 jmqx 节点（数据面）
 
 ```bash
 mvn -pl jmqx-app -am exec:java
 ```
 
-前端运行方式：
+节点 API 相关配置（`jmqx-app/src/main/resources/jmqx.properties`）：
+
+```properties
+jmqx.nodeAdmin.enabled=true
+jmqx.nodeAdmin.host=0.0.0.0
+jmqx.nodeAdmin.port=28083
+```
+
+### 启动 admin（控制面）
+
+```bash
+mvn -pl jmqx-admin -am exec:java
+```
+
+独立 admin 配置（`jmqx-admin/src/main/resources/application.properties`）：
+
+```properties
+server.port=18083
+jmqx.admin.nodes=local=http://127.0.0.1:28083/api/admin
+jmqx.admin.nodeTimeoutMs=2000
+jmqx.admin.frontend.integrated=true
+jmqx.admin.frontend.buildOnStart=false
+```
+
+页面地址：`http://127.0.0.1:18083`
+后端接口：`http://127.0.0.1:18083/api/admin`
+
+`/api/admin/config` 支持在线更新并热加载 Auth/ACL 配置（无需重启 broker）。
+支持字段包括：`authType/authChain/authCacheMillis`、Auth 的 `http/file/redis/db` 参数，以及 ACL 的 `type/cache/defaultAllow/http/file/redis` 参数。
+
+开发前端（可选）：
 
 ```bash
 cd jmqx-admin/frontend
@@ -182,10 +195,12 @@ Broker 已支持认证插件化，内置 5 种类型：
 
 ```bash
 -Djmqx.auth.type=allow_all|http|file|redis|db
+-Djmqx.auth.chain=file,redis,http
 -Djmqx.auth.cacheMillis=60000
 ```
 
 `jmqx.auth.cacheMillis` 为认证结果本地缓存毫秒数，默认 `60000`；设为 `0` 可关闭缓存。
+`jmqx.auth.chain` 为链式鉴权顺序，按顺序执行；当前插件返回“未命中(not found)”时会继续下一个插件，全部未命中则拒绝。
 
 ### HTTP Auth
 
@@ -198,12 +213,13 @@ Broker 已支持认证插件化，内置 5 种类型：
 请求体示例：
 
 ```json
-{"username":"alice","password":"alice123"}
+{"clientId":"c1","username":"alice","password":"alice123"}
 ```
 
 响应体支持：
 
 - `{"allow": true}` / `true` / `allow`
+- `{"notFound": true}` / `not_found` / `notfound`（表示未命中，链式场景会继续后续插件）
 - 其他返回都视为认证失败
 
 ### File Auth

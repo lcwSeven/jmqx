@@ -22,23 +22,28 @@ public class CachedAuthProvider implements AuthProvider {
 
     @Override
     public boolean authenticate(AuthRequest request) {
+        return authenticateDecision(request) == AuthDecision.ALLOW;
+    }
+
+    @Override
+    public AuthDecision authenticateDecision(AuthRequest request) {
         if (ttlMillis <= 0) {
-            return delegate.authenticate(request);
+            return delegate.authenticateDecision(request);
         }
         long now = System.currentTimeMillis();
         CacheKey key = new CacheKey(request);
         CacheValue hit = cache.get(key);
         if (hit != null && hit.expireAt >= now) {
-            return hit.allowed;
+            return hit.decision;
         }
 
-        boolean allowed = delegate.authenticate(request);
-        cache.put(key, new CacheValue(allowed, now + ttlMillis));
+        AuthDecision decision = delegate.authenticateDecision(request);
+        cache.put(key, new CacheValue(decision, now + ttlMillis));
 
         if ((accessCounter.incrementAndGet() & 0xFF) == 0) {
             cleanup(now);
         }
-        return allowed;
+        return decision;
     }
 
     private void cleanup(long now) {
@@ -86,11 +91,11 @@ public class CachedAuthProvider implements AuthProvider {
      * @date 2026/4/4
      */
     private static class CacheValue {
-        private final boolean allowed;
+        private final AuthDecision decision;
         private final long expireAt;
 
-        private CacheValue(boolean allowed, long expireAt) {
-            this.allowed = allowed;
+        private CacheValue(AuthDecision decision, long expireAt) {
+            this.decision = decision;
             this.expireAt = expireAt;
         }
     }

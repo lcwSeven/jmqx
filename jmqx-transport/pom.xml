@@ -19,7 +19,7 @@
         </dependency>
         <dependency>
             <groupId>com.jmqx</groupId>
-            <artifactId>jmqx-core</artifactId>
+            <artifactId>jmqx-protocol</artifactId>
             <version>${project.version}</version>
         </dependency>
         <dependency>

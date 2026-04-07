@@ -1,7 +1,7 @@
 package com.jmqx.transport;
 
-import com.jmqx.broker.BrokerMessageHandler;
 import com.jmqx.common.BrokerProperties;
+import com.jmqx.protocol.BrokerMessageHandler;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelInitializer;

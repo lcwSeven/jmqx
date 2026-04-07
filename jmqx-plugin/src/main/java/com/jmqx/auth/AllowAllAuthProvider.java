@@ -9,4 +9,9 @@ public class AllowAllAuthProvider implements AuthProvider {
     public boolean authenticate(AuthRequest request) {
         return true;
     }
+
+    @Override
+    public AuthDecision authenticateDecision(AuthRequest request) {
+        return AuthDecision.ALLOW;
+    }
 }

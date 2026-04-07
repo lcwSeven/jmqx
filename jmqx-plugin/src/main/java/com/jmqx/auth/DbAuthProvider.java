@@ -39,22 +39,27 @@ public class DbAuthProvider implements AuthProvider {
 
     @Override
     public boolean authenticate(AuthRequest request) {
+        return authenticateDecision(request) == AuthDecision.ALLOW;
+    }
+
+    @Override
+    public AuthDecision authenticateDecision(AuthRequest request) {
         if (request.getUsername() == null || request.getUsername().isBlank()) {
-            return false;
+            return AuthDecision.DENY;
         }
         try (Connection connection = DriverManager.getConnection(dbUrl, dbUser, dbPassword);
              PreparedStatement stmt = connection.prepareStatement(dbQuery)) {
             stmt.setString(1, request.getUsername());
             try (ResultSet rs = stmt.executeQuery()) {
                 if (!rs.next()) {
-                    return false;
+                    return AuthDecision.NOT_FOUND;
                 }
                 String expected = rs.getString(1);
-                return expected != null && expected.equals(request.getPassword());
+                return expected != null && expected.equals(request.getPassword()) ? AuthDecision.ALLOW : AuthDecision.DENY;
             }
         } catch (SQLException e) {
             LOG.log(Level.WARNING, "DB auth failed: " + e.getMessage(), e);
-            return false;
+            return AuthDecision.DENY;
         }
     }
 }

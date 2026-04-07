@@ -28,8 +28,14 @@ public class HttpAuthProvider implements AuthProvider {
 
     @Override
     public boolean authenticate(AuthRequest request) {
+        return authenticateDecision(request) == AuthDecision.ALLOW;
+    }
+
+    @Override
+    public AuthDecision authenticateDecision(AuthRequest request) {
         try {
             String body = "{"
+                + "\"clientId\":\"" + escape(request.getClientId()) + "\","
                 + "\"username\":\"" + escape(request.getUsername()) + "\","
                 + "\"password\":\"" + escape(request.getPassword()) + "\""
                 + "}";
@@ -40,16 +46,25 @@ public class HttpAuthProvider implements AuthProvider {
                 .build();
             HttpResponse<String> response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString());
             String responseBody = response.body() == null ? "" : response.body().trim().toLowerCase();
-            return responseBody.contains("\"allow\":true") || "allow".equals(responseBody) || "true".equals(responseBody);
+            if (responseBody.contains("\"allow\":true") || "allow".equals(responseBody) || "true".equals(responseBody)) {
+                return AuthDecision.ALLOW;
+            }
+            if (responseBody.contains("\"notfound\":true")
+                || responseBody.contains("\"not_found\":true")
+                || "not_found".equals(responseBody)
+                || "notfound".equals(responseBody)) {
+                return AuthDecision.NOT_FOUND;
+            }
+            return AuthDecision.DENY;
         } catch (IOException | InterruptedException e) {
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
             LOG.log(Level.WARNING, "HTTP auth request failed: " + e.getMessage(), e);
-            return false;
+            return AuthDecision.DENY;
         } catch (RuntimeException e) {
             LOG.log(Level.WARNING, "HTTP auth runtime error: " + e.getMessage(), e);
-            return false;
+            return AuthDecision.DENY;
         }
     }
 

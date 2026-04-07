@@ -34,9 +34,14 @@ public class RedisAuthProvider implements AuthProvider {
 
     @Override
     public boolean authenticate(AuthRequest request) {
+        return authenticateDecision(request) == AuthDecision.ALLOW;
+    }
+
+    @Override
+    public AuthDecision authenticateDecision(AuthRequest request) {
         String username = request.getUsername();
         if (username == null || username.isBlank()) {
-            return false;
+            return AuthDecision.DENY;
         }
         try (Socket socket = new Socket()) {
             socket.connect(new InetSocketAddress(host, port), timeoutMs);
@@ -55,12 +60,12 @@ public class RedisAuthProvider implements AuthProvider {
             writeCommand(out, "GET", keyPrefix + ":" + username);
             String expected = readReply(in);
             if (expected == null) {
-                return false;
+                return AuthDecision.NOT_FOUND;
             }
-            return expected.equals(request.getPassword());
+            return expected.equals(request.getPassword()) ? AuthDecision.ALLOW : AuthDecision.DENY;
         } catch (IOException e) {
             LOG.log(Level.WARNING, "Redis auth request failed: " + e.getMessage(), e);
-            return false;
+            return AuthDecision.DENY;
         }
     }
 

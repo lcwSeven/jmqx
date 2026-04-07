@@ -6,4 +6,8 @@ package com.jmqx.auth;
  */
 public interface AuthProvider {
     boolean authenticate(AuthRequest request);
+
+    default AuthDecision authenticateDecision(AuthRequest request) {
+        return authenticate(request) ? AuthDecision.ALLOW : AuthDecision.DENY;
+    }
 }

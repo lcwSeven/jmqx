@@ -38,9 +38,8 @@
             <version>${project.version}</version>
         </dependency>
         <dependency>
-            <groupId>com.jmqx</groupId>
-            <artifactId>jmqx-admin</artifactId>
-            <version>${project.version}</version>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
         </dependency>
     </dependencies>
 

@@ -1,4 +1,4 @@
-package com.jmqx.broker;
+package com.jmqx.protocol;
 
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
@@ -6,7 +6,7 @@ import io.netty.handler.codec.mqtt.MqttMessage;
 
 /**
  * @author liucaiwen
- * @date 2026/4/2
+ * @date 2026/4/7
  */
 public interface BrokerMessageHandler {
     /**

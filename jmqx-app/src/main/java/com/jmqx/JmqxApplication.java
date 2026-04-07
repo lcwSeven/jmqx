@@ -3,8 +3,8 @@ package com.jmqx;
 import com.jmqx.acl.AclAuthorizerFactory;
 import com.jmqx.acl.AclProperties;
 import com.jmqx.acl.ReloadableAclAuthorizer;
-import com.jmqx.admin.AdminBackendLauncher;
-import com.jmqx.admin.AdminProperties;
+import com.jmqx.admin.NodeAdminHttpServer;
+import com.jmqx.admin.NodeAdminProperties;
 import com.jmqx.admin.RuntimeConfigService;
 import com.jmqx.auth.AuthProperties;
 import com.jmqx.auth.AuthProviderFactory;
@@ -44,7 +44,7 @@ public class JmqxApplication {
         BrokerProperties brokerProperties = loadBrokerProperties(config);
         AuthProperties authProperties = loadAuthProperties(config);
         AclProperties aclProperties = loadAclProperties(config);
-        AdminProperties adminProperties = loadAdminProperties(config);
+        NodeAdminProperties nodeAdminProperties = loadNodeAdminProperties(config);
         ClusterProperties clusterProperties = loadClusterProperties(config);
         SessionRegistry sessionRegistry = new InMemorySessionRegistry();
         SubscriptionRegistry subscriptionRegistry = new InMemorySubscriptionRegistry();
@@ -88,24 +88,25 @@ public class JmqxApplication {
         );
         mqttWebSocketServer.start();
 
-        AdminBackendLauncher adminBackendLauncher = null;
-        if (adminProperties.isEnabled()) {
-            adminBackendLauncher = new AdminBackendLauncher(
-                adminProperties,
+        NodeAdminHttpServer nodeAdminHttpServer = null;
+        if (nodeAdminProperties.isEnabled()) {
+            nodeAdminHttpServer = new NodeAdminHttpServer(
+                nodeAdminProperties,
                 connectionMetrics,
                 runtimeConfigService,
                 sessionRegistry,
-                subscriptionRegistry
+                subscriptionRegistry,
+                clusterProperties.getNodeId()
             );
-            adminBackendLauncher.start();
+            nodeAdminHttpServer.start();
         }
 
-        AdminBackendLauncher finalAdminBackendLauncher = adminBackendLauncher;
+        NodeAdminHttpServer finalNodeAdminHttpServer = nodeAdminHttpServer;
         ClusterCoordinator finalClusterCoordinator = clusterCoordinator;
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            if (finalAdminBackendLauncher != null) {
-                finalAdminBackendLauncher.stop();
+            if (finalNodeAdminHttpServer != null) {
+                finalNodeAdminHttpServer.stop();
             }
             if (finalClusterCoordinator != null) {
                 finalClusterCoordinator.stop();
@@ -123,10 +124,9 @@ public class JmqxApplication {
         System.out.println("ACL plugin: " + aclProperties.getType());
         System.out.println("CLUSTER enabled=" + clusterProperties.isEnabled() + ", nodeId=" + clusterProperties.getNodeId()
             + ", role=" + clusterProperties.getRole() + ", busType=" + clusterProperties.getBusType());
-        if (adminProperties.isEnabled()) {
-            String adminDisplayHost = toDisplayHost(adminProperties.getHost());
-            System.out.println("ADMIN panel: http://" + adminDisplayHost + ":" + adminProperties.getPort());
-            System.out.println("ADMIN API: http://" + adminDisplayHost + ":" + adminProperties.getPort() + "/api/admin/status");
+        if (nodeAdminProperties.isEnabled()) {
+            String adminDisplayHost = toDisplayHost(nodeAdminProperties.getHost());
+            System.out.println("NODE ADMIN API: http://" + adminDisplayHost + ":" + nodeAdminProperties.getPort() + "/api/admin/status");
         }
 
         Thread.currentThread().join();
@@ -176,6 +176,7 @@ public class JmqxApplication {
     private static AuthProperties loadAuthProperties(Properties config) {
         AuthProperties properties = new AuthProperties();
         properties.setType(getStringProperty(config, "jmqx.auth.type", properties.getType()));
+        properties.setChain(getStringProperty(config, "jmqx.auth.chain", properties.getChain()));
         properties.setCacheMillis(getIntProperty(
             config,
             "jmqx.auth.cacheMillis",
@@ -228,11 +229,23 @@ public class JmqxApplication {
         return properties;
     }
 
-    private static AdminProperties loadAdminProperties(Properties config) {
-        AdminProperties properties = new AdminProperties();
-        properties.setEnabled(getBooleanProperty(config, "jmqx.admin.enabled", properties.isEnabled()));
-        properties.setHost(getStringProperty(config, "jmqx.admin.host", properties.getHost()));
-        properties.setPort(getIntProperty(config, "jmqx.admin.port", properties.getPort()));
+    private static NodeAdminProperties loadNodeAdminProperties(Properties config) {
+        NodeAdminProperties properties = new NodeAdminProperties();
+        properties.setEnabled(getBooleanProperty(
+            config,
+            "jmqx.nodeAdmin.enabled",
+            getBooleanProperty(config, "jmqx.admin.enabled", properties.isEnabled())
+        ));
+        properties.setHost(getStringProperty(
+            config,
+            "jmqx.nodeAdmin.host",
+            getStringProperty(config, "jmqx.admin.host", properties.getHost())
+        ));
+        properties.setPort(getIntProperty(
+            config,
+            "jmqx.nodeAdmin.port",
+            getIntProperty(config, "jmqx.admin.port", properties.getPort())
+        ));
         return properties;
     }
 

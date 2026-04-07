@@ -7,6 +7,7 @@ import com.jmqx.cluster.BrokerClusterReceiver;
 import com.jmqx.cluster.ClusterPublishMessage;
 import com.jmqx.cluster.ClusterReplicator;
 import com.jmqx.common.SharedSubscription;
+import com.jmqx.protocol.BrokerMessageHandler;
 import com.jmqx.protocol.ClientAuthenticator;
 import com.jmqx.router.SubscriptionRegistry;
 import com.jmqx.session.ClientSession;

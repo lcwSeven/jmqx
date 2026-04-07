@@ -1,20 +1,22 @@
 package com.jmqx.admin;
 
-import com.jmqx.session.ClientSession;
 import org.springframework.web.bind.annotation.CrossOrigin;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Map;
 
+import static org.springframework.http.HttpStatus.BAD_REQUEST;
 import static org.springframework.http.HttpStatus.NOT_FOUND;
 
 /**
@@ -25,68 +27,160 @@ import static org.springframework.http.HttpStatus.NOT_FOUND;
 @RequestMapping("/api/admin")
 @CrossOrigin(origins = "*")
 public class AdminController {
-    private final AdminBackendState state;
+    private final NodeRegistryService nodeRegistryService;
+    private final NodeProxyClient nodeProxyClient;
 
-    public AdminController(AdminBackendState state) {
-        this.state = state;
+    public AdminController(NodeRegistryService nodeRegistryService, NodeProxyClient nodeProxyClient) {
+        this.nodeRegistryService = nodeRegistryService;
+        this.nodeProxyClient = nodeProxyClient;
     }
 
     @GetMapping("/status")
-    public AdminStatusResponse status() {
-        return buildStatus();
+    public AdminStatusResponse status(@RequestParam(value = "nodeId", required = false) String nodeId) {
+        ManagedNode node = resolveNode(nodeId);
+        if (node == null) {
+            AdminStatusResponse empty = new AdminStatusResponse();
+            empty.setOnline(false);
+            empty.setErrorMessage("no managed node configured");
+            return empty;
+        }
+        try {
+            return nodeProxyClient.fetchStatus(node);
+        } catch (IOException | InterruptedException e) {
+            return offlineNode(node, e);
+        }
+    }
+
+    @GetMapping("/cluster/status")
+    public AdminClusterStatusResponse clusterStatus() {
+        List<ManagedNode> nodes = nodeRegistryService.list();
+        List<AdminStatusResponse> statuses = new ArrayList<>();
+        int online = 0;
+        int totalConnections = 0;
+        for (ManagedNode node : nodes) {
+            try {
+                AdminStatusResponse status = nodeProxyClient.fetchStatus(node);
+                statuses.add(status);
+                if (status.isOnline()) {
+                    online++;
+                    totalConnections += status.getConnections();
+                }
+            } catch (IOException | InterruptedException e) {
+                statuses.add(offlineNode(node, e));
+            }
+        }
+        AdminClusterStatusResponse response = new AdminClusterStatusResponse();
+        response.setTotalNodes(nodes.size());
+        response.setOnlineNodes(online);
+        response.setTotalConnections(totalConnections);
+        response.setNodes(statuses);
+        return response;
+    }
+
+    @GetMapping("/nodes")
+    public List<AdminNodeResponse> nodes() {
+        return nodeRegistryService.list().stream().map(this::toNodeResponse).toList();
+    }
+
+    @PostMapping("/nodes")
+    public AdminNodeResponse addNode(@RequestBody AdminNodeRequest request) {
+        if (request == null || request.getBaseUrl() == null || request.getBaseUrl().isBlank()) {
+            throw new ResponseStatusException(BAD_REQUEST, "baseUrl is required");
+        }
+        ManagedNode node = nodeRegistryService.add(request.getName(), request.getBaseUrl());
+        return toNodeResponse(node);
+    }
+
+    @DeleteMapping("/nodes/{nodeId}")
+    public void removeNode(@PathVariable("nodeId") String nodeId) {
+        if (!nodeRegistryService.remove(nodeId)) {
+            throw new ResponseStatusException(NOT_FOUND, "node not found: " + nodeId);
+        }
     }
 
     @GetMapping("/clients")
     public List<AdminClientResponse> clients(
+        @RequestParam(value = "nodeId", required = false) String nodeId,
         @RequestParam(value = "clientId", required = false) String clientId,
         @RequestParam(value = "username", required = false) String username
     ) {
         String clientIdQuery = normalize(clientId);
         String usernameQuery = normalize(username);
-
-        return state.getSessionRegistry().list().stream()
-            .filter(session -> containsIgnoreCase(session.clientId(), clientIdQuery))
-            .filter(session -> containsIgnoreCase(session.username(), usernameQuery))
-            .sorted(Comparator.comparing(ClientSession::connectedAt).reversed())
-            .map(this::toClientResponse)
-            .toList();
+        List<ManagedNode> targets = resolveNodes(nodeId);
+        List<AdminClientResponse> result = new ArrayList<>();
+        for (ManagedNode node : targets) {
+            try {
+                result.addAll(nodeProxyClient.fetchClients(node, clientIdQuery, usernameQuery));
+            } catch (IOException | InterruptedException ignored) {
+            }
+        }
+        result.sort(Comparator.comparingLong(AdminClientResponse::getOnlineAtEpochMillis).reversed());
+        return result;
     }
 
     @GetMapping("/clients/{clientId}")
-    public AdminClientDetailResponse clientDetail(@PathVariable("clientId") String clientId) {
-        ClientSession session = state.getSessionRegistry().get(clientId)
-            .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "client not found: " + clientId));
-
-        AdminClientDetailResponse detail = new AdminClientDetailResponse();
-        detail.setClientId(session.clientId());
-        detail.setUsername(session.username());
-        detail.setConnectionType(session.connectionType());
-        detail.setServiceNodeIp(session.serviceNodeIp());
-        detail.setKeepAliveSeconds(session.keepAliveSeconds());
-        detail.setOnlineAtEpochMillis(session.connectedAt().toEpochMilli());
-        detail.setSubscriptions(toSubscriptionList(state.getSubscriptionRegistry().findSubscriptions(clientId)));
-        return detail;
+    public AdminClientDetailResponse clientDetail(
+        @PathVariable("clientId") String clientId,
+        @RequestParam(value = "nodeId", required = false) String nodeId
+    ) {
+        List<ManagedNode> targets = resolveNodes(nodeId);
+        for (ManagedNode node : targets) {
+            try {
+                return nodeProxyClient.fetchClientDetail(node, clientId);
+            } catch (IOException | InterruptedException ignored) {
+            }
+        }
+        throw new ResponseStatusException(NOT_FOUND, "client not found: " + clientId);
     }
 
     @PostMapping("/config")
-    public AdminStatusResponse updateConfig(@RequestBody AdminConfigUpdateRequest request) {
-        state.getRuntimeConfigService().update(
-            request.getAuthType(),
-            request.getAuthCacheMillis(),
-            request.getAclType(),
-            request.getAclCacheMillis()
-        );
-        return buildStatus();
+    public AdminStatusResponse updateConfig(
+        @RequestBody AdminConfigUpdateRequest request,
+        @RequestParam(value = "nodeId", required = false) String nodeId
+    ) {
+        ManagedNode node = resolveNode(nodeId);
+        if (node == null) {
+            throw new ResponseStatusException(BAD_REQUEST, "no target node");
+        }
+        try {
+            return nodeProxyClient.updateConfig(node, request);
+        } catch (IOException | InterruptedException e) {
+            throw new ResponseStatusException(BAD_REQUEST, "update node config failed: " + e.getMessage());
+        }
     }
 
-    private AdminStatusResponse buildStatus() {
-        AdminStatusResponse resp = new AdminStatusResponse();
-        resp.setConnections(state.getConnectionMetrics().getActiveConnections());
-        resp.setAuthType(state.getRuntimeConfigService().getAuthType());
-        resp.setAuthCacheMillis(state.getRuntimeConfigService().getAuthCacheMillis());
-        resp.setAclType(state.getRuntimeConfigService().getAclType());
-        resp.setAclCacheMillis(state.getRuntimeConfigService().getAclCacheMillis());
-        return resp;
+    private AdminStatusResponse offlineNode(ManagedNode node, Exception exception) {
+        AdminStatusResponse status = new AdminStatusResponse();
+        status.setNodeId(node.getNodeId());
+        status.setNodeName(node.getName());
+        status.setBaseUrl(node.getBaseUrl());
+        status.setOnline(false);
+        status.setErrorMessage(exception.getMessage());
+        return status;
+    }
+
+    private ManagedNode resolveNode(String nodeId) {
+        ManagedNode node = nodeRegistryService.get(nodeId);
+        return node != null ? node : nodeRegistryService.first();
+    }
+
+    private List<ManagedNode> resolveNodes(String nodeId) {
+        if (nodeId == null || nodeId.isBlank()) {
+            return nodeRegistryService.list();
+        }
+        ManagedNode node = nodeRegistryService.get(nodeId);
+        if (node == null) {
+            return List.of();
+        }
+        return List.of(node);
+    }
+
+    private AdminNodeResponse toNodeResponse(ManagedNode node) {
+        AdminNodeResponse response = new AdminNodeResponse();
+        response.setNodeId(node.getNodeId());
+        response.setName(node.getName());
+        response.setBaseUrl(node.getBaseUrl());
+        return response;
     }
 
     private static String normalize(String value) {
@@ -98,38 +192,5 @@ public class AdminController {
             return null;
         }
         return trimmed;
-    }
-
-    private static boolean containsIgnoreCase(String value, String query) {
-        if (query == null) {
-            return true;
-        }
-        if (value == null) {
-            return false;
-        }
-        return value.toLowerCase().contains(query.toLowerCase());
-    }
-
-    private AdminClientResponse toClientResponse(ClientSession session) {
-        AdminClientResponse resp = new AdminClientResponse();
-        resp.setClientId(session.clientId());
-        resp.setUsername(session.username());
-        resp.setConnectionType(session.connectionType());
-        resp.setServiceNodeIp(session.serviceNodeIp());
-        resp.setKeepAliveSeconds(session.keepAliveSeconds());
-        resp.setOnlineAtEpochMillis(session.connectedAt().toEpochMilli());
-        return resp;
-    }
-
-    private List<AdminClientSubscriptionResponse> toSubscriptionList(Map<String, Integer> subscriptions) {
-        return subscriptions.entrySet().stream()
-            .sorted(Map.Entry.comparingByKey())
-            .map(entry -> {
-                AdminClientSubscriptionResponse item = new AdminClientSubscriptionResponse();
-                item.setTopic(entry.getKey());
-                item.setQos(entry.getValue() == null ? 0 : entry.getValue());
-                return item;
-            })
-            .toList();
     }
 }
