@@ -58,6 +58,11 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler, BrokerClu
     private static final AttributeKey<Boolean> CLEAN_SESSION = AttributeKey.valueOf("jmqx.cleanSession");
     private static final AttributeKey<String> WS_USERNAME = AttributeKey.valueOf("jmqx.ws.username");
     private static final AttributeKey<String> CONNECTION_TYPE = AttributeKey.valueOf("jmqx.connectionType");
+    private static final AttributeKey<Boolean> GRACEFUL_DISCONNECT = AttributeKey.valueOf("jmqx.gracefulDisconnect");
+    private static final AttributeKey<WillMessage> WILL_MESSAGE = AttributeKey.valueOf("jmqx.willMessage");
+
+    private static final String TOPIC_CLIENT_CONNECTED = "$SYS/jmqx/events/client/connected";
+    private static final String TOPIC_CLIENT_DISCONNECTED = "$SYS/jmqx/events/client/disconnected";
 
     private final SessionRegistry sessionRegistry;
     private final SubscriptionRegistry subscriptionRegistry;
@@ -106,6 +111,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler, BrokerClu
                 ));
             }
             case DISCONNECT -> {
+                ctx.channel().attr(GRACEFUL_DISCONNECT).set(true);
                 LOG.info(() -> "[DISCONNECT] clientId=" + currentClientId(ctx.channel()));
                 ctx.close();
             }
@@ -121,12 +127,33 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler, BrokerClu
             return;
         }
 
+        ClientSession session = sessionRegistry.get(clientId).orElse(null);
+        String username = session == null ? null : session.username();
+        String connectionType = session == null ? null : session.connectionType();
+        String serviceNodeIp = session == null ? null : session.serviceNodeIp();
+        int keepAliveSeconds = session == null ? 0 : session.keepAliveSeconds();
         // cleanSession 断开时直接清理订阅，持久会话则只移除在线 channel。
         boolean cleanSession = Optional.ofNullable(channel.attr(CLEAN_SESSION).get()).orElse(false);
+        boolean gracefulDisconnect = Optional.ofNullable(channel.attr(GRACEFUL_DISCONNECT).get()).orElse(false);
+
+        // 仅在非正常断开时发送遗嘱消息，符合 MQTT 遗嘱语义。
+        if (!gracefulDisconnect) {
+            publishWillMessageIfPresent(channel, clientId);
+        }
+
         sessionRegistry.remove(clientId);
         if (cleanSession) {
             subscriptionRegistry.removeClient(clientId);
         }
+        publishClientLifecycleEvent(
+            TOPIC_CLIENT_DISCONNECTED,
+            clientId,
+            username,
+            connectionType,
+            serviceNodeIp,
+            keepAliveSeconds,
+            gracefulDisconnect ? "graceful" : "unexpected"
+        );
         LOG.info(() -> "[SESSION] offline clientId=" + clientId + ", cleanSession=" + cleanSession);
     }
 
@@ -175,11 +202,28 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler, BrokerClu
         ));
         ctx.channel().attr(CLIENT_ID).set(clientId);
         ctx.channel().attr(CLEAN_SESSION).set(cleanSession);
+        ctx.channel().attr(GRACEFUL_DISCONNECT).set(false);
+
+        WillMessage willMessage = buildWillMessage(message);
+        if (willMessage != null) {
+            ctx.channel().attr(WILL_MESSAGE).set(willMessage);
+        } else {
+            ctx.channel().attr(WILL_MESSAGE).set(null);
+        }
 
         ctx.writeAndFlush(MqttMessageBuilders.connAck()
                 .sessionPresent(false)
                 .returnCode(MqttConnectReturnCode.CONNECTION_ACCEPTED)
                 .build());
+        publishClientLifecycleEvent(
+            TOPIC_CLIENT_CONNECTED,
+            clientId,
+            username,
+            connectionType,
+            serviceNodeIp,
+            keepAliveSeconds,
+            "connected"
+        );
         LOG.info("[CONNECT] accepted clientId=" + clientId
             + ", connectionType=" + connectionType
             + ", username=" + username
@@ -277,6 +321,79 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler, BrokerClu
         }
     }
 
+    private WillMessage buildWillMessage(MqttConnectMessage connectMessage) {
+        if (!connectMessage.variableHeader().isWillFlag()) {
+            return null;
+        }
+        String topic = connectMessage.payload().willTopic();
+        if (topic == null || topic.isBlank()) {
+            return null;
+        }
+        byte[] payload = connectMessage.payload().willMessageInBytes();
+        if (payload == null) {
+            payload = new byte[0];
+        }
+        int qos = Math.max(connectMessage.variableHeader().willQos(), 0);
+        boolean retain = connectMessage.variableHeader().isWillRetain();
+        return new WillMessage(topic, payload.clone(), qos, retain);
+    }
+
+    private void publishWillMessageIfPresent(Channel channel, String clientId) {
+        WillMessage willMessage = channel.attr(WILL_MESSAGE).get();
+        if (willMessage == null) {
+            return;
+        }
+        publishInternal(
+            clientId,
+            willMessage.topic(),
+            willMessage.payload(),
+            willMessage.qos(),
+            willMessage.retain()
+        );
+        LOG.info(() -> "[WILL] published clientId=" + clientId + ", topic=" + willMessage.topic());
+    }
+
+    private void publishClientLifecycleEvent(
+            String topic,
+            String clientId,
+            String username,
+            String connectionType,
+            String serviceNodeIp,
+            int keepAliveSeconds,
+            String eventType) {
+        String payload = "{\"event\":\"" + safeJson(eventType)
+            + "\",\"clientId\":\"" + safeJson(clientId)
+            + "\",\"username\":\"" + safeJson(username)
+            + "\",\"connectionType\":\"" + safeJson(connectionType)
+            + "\",\"serviceNodeIp\":\"" + safeJson(serviceNodeIp)
+            + "\",\"keepAliveSeconds\":" + keepAliveSeconds
+            + ",\"timestamp\":" + System.currentTimeMillis()
+            + "}";
+        publishInternal(
+            "system",
+            topic,
+            payload.getBytes(StandardCharsets.UTF_8),
+            MqttQoS.AT_MOST_ONCE.value(),
+            false
+        );
+    }
+
+    private void publishInternal(String sourceClientId, String topic, byte[] payload, int qos, boolean retain) {
+        if (retain) {
+            retainedMessageStore.saveOrRemove(new RetainedMessage(topic, payload, qos, true));
+        }
+        routeMessage(topic, payload);
+        clusterReplicator.replicatePublish(topic, payload, qos, retain);
+        messageBridge.publish(new BridgeMessage(
+            sourceClientId,
+            topic,
+            payload,
+            qos,
+            retain,
+            System.currentTimeMillis()
+        ));
+    }
+
     private void routeMessage(String topic, byte[] payload) {
         Set<String> subscribers = subscriptionRegistry.findSubscribers(topic);
         LOG.fine(() -> "[ROUTE] topic=" + topic + ", subscribers=" + subscribers.size());
@@ -332,6 +449,15 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler, BrokerClu
         return value;
     }
 
+    private String safeJson(String value) {
+        if (value == null) {
+            return "";
+        }
+        return value
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"");
+    }
+
     private boolean allowed(String clientId, String topic, AclAction action) {
         String username = clientId == null ? null : sessionRegistry.get(clientId).map(ClientSession::username).orElse(null);
         return !aclAuthorizer.isAllowed(new AclRequest(clientId, username, topic, action));
@@ -375,5 +501,14 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler, BrokerClu
         routeMessage(message.getTopic(), message.getPayload());
         LOG.info(() -> "[CLUSTER] deliver topic=" + message.getTopic() + ", qos=" + message.getQos()
             + ", sourceNode=" + message.getSourceNodeId());
+    }
+
+    /**
+     * 连接建立时缓存的遗嘱消息。
+     *
+     * @author liucaiwen
+     * @date 2026/4/7
+     */
+    private record WillMessage(String topic, byte[] payload, int qos, boolean retain) {
     }
 }

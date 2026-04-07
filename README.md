@@ -25,6 +25,10 @@
 - 支持 retained message 的保存、删除（空 payload）与订阅回放。
 - 支持共享订阅（`$share/{group}/{topicFilter}`），同组内消息按轮询投递到一个客户端。
 - 提供认证插件化能力（`allow_all/http/file/redis/db`）。
+- 支持遗嘱消息（Will）：客户端非正常断开时自动发布遗嘱。
+- 支持连接/断开公共事件 Topic：
+  - `$SYS/jmqx/events/client/connected`
+  - `$SYS/jmqx/events/client/disconnected`
 
 ## 启动方式
 
