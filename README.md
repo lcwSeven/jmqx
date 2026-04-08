@@ -1,6 +1,6 @@
 # jmqx
 
-`jmqx` 是一个基于 Java + Netty 的 MQTT Broker 多模块工程。
+`jmqx` 是一个基于 Java + Netty 的 MQTT Broker 服务器。
 
 ## 项目结构分析
 
