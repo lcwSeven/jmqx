@@ -66,6 +66,11 @@ public class RocksDbRetainedMessageStore implements RetainedMessageStore {
 
     @Override
     public void saveOrRemove(RetainedMessage message) {
+        // 判断是否支持保留消息 如果不支持支持保留消息 则直接返回
+        if (!properties.isRetainedEnabled()) {
+            return;
+        }
+        // 判断 topic 是否为空
         if (message == null || message.getTopic() == null || message.getTopic().isBlank()) {
             return;
         }

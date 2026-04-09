@@ -9,12 +9,13 @@
         <version>1.0-SNAPSHOT</version>
     </parent>
 
-    <artifactId>jmqx-admin</artifactId>
+    <artifactId>jmqx-bench</artifactId>
 
     <dependencies>
         <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-web</artifactId>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-all</artifactId>
+            <version>${netty.version}</version>
         </dependency>
     </dependencies>
 
@@ -25,7 +26,7 @@
                 <artifactId>exec-maven-plugin</artifactId>
                 <version>3.6.1</version>
                 <configuration>
-                    <mainClass>com.jmqx.admin.AdminBackendApplication</mainClass>
+                    <mainClass>com.jmqx.bench.JmqxBenchApplication</mainClass>
                 </configuration>
             </plugin>
         </plugins>

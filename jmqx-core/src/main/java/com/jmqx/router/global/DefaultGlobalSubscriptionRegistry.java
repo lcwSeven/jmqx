@@ -24,7 +24,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  * @author liucaiwen
  * @date 2026/4/7
  */
-public class InMemoryGlobalSubscriptionRegistry implements GlobalSubscriptionRegistry {
+public class DefaultGlobalSubscriptionRegistry implements GlobalSubscriptionRegistry {
     private static final String NORMAL_PREFIX = "n|";
     private static final String SHARED_PREFIX = "s|";
 

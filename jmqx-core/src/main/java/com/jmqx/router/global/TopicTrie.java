@@ -1,9 +1,7 @@
 package com.jmqx.router.global;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -14,7 +12,7 @@ import java.util.function.Supplier;
  * @date 2026/4/7
  */
 public class TopicTrie<V> {
-    private final Node<V> root = new Node<>();
+    private final GenericTopicTrieNode<V> root = new GenericTopicTrieNode<>();
 
     public V computeIfAbsent(String topicFilter, Supplier<V> supplier) {
         String[] levels = split(topicFilter);
@@ -50,93 +48,93 @@ public class TopicTrie<V> {
         return root.isEmpty();
     }
 
-    private V computeIfAbsent(Node<V> node, String[] levels, int index, Supplier<V> supplier) {
+    private V computeIfAbsent(GenericTopicTrieNode<V> node, String[] levels, int index, Supplier<V> supplier) {
         if (index >= levels.length) {
-            if (node.terminal == null) {
-                node.terminal = supplier.get();
+            if (node.getTerminalValue() == null) {
+                node.setTerminalValue(supplier.get());
             }
-            return node.terminal;
+            return node.getTerminalValue();
         }
 
         String level = levels[index];
         if ("#".equals(level) && index == levels.length - 1) {
-            if (node.hash == null) {
-                node.hash = supplier.get();
+            if (node.getHashValue() == null) {
+                node.setHashValue(supplier.get());
             }
-            return node.hash;
+            return node.getHashValue();
         }
 
-        Node<V> next = "+".equals(level)
-            ? node.getOrCreateWildcard()
-            : node.children.computeIfAbsent(level, ignored -> new Node<>());
+        GenericTopicTrieNode<V> next = "+".equals(level)
+            ? node.getOrCreateWildcardChild()
+            : node.getOrCreateLiteralChild(level);
         return computeIfAbsent(next, levels, index + 1, supplier);
     }
 
-    private V get(Node<V> node, String[] levels, int index) {
+    private V get(GenericTopicTrieNode<V> node, String[] levels, int index) {
         if (node == null) {
             return null;
         }
         if (index >= levels.length) {
-            return node.terminal;
+            return node.getTerminalValue();
         }
         String level = levels[index];
         if ("#".equals(level) && index == levels.length - 1) {
-            return node.hash;
+            return node.getHashValue();
         }
-        Node<V> next = "+".equals(level) ? node.wildcard : node.children.get(level);
+        GenericTopicTrieNode<V> next = "+".equals(level) ? node.getWildcardChild() : node.getLiteralChild(level);
         return get(next, levels, index + 1);
     }
 
-    private boolean remove(Node<V> node, String[] levels, int index) {
+    private boolean remove(GenericTopicTrieNode<V> node, String[] levels, int index) {
         if (node == null) {
             return false;
         }
         if (index >= levels.length) {
-            node.terminal = null;
+            node.setTerminalValue(null);
             return node.isEmpty();
         }
 
         String level = levels[index];
         if ("#".equals(level) && index == levels.length - 1) {
-            node.hash = null;
+            node.setHashValue(null);
             return node.isEmpty();
         }
 
-        Node<V> next = "+".equals(level) ? node.wildcard : node.children.get(level);
+        GenericTopicTrieNode<V> next = "+".equals(level) ? node.getWildcardChild() : node.getLiteralChild(level);
         if (next == null) {
             return false;
         }
         boolean empty = remove(next, levels, index + 1);
         if (empty) {
             if ("+".equals(level)) {
-                node.wildcard = null;
+                node.clearWildcardChild(next);
             } else {
-                node.children.remove(level, next);
+                node.removeLiteralChild(level, next);
             }
         }
         return node.isEmpty();
     }
 
-    private void collect(Node<V> node, String[] levels, int index, List<V> result) {
+    private void collect(GenericTopicTrieNode<V> node, String[] levels, int index, List<V> result) {
         collect(node, levels, index, result::add);
     }
 
-    private void collect(Node<V> node, String[] levels, int index, Consumer<V> consumer) {
+    private void collect(GenericTopicTrieNode<V> node, String[] levels, int index, Consumer<V> consumer) {
         if (node == null) {
             return;
         }
-        if (node.hash != null) {
-            consumer.accept(node.hash);
+        if (node.getHashValue() != null) {
+            consumer.accept(node.getHashValue());
         }
         if (index >= levels.length) {
-            if (node.terminal != null) {
-                consumer.accept(node.terminal);
+            if (node.getTerminalValue() != null) {
+                consumer.accept(node.getTerminalValue());
             }
             return;
         }
         String current = levels[index];
-        collect(node.children.get(current), levels, index + 1, consumer);
-        collect(node.wildcard, levels, index + 1, consumer);
+        collect(node.getLiteralChild(current), levels, index + 1, consumer);
+        collect(node.getWildcardChild(), levels, index + 1, consumer);
     }
 
     private static String[] split(String topicOrFilter) {
@@ -144,23 +142,5 @@ public class TopicTrie<V> {
             return new String[]{""};
         }
         return topicOrFilter.split("/", -1);
-    }
-
-    private static final class Node<V> {
-        private final Map<String, Node<V>> children = new HashMap<>();
-        private Node<V> wildcard;
-        private V terminal;
-        private V hash;
-
-        private Node<V> getOrCreateWildcard() {
-            if (wildcard == null) {
-                wildcard = new Node<>();
-            }
-            return wildcard;
-        }
-
-        private boolean isEmpty() {
-            return children.isEmpty() && wildcard == null && terminal == null && hash == null;
-        }
     }
 }

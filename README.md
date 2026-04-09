@@ -9,7 +9,7 @@
 - `jmqx-plugin`: Auth/ACL 插件实现与工厂（`com.jmqx.auth`、`com.jmqx.acl`）。
 - `jmqx-core`: Broker 核心、会话、路由、存储（`com.jmqx.broker`、`session/router/store`）。
 - `jmqx-transport`: Netty TCP 接入与连接指标（`com.jmqx.transport`）。
-- `jmqx-admin`: 管理后台模块（后端 SpringBoot + 前端 React）。
+- `jmqx-bench`: 自研 MQTT 压测模块（`com.jmqx.bench`）。
 - `jmqx-app`: 启动装配模块（`com.jmqx.JmqxApplication` + `jmqx.properties`）。
 
 ## 当前已填充能力
@@ -41,68 +41,22 @@ mvn -DskipTests compile
 mvn -pl jmqx-app -am exec:java
 ```
 
+压测工具启动示例：
+
+```bash
+mvn -pl jmqx-bench -am exec:java -Dexec.args="--host=127.0.0.1 --port=1883 --clients=10000 --connectRate=2000 --subscribe=false --publishRate=0"
+```
+
 ## 配置
 
 默认配置文件：`jmqx-app/src/main/resources/jmqx.properties`
 
 配置优先级：`JVM 参数 > jmqx.properties > 代码默认值`。
 
-## 管理后台
+30 万连接里程碑模板：
 
-当前采用“控制面独立 + 数据面轻量管理 API”的模式：
-
-- `jmqx-app` 提供轻量节点管理接口（默认 `http://127.0.0.1:28083/api/admin`）
-- `jmqx-admin` 独立启动，聚合一个或多个 `jmqx` 节点并提供页面
-
-### 启动 jmqx 节点（数据面）
-
-```bash
-mvn -pl jmqx-app -am exec:java
-```
-
-节点 API 相关配置（`jmqx-app/src/main/resources/jmqx.properties`）：
-
-```properties
-jmqx.nodeAdmin.enabled=true
-jmqx.nodeAdmin.host=0.0.0.0
-jmqx.nodeAdmin.port=28083
-```
-
-### 启动 admin（控制面）
-
-```bash
-mvn -pl jmqx-admin -am exec:java
-```
-
-独立 admin 配置（`jmqx-admin/src/main/resources/application.properties`）：
-
-```properties
-server.port=18083
-jmqx.admin.nodes=local=http://127.0.0.1:28083/api/admin
-jmqx.admin.nodeTimeoutMs=2000
-jmqx.admin.frontend.integrated=true
-jmqx.admin.frontend.buildOnStart=false
-```
-
-页面地址：`http://127.0.0.1:18083`
-后端接口：`http://127.0.0.1:18083/api/admin`
-
-`/api/admin/config` 支持在线更新并热加载 Auth/ACL 配置（无需重启 broker）。
-支持字段包括：`authType/authChain/authCacheMillis`、Auth 的 `http/file/redis/db` 参数，以及 ACL 的 `type/cache/defaultAllow/http/file/redis` 参数。
-
-开发前端（可选）：
-
-```bash
-cd jmqx-admin/frontend
-npm install
-npm run dev
-```
-
-前端默认请求 `http://127.0.0.1:18083/api/admin`，也可以通过环境变量覆盖：
-
-```bash
-VITE_ADMIN_API_BASE=http://127.0.0.1:18083/api/admin
-```
+- 配置模板：`jmqx-app/src/main/resources/jmqx-300k.properties`
+- 执行手册：`docs/milestone-300k-single-node.md`
 
 ## 当前定位
 

@@ -31,7 +31,7 @@ public class NettyMqttChannelHandler extends SimpleChannelInboundHandler<MqttMes
 
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, MqttMessage message) {
-        LOG.fine(() -> "[RECV] remote=" + ctx.channel().remoteAddress() + ", type=" + message.fixedHeader().messageType());
+        LOG.info(() -> "[RECV] remote=" + ctx.channel().remoteAddress() + ", type=" + message.fixedHeader().messageType());
         brokerMessageHandler.onMessage(ctx, message);
     }
 

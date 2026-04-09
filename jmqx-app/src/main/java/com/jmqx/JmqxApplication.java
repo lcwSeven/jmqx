@@ -3,9 +3,6 @@ package com.jmqx;
 import com.jmqx.acl.AclAuthorizerFactory;
 import com.jmqx.acl.AclProperties;
 import com.jmqx.acl.ReloadableAclAuthorizer;
-import com.jmqx.admin.NodeAdminHttpServer;
-import com.jmqx.admin.NodeAdminProperties;
-import com.jmqx.admin.RuntimeConfigService;
 import com.jmqx.auth.AuthProperties;
 import com.jmqx.auth.AuthProviderFactory;
 import com.jmqx.auth.AuthRequest;
@@ -19,6 +16,8 @@ import com.jmqx.protocol.ClientAuthenticator;
 import com.jmqx.router.LocalSubscriptionRegistry;
 import com.jmqx.router.SharedSubscriptionManager;
 import com.jmqx.router.SubscriptionRegistry;
+import com.jmqx.router.global.DefaultGlobalSubscriptionRegistry;
+import com.jmqx.router.global.GlobalSubscriptionRegistry;
 import com.jmqx.session.InMemorySessionRegistry;
 import com.jmqx.session.SessionRegistry;
 import com.jmqx.store.RocksDbRetainedMessageStore;
@@ -33,7 +32,7 @@ import java.io.InputStream;
 import java.util.Properties;
 
 /**
- * 应用启动装配入口，负责把 broker、插件和节点管理 API 组装起来。
+ * 应用启动装配入口，负责把 broker 和插件组装起来。
  *
  * @author liucaiwen
  * @date 2026/4/2
@@ -46,12 +45,12 @@ public class JmqxApplication {
         AclProperties aclProperties = loadAclProperties(config);
         BridgeProperties bridgeProperties = loadBridgeProperties(config);
         RetainedStoreProperties retainedStoreProperties = loadRetainedStoreProperties(config);
-        NodeAdminProperties nodeAdminProperties = loadNodeAdminProperties(config);
         int sharedMaxSubscribers = getIntProperty(config, "jmqx.shared.maxSubscribersPerGroup", 1000);
         int sharedSlowThreshold = getIntProperty(config, "jmqx.shared.slowConsumerStrikeThreshold", 3);
         String nodeId = getStringProperty(config, "jmqx.node.id", "node-1");
         SessionRegistry sessionRegistry = new InMemorySessionRegistry();
         SubscriptionRegistry subscriptionRegistry = new LocalSubscriptionRegistry();
+        GlobalSubscriptionRegistry globalSubscriptionRegistry = new DefaultGlobalSubscriptionRegistry();
         SharedSubscriptionManager sharedSubscriptionManager = new SharedSubscriptionManager(
             sharedMaxSubscribers,
             sharedSlowThreshold
@@ -62,12 +61,6 @@ public class JmqxApplication {
                 authProvider.authenticate(new AuthRequest(clientId, username, password));
         ReloadableAclAuthorizer aclAuthorizer = new ReloadableAclAuthorizer(AclAuthorizerFactory.create(aclProperties));
         ConnectionMetrics connectionMetrics = new ConnectionMetrics();
-        RuntimeConfigService runtimeConfigService = new RuntimeConfigService(
-                authProperties,
-                aclProperties,
-                authProvider,
-                aclAuthorizer
-        );
         MessageBridge messageBridge = MessageBridgeFactory.create(bridgeProperties);
 
         MqttBrokerMessageHandler brokerMessageHandler = new MqttBrokerMessageHandler(
@@ -77,7 +70,10 @@ public class JmqxApplication {
                 clientAuthenticator,
                 aclAuthorizer,
                 sharedSubscriptionManager,
-                messageBridge
+                messageBridge,
+                retainedStoreProperties.isRetainedEnabled(),
+                globalSubscriptionRegistry,
+                nodeId
         );
 
         // 先启动 MQTT TCP，再按需启动 WebSocket 接入。
@@ -149,26 +145,8 @@ public class JmqxApplication {
         );
         mqttWssServer.start();
 
-        NodeAdminHttpServer nodeAdminHttpServer = null;
-        if (nodeAdminProperties.isEnabled()) {
-            // 节点管理 API 只暴露当前节点运行状态和在线热更新能力，供独立 admin 聚合使用。
-            nodeAdminHttpServer = new NodeAdminHttpServer(
-                    nodeAdminProperties,
-                    connectionMetrics,
-                    runtimeConfigService,
-                    sessionRegistry,
-                    subscriptionRegistry,
-                    nodeId
-            );
-            nodeAdminHttpServer.start();
-        }
-
-        NodeAdminHttpServer finalNodeAdminHttpServer = nodeAdminHttpServer;
-
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            if (finalNodeAdminHttpServer != null) {
-                finalNodeAdminHttpServer.stop();
-            }
+            brokerMessageHandler.shutdown();
             retainedMessageStore.close();
             messageBridge.close();
             mqttWssServer.stop();
@@ -198,14 +176,10 @@ public class JmqxApplication {
             + ", maxBytes=" + retainedStoreProperties.getMaxBytes()
             + ", maxPayloadBytes=" + retainedStoreProperties.getMaxPayloadBytes()
             + ", rocksdbPath=" + retainedStoreProperties.getRocksdbPath()
+            + ", enabled=" + retainedStoreProperties.isRetainedEnabled()
             + ", overflowStrategy=" + retainedStoreProperties.getOverflowStrategy());
         System.out.println("SHARED maxSubscribersPerGroup=" + sharedMaxSubscribers
             + ", slowConsumerStrikeThreshold=" + sharedSlowThreshold);
-        System.out.println("NODE id=" + nodeId);
-        if (nodeAdminProperties.isEnabled()) {
-            String adminDisplayHost = toDisplayHost(nodeAdminProperties.getHost());
-            System.out.println("NODE ADMIN API: http://" + adminDisplayHost + ":" + nodeAdminProperties.getPort() + "/api/admin/status");
-        }
 
         Thread.currentThread().join();
     }
@@ -357,26 +331,6 @@ public class JmqxApplication {
         return properties;
     }
 
-    private static NodeAdminProperties loadNodeAdminProperties(Properties config) {
-        NodeAdminProperties properties = new NodeAdminProperties();
-        properties.setEnabled(getBooleanProperty(
-                config,
-                "jmqx.nodeAdmin.enabled",
-                getBooleanProperty(config, "jmqx.admin.enabled", properties.isEnabled())
-        ));
-        properties.setHost(getStringProperty(
-                config,
-                "jmqx.nodeAdmin.host",
-                getStringProperty(config, "jmqx.admin.host", properties.getHost())
-        ));
-        properties.setPort(getIntProperty(
-                config,
-                "jmqx.nodeAdmin.port",
-                getIntProperty(config, "jmqx.admin.port", properties.getPort())
-        ));
-        return properties;
-    }
-
     private static BridgeProperties loadBridgeProperties(Properties config) {
         BridgeProperties properties = new BridgeProperties();
         properties.setEnabled(getBooleanProperty(config, "jmqx.bridge.enabled", properties.isEnabled()));
@@ -480,6 +434,11 @@ public class JmqxApplication {
 
     private static RetainedStoreProperties loadRetainedStoreProperties(Properties config) {
         RetainedStoreProperties properties = new RetainedStoreProperties();
+        properties.setRetainedEnabled(getBooleanProperty(
+            config,
+            "jmqx.retained.enabled",
+            properties.isRetainedEnabled()
+        ));
         properties.setRocksdbPath(getStringProperty(
             config,
             "jmqx.retained.rocksdb.path",

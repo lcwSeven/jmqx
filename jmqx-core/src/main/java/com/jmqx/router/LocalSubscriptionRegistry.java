@@ -2,15 +2,10 @@ package com.jmqx.router;
 
 import com.jmqx.common.SharedSubscription;
 
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.LinkedHashSet;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.StampedLock;
 
 /**
@@ -27,9 +22,17 @@ public class LocalSubscriptionRegistry implements SubscriptionRegistry {
     private final ConcurrentMap<String, ClientSubscriptions> subscriptionsByClient = new ConcurrentHashMap<>();
 
     /**
-     * Topic trie root.
+     * Local topic trie for routing match.
      */
-    private final TopicTrieNode root = new TopicTrieNode();
+    private final TopicTrieNode localTopicTrieNode = new TopicTrieNode();
+    /**
+     * topicFilter -> local subscription ref count on this node.
+     */
+    private final ConcurrentMap<String, AtomicInteger> topicRefCount = new ConcurrentHashMap<>();
+    /**
+     * Canonical topic filter pool to reduce duplicated String objects.
+     */
+    private final TopicFilterPool topicFilterPool = new TopicFilterPool();
 
     /**
      * Guards trie structural mutation and read traversal.
@@ -37,68 +40,90 @@ public class LocalSubscriptionRegistry implements SubscriptionRegistry {
     private final StampedLock trieLock = new StampedLock();
 
     @Override
-    public void subscribe(String clientId, String topicFilter, int qos) {
+    public boolean subscribeAndCheckFirst(String clientId, String topicFilter, int qos) {
         if (clientId == null || clientId.isBlank() || topicFilter == null || topicFilter.isBlank()) {
-            return;
+            return false;
         }
-        subscriptionsByClient
+        String canonicalTopicFilter = topicFilterPool.acquire(topicFilter);
+        boolean added = subscriptionsByClient
             .computeIfAbsent(clientId, ignored -> new ClientSubscriptions())
-            .put(topicFilter, qos);
+            .put(canonicalTopicFilter, qos);
+        boolean firstLocal = false;
+        if (added) {
+            int refs = topicRefCount
+                .computeIfAbsent(canonicalTopicFilter, ignored -> new AtomicInteger(0))
+                .incrementAndGet();
+            firstLocal = refs == 1;
+        } else {
+            topicFilterPool.release(canonicalTopicFilter);
+        }
         long stamp = trieLock.writeLock();
         try {
-            addToTrie(clientId, topicFilter);
+            addToTrie(clientId, canonicalTopicFilter);
         } finally {
             trieLock.unlockWrite(stamp);
         }
+        return firstLocal;
     }
 
     @Override
-    public void unsubscribe(String clientId, String topicFilter) {
+    public boolean unsubscribeAndCheckLast(String clientId, String topicFilter) {
         if (clientId == null || clientId.isBlank() || topicFilter == null || topicFilter.isBlank()) {
-            return;
+            return false;
         }
+        String canonicalTopicFilter = topicFilterPool.resolve(topicFilter);
         ClientSubscriptions clientSubscriptions = subscriptionsByClient.get(clientId);
         if (clientSubscriptions == null) {
-            return;
+            return false;
         }
-        if (!clientSubscriptions.removeIfPresent(topicFilter)) {
-            return;
+        if (!clientSubscriptions.removeIfPresent(canonicalTopicFilter)) {
+            return false;
+        }
+        boolean lastLocal = false;
+        AtomicInteger ref = topicRefCount.get(canonicalTopicFilter);
+        if (ref != null && ref.decrementAndGet() <= 0) {
+            topicRefCount.remove(canonicalTopicFilter, ref);
+            lastLocal = true;
         }
         long stamp = trieLock.writeLock();
         try {
-            removeFromTrie(clientId, topicFilter);
+            removeFromTrie(clientId, canonicalTopicFilter);
         } finally {
             trieLock.unlockWrite(stamp);
         }
+        topicFilterPool.release(canonicalTopicFilter);
         if (clientSubscriptions.isEmpty()) {
             subscriptionsByClient.remove(clientId, clientSubscriptions);
         }
+        return lastLocal;
     }
 
     @Override
-    public void removeClient(String clientId) {
+    public Set<String> removeClientAndCollectLastTopics(String clientId) {
         if (clientId == null || clientId.isBlank()) {
-            return;
+            return Collections.emptySet();
         }
         ClientSubscriptions subscriptions = subscriptionsByClient.remove(clientId);
         if (subscriptions == null || subscriptions.isEmpty()) {
-            return;
+            return Collections.emptySet();
         }
         Set<String> topicFilters = subscriptions.keySetSnapshot();
+        Set<String> lastTopics = new HashSet<>();
+        topicFilters.forEach(topicFilter -> {
+            AtomicInteger ref = topicRefCount.get(topicFilter);
+            if (ref != null && ref.decrementAndGet() <= 0) {
+                topicRefCount.remove(topicFilter, ref);
+                lastTopics.add(topicFilter);
+            }
+            topicFilterPool.release(topicFilter);
+        });
         long stamp = trieLock.writeLock();
         try {
             topicFilters.forEach(topicFilter -> removeFromTrie(clientId, topicFilter));
         } finally {
             trieLock.unlockWrite(stamp);
         }
-    }
-
-    @Override
-    public Set<String> findSubscribers(String topic) {
-        SubscriptionMatchResult matchResult = findSubscriptionMatch(topic);
-        Set<String> result = new LinkedHashSet<>(matchResult.getDirectSubscribers());
-        matchResult.getSharedSubscribersByGroup().values().forEach(result::addAll);
-        return result;
+        return lastTopics;
     }
 
     @Override
@@ -134,26 +159,26 @@ public class LocalSubscriptionRegistry implements SubscriptionRegistry {
     private SubscriptionMatchResult collectMatchResult(String[] topicLevels) {
         Set<String> directSubscribers = new LinkedHashSet<>();
         Map<String, Set<String>> sharedSubscribersByGroup = new HashMap<>();
-        collectMatches(root, topicLevels, 0, directSubscribers, sharedSubscribersByGroup);
+        collectMatches(localTopicTrieNode, topicLevels, 0, directSubscribers, sharedSubscribersByGroup);
         return new SubscriptionMatchResult(directSubscribers, sharedSubscribersByGroup);
     }
 
     private void addToTrie(String clientId, String topicFilter) {
         SharedSubscription.Parsed shared = SharedSubscription.parse(topicFilter);
         if (shared != null) {
-            insertFilter(root, splitLevels(shared.topicFilter()), 0, clientId, shared.group(), true);
+            insertFilter(localTopicTrieNode, splitLevels(shared.topicFilter()), 0, clientId, shared.group(), true);
             return;
         }
-        insertFilter(root, splitLevels(topicFilter), 0, clientId, null, false);
+        insertFilter(localTopicTrieNode, splitLevels(topicFilter), 0, clientId, null, false);
     }
 
     private void removeFromTrie(String clientId, String topicFilter) {
         SharedSubscription.Parsed shared = SharedSubscription.parse(topicFilter);
         if (shared != null) {
-            removeFilter(root, splitLevels(shared.topicFilter()), 0, clientId, shared.group(), true);
+            removeFilter(localTopicTrieNode, splitLevels(shared.topicFilter()), 0, clientId, shared.group(), true);
             return;
         }
-        removeFilter(root, splitLevels(topicFilter), 0, clientId, null, false);
+        removeFilter(localTopicTrieNode, splitLevels(topicFilter), 0, clientId, null, false);
     }
 
     private void insertFilter(
@@ -177,7 +202,7 @@ public class LocalSubscriptionRegistry implements SubscriptionRegistry {
 
         TopicTrieNode nextNode = "+".equals(level)
             ? node.getOrCreateWildcardChild()
-            : node.children.computeIfAbsent(level, ignored -> new TopicTrieNode());
+            : node.getOrCreateLiteralChild(level);
         insertFilter(nextNode, levels, levelIndex + 1, clientId, sharedGroup, shared);
     }
 
@@ -200,7 +225,7 @@ public class LocalSubscriptionRegistry implements SubscriptionRegistry {
             return node.isEmpty();
         }
 
-        TopicTrieNode nextNode = "+".equals(level) ? node.wildcardChild : node.children.get(level);
+        TopicTrieNode nextNode = "+".equals(level) ? node.getWildcardChild() : node.getLiteralChild(level);
         if (nextNode == null) {
             return false;
         }
@@ -209,7 +234,7 @@ public class LocalSubscriptionRegistry implements SubscriptionRegistry {
             if ("+".equals(level)) {
                 node.clearWildcardChild(nextNode);
             } else {
-                node.children.remove(level, nextNode);
+                node.removeLiteralChild(level, nextNode);
             }
         }
         return node.isEmpty();
@@ -233,159 +258,12 @@ public class LocalSubscriptionRegistry implements SubscriptionRegistry {
         }
 
         String currentLevel = topicLevels[levelIndex];
-        collectMatches(node.children.get(currentLevel), topicLevels, levelIndex + 1, directSubscribers, sharedSubscribersByGroup);
-        collectMatches(node.wildcardChild, topicLevels, levelIndex + 1, directSubscribers, sharedSubscribersByGroup);
+        collectMatches(node.getLiteralChild(currentLevel), topicLevels, levelIndex + 1, directSubscribers, sharedSubscribersByGroup);
+        collectMatches(node.getWildcardChild(), topicLevels, levelIndex + 1, directSubscribers, sharedSubscribersByGroup);
     }
 
     private static String[] splitLevels(String topic) {
         return topic.split("/", -1);
     }
 
-    /**
-     * Trie node that stores direct and shared subscribers for terminal and hash matches.
-     */
-    private static class TopicTrieNode {
-        private final ConcurrentMap<String, TopicTrieNode> children = new ConcurrentHashMap<>();
-        private volatile TopicTrieNode wildcardChild;
-        private final Set<String> terminalSubscribers = ConcurrentHashMap.newKeySet();
-        private final Set<String> hashSubscribers = ConcurrentHashMap.newKeySet();
-        private final ConcurrentMap<String, Set<String>> terminalSharedSubscribers = new ConcurrentHashMap<>();
-        private final ConcurrentMap<String, Set<String>> hashSharedSubscribers = new ConcurrentHashMap<>();
-
-        private TopicTrieNode getOrCreateWildcardChild() {
-            TopicTrieNode current = wildcardChild;
-            if (current != null) {
-                return current;
-            }
-            synchronized (this) {
-                if (wildcardChild == null) {
-                    wildcardChild = new TopicTrieNode();
-                }
-                return wildcardChild;
-            }
-        }
-
-        private void clearWildcardChild(TopicTrieNode expected) {
-            if (wildcardChild == expected) {
-                wildcardChild = null;
-            }
-        }
-
-        private void addTerminal(String clientId, String group, boolean shared) {
-            if (!shared) {
-                terminalSubscribers.add(clientId);
-                return;
-            }
-            terminalSharedSubscribers.computeIfAbsent(group, ignored -> ConcurrentHashMap.newKeySet()).add(clientId);
-        }
-
-        private void removeTerminal(String clientId, String group, boolean shared) {
-            if (!shared) {
-                terminalSubscribers.remove(clientId);
-                return;
-            }
-            removeSharedClient(terminalSharedSubscribers, group, clientId);
-        }
-
-        private void addHash(String clientId, String group, boolean shared) {
-            if (!shared) {
-                hashSubscribers.add(clientId);
-                return;
-            }
-            hashSharedSubscribers.computeIfAbsent(group, ignored -> ConcurrentHashMap.newKeySet()).add(clientId);
-        }
-
-        private void removeHash(String clientId, String group, boolean shared) {
-            if (!shared) {
-                hashSubscribers.remove(clientId);
-                return;
-            }
-            removeSharedClient(hashSharedSubscribers, group, clientId);
-        }
-
-        private void collectTerminal(Set<String> directSubscribers, Map<String, Set<String>> sharedSubscribersByGroup) {
-            directSubscribers.addAll(terminalSubscribers);
-            collectShared(terminalSharedSubscribers, sharedSubscribersByGroup);
-        }
-
-        private void collectHash(Set<String> directSubscribers, Map<String, Set<String>> sharedSubscribersByGroup) {
-            directSubscribers.addAll(hashSubscribers);
-            collectShared(hashSharedSubscribers, sharedSubscribersByGroup);
-        }
-
-        private void collectShared(Map<String, Set<String>> source, Map<String, Set<String>> target) {
-            source.forEach((group, subscribers) ->
-                target.computeIfAbsent(group, ignored -> new HashSet<>()).addAll(subscribers)
-            );
-        }
-
-        private boolean isEmpty() {
-            return children.isEmpty()
-                && wildcardChild == null
-                && terminalSubscribers.isEmpty()
-                && hashSubscribers.isEmpty()
-                && terminalSharedSubscribers.isEmpty()
-                && hashSharedSubscribers.isEmpty();
-        }
-
-        private static void removeSharedClient(
-            ConcurrentMap<String, Set<String>> sharedSubscribers,
-            String group,
-            String clientId
-        ) {
-            if (group == null) {
-                return;
-            }
-            Set<String> clients = sharedSubscribers.get(group);
-            if (clients == null) {
-                return;
-            }
-            clients.remove(clientId);
-            if (clients.isEmpty()) {
-                sharedSubscribers.remove(group, clients);
-            }
-        }
-    }
-
-    /**
-     * Per-client subscriptions with cached immutable snapshot to reduce copy overhead.
-     */
-    private static class ClientSubscriptions {
-        private final ConcurrentMap<String, Integer> values = new ConcurrentHashMap<>();
-        private final AtomicReference<Map<String, Integer>> snapshotRef = new AtomicReference<>();
-
-        private void put(String topicFilter, int qos) {
-            values.put(topicFilter, qos);
-            snapshotRef.set(null);
-        }
-
-        private boolean removeIfPresent(String topicFilter) {
-            Integer removed = values.remove(topicFilter);
-            if (removed == null) {
-                return false;
-            }
-            snapshotRef.set(null);
-            return true;
-        }
-
-        private boolean isEmpty() {
-            return values.isEmpty();
-        }
-
-        private Set<String> keySetSnapshot() {
-            return Set.copyOf(values.keySet());
-        }
-
-        private Map<String, Integer> snapshot() {
-            Map<String, Integer> cached = snapshotRef.get();
-            if (cached != null) {
-                return cached;
-            }
-            Map<String, Integer> fresh = Map.copyOf(values);
-            if (snapshotRef.compareAndSet(null, fresh)) {
-                return fresh;
-            }
-            return snapshotRef.get();
-        }
-    }
 }

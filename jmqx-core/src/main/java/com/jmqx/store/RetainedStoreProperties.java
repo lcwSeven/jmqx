@@ -7,9 +7,15 @@ package com.jmqx.store;
  * @date 2026/4/7
  */
 public class RetainedStoreProperties {
+    // 是否启用保留消息 默认启用
+    private boolean retainedEnabled = true;
+    // 存储路径 默认 data/retained-rocksdb
     private String rocksdbPath = "data/retained-rocksdb";
+    // 最大保留消息数量默认 100_000
     private int maxEntries = 100_000;
-    private long maxBytes = 256L * 1024 * 1024;
+    // 最大保留消息字节数 默认 2M
+    private long maxBytes = 2 * 1024 * 1024;
+    // 最大保留消息负载字节数 默认 1M
     private int maxPayloadBytes = 1024 * 1024;
     private RetainedOverflowStrategy overflowStrategy = RetainedOverflowStrategy.EVICT_LRU;
 
@@ -51,5 +57,13 @@ public class RetainedStoreProperties {
 
     public void setOverflowStrategy(RetainedOverflowStrategy overflowStrategy) {
         this.overflowStrategy = overflowStrategy;
+    }
+
+    public boolean isRetainedEnabled() {
+        return retainedEnabled;
+    }
+
+    public void setRetainedEnabled(boolean retainedEnabled) {
+        this.retainedEnabled = retainedEnabled;
     }
 }
