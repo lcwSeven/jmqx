@@ -29,6 +29,11 @@
         </dependency>
         <dependency>
             <groupId>com.jmqx</groupId>
+            <artifactId>jmqx-cluster</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.jmqx</groupId>
             <artifactId>jmqx-core</artifactId>
             <version>${project.version}</version>
         </dependency>

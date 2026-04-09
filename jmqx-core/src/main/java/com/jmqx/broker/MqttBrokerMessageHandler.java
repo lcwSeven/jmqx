@@ -5,6 +5,12 @@ import com.jmqx.acl.AclAuthorizer;
 import com.jmqx.acl.AclRequest;
 import com.jmqx.bridge.BridgeMessage;
 import com.jmqx.bridge.MessageBridge;
+import com.jmqx.cluster.ClusterRoleProvider;
+import com.jmqx.cluster.MetadataCommand;
+import com.jmqx.cluster.MetadataCommandGateway;
+import com.jmqx.cluster.NodeRole;
+import com.jmqx.cluster.NoopMetadataCommandGateway;
+import com.jmqx.cluster.StaticClusterRoleProvider;
 import com.jmqx.common.SharedSubscription;
 import com.jmqx.protocol.BrokerMessageHandler;
 import com.jmqx.protocol.ClientAuthenticator;
@@ -75,6 +81,9 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
 
     private static final String TOPIC_CLIENT_CONNECTED = "$SYS/jmqx/events/client/connected";
     private static final String TOPIC_CLIENT_DISCONNECTED = "$SYS/jmqx/events/client/disconnected";
+    private static final String SUBSCRIPTION_NAMESPACE = "route.subscription";
+    private static final String OP_REGISTER = "register";
+    private static final String OP_UNREGISTER = "unregister";
 
     private final SessionRegistry sessionRegistry;
     private final SubscriptionRegistry subscriptionRegistry;
@@ -87,6 +96,8 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     private final ExecutorService retainedStoreExecutor;
     private final GlobalSubscriptionRegistry globalSubscriptionRegistry;
     private final String nodeId;
+    private final ClusterRoleProvider clusterRoleProvider;
+    private final MetadataCommandGateway metadataCommandGateway;
     private final ClusterMessageDispatcher clusterMessageDispatcher;
     private final AtomicLong globalRouteLogIndex = new AtomicLong(0);
     private final ConcurrentMap<String, AtomicLong> sharedGroupNodeRoundRobin = new ConcurrentHashMap<>();
@@ -113,6 +124,38 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             retainedEnabled,
             globalSubscriptionRegistry,
             nodeId,
+            new StaticClusterRoleProvider(NodeRole.CORE, nodeId, Set.of()),
+            NoopMetadataCommandGateway.INSTANCE,
+            ClusterMessageDispatcher.NOOP
+        );
+    }
+
+    public MqttBrokerMessageHandler(
+            SessionRegistry sessionRegistry,
+            SubscriptionRegistry subscriptionRegistry,
+            RetainedMessageStore retainedMessageStore,
+            ClientAuthenticator clientAuthenticator,
+            AclAuthorizer aclAuthorizer,
+            SharedSubscriptionManager sharedSubscriptionManager,
+            MessageBridge messageBridge,
+            boolean retainedEnabled,
+            GlobalSubscriptionRegistry globalSubscriptionRegistry,
+            String nodeId,
+            ClusterRoleProvider clusterRoleProvider,
+            MetadataCommandGateway metadataCommandGateway) {
+        this(
+            sessionRegistry,
+            subscriptionRegistry,
+            retainedMessageStore,
+            clientAuthenticator,
+            aclAuthorizer,
+            sharedSubscriptionManager,
+            messageBridge,
+            retainedEnabled,
+            globalSubscriptionRegistry,
+            nodeId,
+            clusterRoleProvider,
+            metadataCommandGateway,
             ClusterMessageDispatcher.NOOP
         );
     }
@@ -129,6 +172,37 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             GlobalSubscriptionRegistry globalSubscriptionRegistry,
             String nodeId,
             ClusterMessageDispatcher clusterMessageDispatcher) {
+        this(
+            sessionRegistry,
+            subscriptionRegistry,
+            retainedMessageStore,
+            clientAuthenticator,
+            aclAuthorizer,
+            sharedSubscriptionManager,
+            messageBridge,
+            retainedEnabled,
+            globalSubscriptionRegistry,
+            nodeId,
+            new StaticClusterRoleProvider(NodeRole.CORE, nodeId, Set.of()),
+            NoopMetadataCommandGateway.INSTANCE,
+            clusterMessageDispatcher
+        );
+    }
+
+    public MqttBrokerMessageHandler(
+            SessionRegistry sessionRegistry,
+            SubscriptionRegistry subscriptionRegistry,
+            RetainedMessageStore retainedMessageStore,
+            ClientAuthenticator clientAuthenticator,
+            AclAuthorizer aclAuthorizer,
+            SharedSubscriptionManager sharedSubscriptionManager,
+            MessageBridge messageBridge,
+            boolean retainedEnabled,
+            GlobalSubscriptionRegistry globalSubscriptionRegistry,
+            String nodeId,
+            ClusterRoleProvider clusterRoleProvider,
+            MetadataCommandGateway metadataCommandGateway,
+            ClusterMessageDispatcher clusterMessageDispatcher) {
         this.sessionRegistry = sessionRegistry;
         this.subscriptionRegistry = subscriptionRegistry;
         this.retainedMessageStore = retainedMessageStore;
@@ -141,6 +215,12 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         this.retainedEnabled = retainedEnabled;
         this.globalSubscriptionRegistry = globalSubscriptionRegistry;
         this.nodeId = (nodeId == null || nodeId.isBlank()) ? "node-1" : nodeId;
+        this.clusterRoleProvider = clusterRoleProvider == null
+            ? new StaticClusterRoleProvider(NodeRole.CORE, this.nodeId, Set.of())
+            : clusterRoleProvider;
+        this.metadataCommandGateway = metadataCommandGateway == null
+            ? NoopMetadataCommandGateway.INSTANCE
+            : metadataCommandGateway;
         this.clusterMessageDispatcher = clusterMessageDispatcher == null
             ? ClusterMessageDispatcher.NOOP
             : clusterMessageDispatcher;
@@ -604,6 +684,19 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         SharedSubscription.Parsed shared = SharedSubscription.parse(topicFilter);
         String normalized = SharedSubscription.normalizeTopicFilter(topicFilter);
         String group = shared == null ? null : shared.group();
+        long committedIndex = metadataCommandGateway.submit(new MetadataCommand(
+            SUBSCRIPTION_NAMESPACE,
+            OP_REGISTER,
+            normalized,
+            group,
+            nodeId
+        ));
+        if (committedIndex >= 0) {
+            return;
+        }
+        if (clusterRoleProvider.role() == NodeRole.REPLICANT) {
+            LOG.warning(() -> "[CLUSTER] metadata gateway unavailable, fallback local register topicFilter=" + topicFilter);
+        }
         long nextIndex = globalRouteLogIndex.incrementAndGet();
         globalSubscriptionRegistry.apply(GlobalSubscriptionEvent.register(nextIndex, nodeId, normalized, group));
     }
@@ -615,6 +708,19 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         SharedSubscription.Parsed shared = SharedSubscription.parse(topicFilter);
         String normalized = SharedSubscription.normalizeTopicFilter(topicFilter);
         String group = shared == null ? null : shared.group();
+        long committedIndex = metadataCommandGateway.submit(new MetadataCommand(
+            SUBSCRIPTION_NAMESPACE,
+            OP_UNREGISTER,
+            normalized,
+            group,
+            nodeId
+        ));
+        if (committedIndex >= 0) {
+            return;
+        }
+        if (clusterRoleProvider.role() == NodeRole.REPLICANT) {
+            LOG.warning(() -> "[CLUSTER] metadata gateway unavailable, fallback local unregister topicFilter=" + topicFilter);
+        }
         long nextIndex = globalRouteLogIndex.incrementAndGet();
         globalSubscriptionRegistry.apply(GlobalSubscriptionEvent.unregister(nextIndex, nodeId, normalized, group));
     }

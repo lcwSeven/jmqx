@@ -71,6 +71,19 @@ public class DefaultGlobalSubscriptionRegistry implements GlobalSubscriptionRegi
     }
 
     @Override
+    public void clear() {
+        lock.writeLock().lock();
+        try {
+            normalTopicToNodes.clear();
+            sharedGroupToTopicToNodes.clear();
+            nodeToTopicKeys.clear();
+            appliedLogIndex.set(0L);
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    @Override
     public GlobalSubscriptionMatch match(String topic) {
         lock.readLock().lock();
         try {

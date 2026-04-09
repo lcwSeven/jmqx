@@ -48,6 +48,10 @@ public class TopicTrie<V> {
         return root.isEmpty();
     }
 
+    public void clear() {
+        root.clear();
+    }
+
     private V computeIfAbsent(GenericTopicTrieNode<V> node, String[] levels, int index, Supplier<V> supplier) {
         if (index >= levels.length) {
             if (node.getTerminalValue() == null) {

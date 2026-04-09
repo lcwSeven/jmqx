@@ -63,4 +63,11 @@ public class GenericTopicTrieNode<V> {
     public boolean isEmpty() {
         return literalChildren.isEmpty() && wildcardChild == null && terminalValue == null && hashValue == null;
     }
+
+    public void clear() {
+        literalChildren.clear();
+        wildcardChild = null;
+        terminalValue = null;
+        hashValue = null;
+    }
 }

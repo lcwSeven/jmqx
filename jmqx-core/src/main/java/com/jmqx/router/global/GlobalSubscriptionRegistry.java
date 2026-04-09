@@ -15,6 +15,8 @@ import java.util.Set;
 public interface GlobalSubscriptionRegistry {
     void apply(GlobalSubscriptionEvent event);
 
+    void clear();
+
     default void applyBatch(List<GlobalSubscriptionEvent> events) {
         if (events == null) {
             return;
