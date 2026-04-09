@@ -2,7 +2,6 @@ package com.jmqx.router;
 
 import com.jmqx.common.SharedSubscription;
 
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -12,73 +11,88 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.StampedLock;
 
 /**
- * 基于内存的订阅注册表。
- * 当前实现使用 Topic Trie 来替代全量扫描，降低 publish 路径上的订阅匹配成本。
- *
- * 数据结构说明：
- * 1. subscriptionsByClient：客户端 -> 订阅过滤器/QoS，主要用于管理后台查询和 removeClient 快速清理。
- * 2. root(TopicTrieNode)：按 topic filter 分层索引，主要用于 publish 时快速匹配订阅者。
- * 3. 共享订阅候选集合：由 Trie 返回候选客户端，具体选举逻辑由 SharedSubscriptionManager 处理。
+ * Local in-memory subscription registry for a single node.
+ * This implementation uses a topic trie and read/write lock to stabilize publish matching under concurrent updates.
  *
  * @author liucaiwen
- * @date 2026/4/2
+ * @date 2026/4/7
  */
-public class InMemorySubscriptionRegistry implements SubscriptionRegistry {
+public class LocalSubscriptionRegistry implements SubscriptionRegistry {
     /**
-     * 客户端维度的订阅快照：clientId -> (topicFilter -> qos)。
+     * Client-level subscription snapshot: clientId -> (topicFilter -> qos).
      */
     private final ConcurrentMap<String, ClientSubscriptions> subscriptionsByClient = new ConcurrentHashMap<>();
 
     /**
-     * Topic Trie 根节点。
+     * Topic trie root.
      */
     private final TopicTrieNode root = new TopicTrieNode();
 
     /**
-     * 注册订阅。
-     * 同时写入客户端视图与 Trie 视图，保证管理查询和消息路由都能快速执行。
+     * Guards trie structural mutation and read traversal.
      */
+    private final StampedLock trieLock = new StampedLock();
+
     @Override
     public void subscribe(String clientId, String topicFilter, int qos) {
+        if (clientId == null || clientId.isBlank() || topicFilter == null || topicFilter.isBlank()) {
+            return;
+        }
         subscriptionsByClient
             .computeIfAbsent(clientId, ignored -> new ClientSubscriptions())
             .put(topicFilter, qos);
-        // 持久保存一份 client -> subscriptions 方便后台展示，同时把过滤器写入 Trie 供快速匹配。
-        addToTrie(clientId, topicFilter);
+        long stamp = trieLock.writeLock();
+        try {
+            addToTrie(clientId, topicFilter);
+        } finally {
+            trieLock.unlockWrite(stamp);
+        }
     }
 
-    /**
-     * 取消订阅。
-     * 会从客户端视图和 Trie 视图同时删除。
-     */
     @Override
     public void unsubscribe(String clientId, String topicFilter) {
+        if (clientId == null || clientId.isBlank() || topicFilter == null || topicFilter.isBlank()) {
+            return;
+        }
         ClientSubscriptions clientSubscriptions = subscriptionsByClient.get(clientId);
         if (clientSubscriptions == null) {
             return;
         }
-        clientSubscriptions.remove(topicFilter);
-        removeFromTrie(clientId, topicFilter);
+        if (!clientSubscriptions.removeIfPresent(topicFilter)) {
+            return;
+        }
+        long stamp = trieLock.writeLock();
+        try {
+            removeFromTrie(clientId, topicFilter);
+        } finally {
+            trieLock.unlockWrite(stamp);
+        }
+        if (clientSubscriptions.isEmpty()) {
+            subscriptionsByClient.remove(clientId, clientSubscriptions);
+        }
     }
 
-    /**
-     * 移除客户端及其全部订阅。
-     */
     @Override
     public void removeClient(String clientId) {
+        if (clientId == null || clientId.isBlank()) {
+            return;
+        }
         ClientSubscriptions subscriptions = subscriptionsByClient.remove(clientId);
         if (subscriptions == null || subscriptions.isEmpty()) {
             return;
         }
-        subscriptions.keySet().forEach(topicFilter -> removeFromTrie(clientId, topicFilter));
+        Set<String> topicFilters = subscriptions.keySetSnapshot();
+        long stamp = trieLock.writeLock();
+        try {
+            topicFilters.forEach(topicFilter -> removeFromTrie(clientId, topicFilter));
+        } finally {
+            trieLock.unlockWrite(stamp);
+        }
     }
 
-    /**
-     * 根据发布 topic 匹配订阅者（兼容旧接口）。
-     * 这里返回普通订阅 + 共享候选全集，实际共享选举由 SharedSubscriptionManager 执行。
-     */
     @Override
     public Set<String> findSubscribers(String topic) {
         SubscriptionMatchResult matchResult = findSubscriptionMatch(topic);
@@ -89,16 +103,25 @@ public class InMemorySubscriptionRegistry implements SubscriptionRegistry {
 
     @Override
     public SubscriptionMatchResult findSubscriptionMatch(String topic) {
-        Set<String> directSubscribers = new LinkedHashSet<>();
-        Map<String, Set<String>> sharedSubscribersByGroup = new HashMap<>();
+        if (topic == null || topic.isBlank()) {
+            return new SubscriptionMatchResult(Collections.emptySet(), Collections.emptyMap());
+        }
         String[] topicLevels = splitLevels(topic);
-        collectMatches(root, topicLevels, 0, directSubscribers, sharedSubscribersByGroup);
-        return new SubscriptionMatchResult(directSubscribers, sharedSubscribersByGroup);
+
+        long optimistic = trieLock.tryOptimisticRead();
+        SubscriptionMatchResult optimisticResult = collectMatchResult(topicLevels);
+        if (trieLock.validate(optimistic)) {
+            return optimisticResult;
+        }
+
+        long stamp = trieLock.readLock();
+        try {
+            return collectMatchResult(topicLevels);
+        } finally {
+            trieLock.unlockRead(stamp);
+        }
     }
 
-    /**
-     * 查询指定客户端当前全部订阅（只读快照）。
-     */
     @Override
     public Map<String, Integer> findSubscriptions(String clientId) {
         ClientSubscriptions subscriptions = subscriptionsByClient.get(clientId);
@@ -108,10 +131,13 @@ public class InMemorySubscriptionRegistry implements SubscriptionRegistry {
         return subscriptions.snapshot();
     }
 
-    /**
-     * 把订阅过滤器写入 Trie。
-     * 共享订阅会先规范化为真实 topicFilter + group，再写入索引。
-     */
+    private SubscriptionMatchResult collectMatchResult(String[] topicLevels) {
+        Set<String> directSubscribers = new LinkedHashSet<>();
+        Map<String, Set<String>> sharedSubscribersByGroup = new HashMap<>();
+        collectMatches(root, topicLevels, 0, directSubscribers, sharedSubscribersByGroup);
+        return new SubscriptionMatchResult(directSubscribers, sharedSubscribersByGroup);
+    }
+
     private void addToTrie(String clientId, String topicFilter) {
         SharedSubscription.Parsed shared = SharedSubscription.parse(topicFilter);
         if (shared != null) {
@@ -121,9 +147,6 @@ public class InMemorySubscriptionRegistry implements SubscriptionRegistry {
         insertFilter(root, splitLevels(topicFilter), 0, clientId, null, false);
     }
 
-    /**
-     * 从 Trie 删除订阅过滤器。
-     */
     private void removeFromTrie(String clientId, String topicFilter) {
         SharedSubscription.Parsed shared = SharedSubscription.parse(topicFilter);
         if (shared != null) {
@@ -133,9 +156,6 @@ public class InMemorySubscriptionRegistry implements SubscriptionRegistry {
         removeFilter(root, splitLevels(topicFilter), 0, clientId, null, false);
     }
 
-    /**
-     * 递归插入过滤器到 Trie。
-     */
     private void insertFilter(
         TopicTrieNode node,
         String[] levels,
@@ -151,7 +171,6 @@ public class InMemorySubscriptionRegistry implements SubscriptionRegistry {
 
         String level = levels[levelIndex];
         if ("#".equals(level) && levelIndex == levels.length - 1) {
-            // 多层通配符只能出现在末尾，直接挂到当前节点的 hash 桶上。
             node.addHash(clientId, sharedGroup, shared);
             return;
         }
@@ -162,9 +181,6 @@ public class InMemorySubscriptionRegistry implements SubscriptionRegistry {
         insertFilter(nextNode, levels, levelIndex + 1, clientId, sharedGroup, shared);
     }
 
-    /**
-     * 递归删除过滤器，并返回当前节点是否已为空（供父节点做子树回收）。
-     */
     private boolean removeFilter(
         TopicTrieNode node,
         String[] levels,
@@ -199,14 +215,6 @@ public class InMemorySubscriptionRegistry implements SubscriptionRegistry {
         return node.isEmpty();
     }
 
-    /**
-     * 递归收集匹配结果。
-     *
-     * 匹配顺序：
-     * 1. 先收集当前层 '#' 订阅（可匹配当前及后续层）。
-     * 2. 若 topic 已遍历完，收集当前层精确结束订阅。
-     * 3. 否则继续沿字面量子节点和 '+' 子节点下探。
-     */
     private void collectMatches(
         TopicTrieNode node,
         String[] topicLevels,
@@ -218,7 +226,6 @@ public class InMemorySubscriptionRegistry implements SubscriptionRegistry {
             return;
         }
 
-        // '#' 能匹配从当前层开始的所有后续层，因此每次下探前都要先收集。
         node.collectHash(directSubscribers, sharedSubscribersByGroup);
         if (levelIndex >= topicLevels.length) {
             node.collectTerminal(directSubscribers, sharedSubscribersByGroup);
@@ -226,62 +233,25 @@ public class InMemorySubscriptionRegistry implements SubscriptionRegistry {
         }
 
         String currentLevel = topicLevels[levelIndex];
-        // 先走字面量分支，再走 '+' 单层通配符分支。
         collectMatches(node.children.get(currentLevel), topicLevels, levelIndex + 1, directSubscribers, sharedSubscribersByGroup);
         collectMatches(node.wildcardChild, topicLevels, levelIndex + 1, directSubscribers, sharedSubscribersByGroup);
     }
 
-    /**
-     * 按 MQTT 规则保留空 level 切分（split("/", -1)）。
-     */
     private static String[] splitLevels(String topic) {
         return topic.split("/", -1);
     }
 
     /**
-     * Trie 节点同时维护 4 类数据：
-     * 1. 普通精确结束订阅
-     * 2. 普通 '#' 订阅
-     * 3. 共享精确结束订阅
-     * 4. 共享 '#' 订阅
-     *
-     * @author liucaiwen
-     * @date 2026/4/7
+     * Trie node that stores direct and shared subscribers for terminal and hash matches.
      */
     private static class TopicTrieNode {
-        /**
-         * 字面量子节点（例如 "a"、"sensor"）。
-         */
         private final ConcurrentMap<String, TopicTrieNode> children = new ConcurrentHashMap<>();
-
-        /**
-         * 单层通配符 '+' 子节点（每层最多一个）。
-         */
         private volatile TopicTrieNode wildcardChild;
-
-        /**
-         * 当前层“精确结束”的普通订阅者。
-         */
         private final Set<String> terminalSubscribers = ConcurrentHashMap.newKeySet();
-
-        /**
-         * 当前层 '#' 普通订阅者。
-         */
         private final Set<String> hashSubscribers = ConcurrentHashMap.newKeySet();
-
-        /**
-         * 当前层“精确结束”的共享订阅：group -> clients。
-         */
         private final ConcurrentMap<String, Set<String>> terminalSharedSubscribers = new ConcurrentHashMap<>();
-
-        /**
-         * 当前层 '#' 共享订阅：group -> clients。
-         */
         private final ConcurrentMap<String, Set<String>> hashSharedSubscribers = new ConcurrentHashMap<>();
 
-        /**
-         * 懒加载创建 '+' 子节点。
-         */
         private TopicTrieNode getOrCreateWildcardChild() {
             TopicTrieNode current = wildcardChild;
             if (current != null) {
@@ -295,9 +265,6 @@ public class InMemorySubscriptionRegistry implements SubscriptionRegistry {
             }
         }
 
-        /**
-         * 仅在当前引用未变化时清除 '+' 子节点，避免并发误删。
-         */
         private void clearWildcardChild(TopicTrieNode expected) {
             if (wildcardChild == expected) {
                 wildcardChild = null;
@@ -346,18 +313,12 @@ public class InMemorySubscriptionRegistry implements SubscriptionRegistry {
             collectShared(hashSharedSubscribers, sharedSubscribersByGroup);
         }
 
-        private void collectShared(
-            Map<String, Set<String>> source,
-            Map<String, Set<String>> target
-        ) {
+        private void collectShared(Map<String, Set<String>> source, Map<String, Set<String>> target) {
             source.forEach((group, subscribers) ->
                 target.computeIfAbsent(group, ignored -> new HashSet<>()).addAll(subscribers)
             );
         }
 
-        /**
-         * 判断当前节点是否可回收。
-         */
         private boolean isEmpty() {
             return children.isEmpty()
                 && wildcardChild == null
@@ -387,11 +348,7 @@ public class InMemorySubscriptionRegistry implements SubscriptionRegistry {
     }
 
     /**
-     * 每个客户端的订阅集合。
-     *
-     * 设计目标：
-     * 1. 写操作（订阅变更）直接改并发 map，并使缓存快照失效。
-     * 2. 读操作（后台查询）优先返回缓存快照，避免高频 Map.copyOf 带来的分配开销。
+     * Per-client subscriptions with cached immutable snapshot to reduce copy overhead.
      */
     private static class ClientSubscriptions {
         private final ConcurrentMap<String, Integer> values = new ConcurrentHashMap<>();
@@ -402,17 +359,21 @@ public class InMemorySubscriptionRegistry implements SubscriptionRegistry {
             snapshotRef.set(null);
         }
 
-        private void remove(String topicFilter) {
-            values.remove(topicFilter);
+        private boolean removeIfPresent(String topicFilter) {
+            Integer removed = values.remove(topicFilter);
+            if (removed == null) {
+                return false;
+            }
             snapshotRef.set(null);
+            return true;
         }
 
         private boolean isEmpty() {
             return values.isEmpty();
         }
 
-        private Set<String> keySet() {
-            return values.keySet();
+        private Set<String> keySetSnapshot() {
+            return Set.copyOf(values.keySet());
         }
 
         private Map<String, Integer> snapshot() {

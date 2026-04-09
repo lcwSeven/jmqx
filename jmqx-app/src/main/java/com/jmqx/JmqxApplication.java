@@ -16,7 +16,7 @@ import com.jmqx.bridge.MessageBridge;
 import com.jmqx.bridge.MessageBridgeFactory;
 import com.jmqx.common.BrokerProperties;
 import com.jmqx.protocol.ClientAuthenticator;
-import com.jmqx.router.InMemorySubscriptionRegistry;
+import com.jmqx.router.LocalSubscriptionRegistry;
 import com.jmqx.router.SharedSubscriptionManager;
 import com.jmqx.router.SubscriptionRegistry;
 import com.jmqx.session.InMemorySessionRegistry;
@@ -51,7 +51,7 @@ public class JmqxApplication {
         int sharedSlowThreshold = getIntProperty(config, "jmqx.shared.slowConsumerStrikeThreshold", 3);
         String nodeId = getStringProperty(config, "jmqx.node.id", "node-1");
         SessionRegistry sessionRegistry = new InMemorySessionRegistry();
-        SubscriptionRegistry subscriptionRegistry = new InMemorySubscriptionRegistry();
+        SubscriptionRegistry subscriptionRegistry = new LocalSubscriptionRegistry();
         SharedSubscriptionManager sharedSubscriptionManager = new SharedSubscriptionManager(
             sharedMaxSubscribers,
             sharedSlowThreshold
