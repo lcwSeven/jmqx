@@ -74,7 +74,6 @@ public class NettyMqttEndpointServer {
 
         String wsPath = endpointSpec.websocket() ? normalizePath(endpointSpec.websocketPath()) : null;
         SslContext finalSslContext = sslContext;
-        String finalWsPath = wsPath;
         ServerBootstrap bootstrap = new ServerBootstrap()
             .group(bossGroup, workerGroup)
             .channel(NioServerSocketChannel.class)
@@ -93,7 +92,7 @@ public class NettyMqttEndpointServer {
                             .addLast("http-codec", new HttpServerCodec())
                             .addLast("http-aggregator", new HttpObjectAggregator(64 * 1024))
                             .addLast("ws-handshake-info", new WebSocketHandshakeInfoHandler())
-                            .addLast("ws-protocol", new WebSocketServerProtocolHandler(finalWsPath, WS_SUB_PROTOCOLS, true))
+                            .addLast("ws-protocol", new WebSocketServerProtocolHandler(wsPath, WS_SUB_PROTOCOLS, true))
                             .addLast("ws-frame-decoder", new WebSocketFrameToByteBufDecoder())
                             .addLast("mqtt-decoder", new MqttDecoder(MAX_MQTT_MESSAGE_SIZE))
                             .addLast("ws-frame-encoder", new ByteBufToWebSocketFrameEncoder())
@@ -111,7 +110,7 @@ public class NettyMqttEndpointServer {
 
         serverChannel = bootstrap.bind(endpointSpec.host(), endpointSpec.port()).sync().channel();
         LOG.info(() -> "[" + endpointSpec.logName() + "] started on " + endpointSpec.host() + ":" + endpointSpec.port()
-            + (endpointSpec.websocket() ? ", path=" + finalWsPath : "")
+            + (endpointSpec.websocket() ? ", path=" + wsPath : "")
             + ", readerIdleSeconds=" + readerIdleSeconds);
     }
 

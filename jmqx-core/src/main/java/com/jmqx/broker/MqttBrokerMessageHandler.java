@@ -5,19 +5,14 @@ import com.jmqx.acl.AclAuthorizer;
 import com.jmqx.acl.AclRequest;
 import com.jmqx.bridge.BridgeMessage;
 import com.jmqx.bridge.MessageBridge;
-import com.jmqx.cluster.ClusterRoleProvider;
 import com.jmqx.cluster.MetadataCommand;
 import com.jmqx.cluster.MetadataCommandGateway;
-import com.jmqx.cluster.NodeRole;
-import com.jmqx.cluster.NoopMetadataCommandGateway;
-import com.jmqx.cluster.StaticClusterRoleProvider;
 import com.jmqx.common.SharedSubscription;
 import com.jmqx.protocol.BrokerMessageHandler;
 import com.jmqx.protocol.ClientAuthenticator;
 import com.jmqx.router.SharedSubscriptionManager;
 import com.jmqx.router.SubscriptionRegistry;
 import com.jmqx.router.SubscriptionMatchResult;
-import com.jmqx.router.global.GlobalSubscriptionEvent;
 import com.jmqx.router.global.GlobalSubscriptionMatch;
 import com.jmqx.router.global.GlobalSubscriptionRegistry;
 import com.jmqx.session.ClientSession;
@@ -49,9 +44,11 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -96,39 +93,10 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     private final ExecutorService retainedStoreExecutor;
     private final GlobalSubscriptionRegistry globalSubscriptionRegistry;
     private final String nodeId;
-    private final ClusterRoleProvider clusterRoleProvider;
     private final MetadataCommandGateway metadataCommandGateway;
     private final ClusterMessageDispatcher clusterMessageDispatcher;
-    private final AtomicLong globalRouteLogIndex = new AtomicLong(0);
     private final ConcurrentMap<String, AtomicLong> sharedGroupNodeRoundRobin = new ConcurrentHashMap<>();
 
-    public MqttBrokerMessageHandler(
-            SessionRegistry sessionRegistry,
-            SubscriptionRegistry subscriptionRegistry,
-            RetainedMessageStore retainedMessageStore,
-            ClientAuthenticator clientAuthenticator,
-            AclAuthorizer aclAuthorizer,
-            SharedSubscriptionManager sharedSubscriptionManager,
-            MessageBridge messageBridge,
-            boolean retainedEnabled,
-            GlobalSubscriptionRegistry globalSubscriptionRegistry,
-            String nodeId) {
-        this(
-            sessionRegistry,
-            subscriptionRegistry,
-            retainedMessageStore,
-            clientAuthenticator,
-            aclAuthorizer,
-            sharedSubscriptionManager,
-            messageBridge,
-            retainedEnabled,
-            globalSubscriptionRegistry,
-            nodeId,
-            new StaticClusterRoleProvider(NodeRole.CORE, nodeId, Set.of()),
-            NoopMetadataCommandGateway.INSTANCE,
-            ClusterMessageDispatcher.NOOP
-        );
-    }
 
     public MqttBrokerMessageHandler(
             SessionRegistry sessionRegistry,
@@ -141,66 +109,6 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             boolean retainedEnabled,
             GlobalSubscriptionRegistry globalSubscriptionRegistry,
             String nodeId,
-            ClusterRoleProvider clusterRoleProvider,
-            MetadataCommandGateway metadataCommandGateway) {
-        this(
-            sessionRegistry,
-            subscriptionRegistry,
-            retainedMessageStore,
-            clientAuthenticator,
-            aclAuthorizer,
-            sharedSubscriptionManager,
-            messageBridge,
-            retainedEnabled,
-            globalSubscriptionRegistry,
-            nodeId,
-            clusterRoleProvider,
-            metadataCommandGateway,
-            ClusterMessageDispatcher.NOOP
-        );
-    }
-
-    public MqttBrokerMessageHandler(
-            SessionRegistry sessionRegistry,
-            SubscriptionRegistry subscriptionRegistry,
-            RetainedMessageStore retainedMessageStore,
-            ClientAuthenticator clientAuthenticator,
-            AclAuthorizer aclAuthorizer,
-            SharedSubscriptionManager sharedSubscriptionManager,
-            MessageBridge messageBridge,
-            boolean retainedEnabled,
-            GlobalSubscriptionRegistry globalSubscriptionRegistry,
-            String nodeId,
-            ClusterMessageDispatcher clusterMessageDispatcher) {
-        this(
-            sessionRegistry,
-            subscriptionRegistry,
-            retainedMessageStore,
-            clientAuthenticator,
-            aclAuthorizer,
-            sharedSubscriptionManager,
-            messageBridge,
-            retainedEnabled,
-            globalSubscriptionRegistry,
-            nodeId,
-            new StaticClusterRoleProvider(NodeRole.CORE, nodeId, Set.of()),
-            NoopMetadataCommandGateway.INSTANCE,
-            clusterMessageDispatcher
-        );
-    }
-
-    public MqttBrokerMessageHandler(
-            SessionRegistry sessionRegistry,
-            SubscriptionRegistry subscriptionRegistry,
-            RetainedMessageStore retainedMessageStore,
-            ClientAuthenticator clientAuthenticator,
-            AclAuthorizer aclAuthorizer,
-            SharedSubscriptionManager sharedSubscriptionManager,
-            MessageBridge messageBridge,
-            boolean retainedEnabled,
-            GlobalSubscriptionRegistry globalSubscriptionRegistry,
-            String nodeId,
-            ClusterRoleProvider clusterRoleProvider,
             MetadataCommandGateway metadataCommandGateway,
             ClusterMessageDispatcher clusterMessageDispatcher) {
         this.sessionRegistry = sessionRegistry;
@@ -215,15 +123,8 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         this.retainedEnabled = retainedEnabled;
         this.globalSubscriptionRegistry = globalSubscriptionRegistry;
         this.nodeId = (nodeId == null || nodeId.isBlank()) ? "node-1" : nodeId;
-        this.clusterRoleProvider = clusterRoleProvider == null
-            ? new StaticClusterRoleProvider(NodeRole.CORE, this.nodeId, Set.of())
-            : clusterRoleProvider;
-        this.metadataCommandGateway = metadataCommandGateway == null
-            ? NoopMetadataCommandGateway.INSTANCE
-            : metadataCommandGateway;
-        this.clusterMessageDispatcher = clusterMessageDispatcher == null
-            ? ClusterMessageDispatcher.NOOP
-            : clusterMessageDispatcher;
+        this.metadataCommandGateway = Objects.requireNonNull(metadataCommandGateway, "metadataCommandGateway");
+        this.clusterMessageDispatcher = Objects.requireNonNull(clusterMessageDispatcher, "clusterMessageDispatcher");
         this.retainedStoreExecutor = Executors.newSingleThreadExecutor(runnable -> {
             Thread thread = new Thread(runnable, "jmqx-retained-store");
             thread.setDaemon(true);
@@ -233,14 +134,14 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
 
     @Override
     public void onMessage(ChannelHandlerContext ctx, MqttMessage message) {
-        // 协议解析失败，直接关闭连接
+        // 协议解码失败直接断开，避免非法报文继续占用连接。
         if (message.decoderResult().isFailure()) {
             LOG.warning(() -> "[PROTO] decode failed, remote=" + ctx.channel().remoteAddress());
             ctx.close();
             return;
         }
 
-        // MQTT 控制报文统一在这里分发，底层 transport 只负责把报文安全地交上来。
+        // 按 MQTT 报文类型分发到对应处理函数。
         MqttMessageType messageType = message.fixedHeader().messageType();
         switch (messageType) {
             case CONNECT -> handleConnect(ctx, (MqttConnectMessage) message);
@@ -275,11 +176,9 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         String connectionType = session == null ? null : session.connectionType();
         String serviceNodeIp = session == null ? null : session.serviceNodeIp();
         int keepAliveSeconds = session == null ? 0 : session.keepAliveSeconds();
-        // cleanSession 断开时直接清理订阅，持久会话则只移除在线 channel。
         boolean cleanSession = Optional.ofNullable(channel.attr(CLEAN_SESSION).get()).orElse(false);
         boolean gracefulDisconnect = Optional.ofNullable(channel.attr(GRACEFUL_DISCONNECT).get()).orElse(false);
 
-        // 仅在非正常断开时发送遗嘱消息，符合 MQTT 遗嘱语义。
         if (!gracefulDisconnect) {
             publishWillMessageIfPresent(channel, clientId);
         }
@@ -325,7 +224,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
                 ? null
                 : new String(message.payload().passwordInBytes(), StandardCharsets.UTF_8);
 
-        // 连接鉴权统一收敛在这里，WebSocket 握手阶段传过来的用户名也在这里一并复用。
+        // 连接鉴权失败时返回标准 CONNACK 错误码。
         if (!clientAuthenticator.authenticate(clientId, username, password)) {
             LOG.warning("[CONNECT] auth failed clientId=" + clientId + ", username=" + username);
             rejectConnection(ctx, MqttConnectReturnCode.CONNECTION_REFUSED_BAD_USER_NAME_OR_PASSWORD);
@@ -396,12 +295,12 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         for (MqttTopicSubscription subscription : message.payload().topicSubscriptions()) {
             String topicFilter = subscription.topicFilter();
             String normalizedFilter = SharedSubscription.normalizeTopicFilter(topicFilter);
-            if (allowed(clientId, normalizedFilter, AclAction.SUBSCRIBE)) {
+            // ACL 鉴权
+            if (isDenied(clientId, normalizedFilter, AclAction.SUBSCRIBE)) {
                 grantedQos.add(MqttQoS.FAILURE.value());
                 LOG.warning(() -> "[ACL] subscribe denied clientId=" + clientId + ", topicFilter=" + topicFilter);
                 continue;
             }
-            // 目前只支持 QoS 0 和 1
             int qos = Math.min(subscription.qualityOfService().value(), 1);
             SharedSubscription.Parsed shared = SharedSubscription.parse(topicFilter);
             if (shared != null && !sharedSubscriptionManager.register(shared.group(), clientId)) {
@@ -410,13 +309,12 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
                     + ", group=" + shared.group() + ", topicFilter=" + topicFilter);
                 continue;
             }
-            // 先更新本地主题数，再根据首个订阅结果更新全局路由表。
+            // 先更新本地订阅，再在首次订阅时同步全局路由。
             boolean firstLocal = subscriptionRegistry.subscribeAndCheckFirst(clientId, topicFilter, qos);
             if (firstLocal) {
                 applyGlobalRegisterAfterLocal(topicFilter);
             }
             grantedQos.add(qos);
-            // MQTT 规范要求新订阅完成后立即回放匹配的 retained 消息。
             if (retainedEnabled) {
                 replayRetained(ctx.channel(), normalizedFilter);
             }
@@ -445,7 +343,6 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             if (shared != null) {
                 sharedSubscriptionManager.unregister(shared.group(), clientId);
             }
-            // 先更新本地主题数，再根据最后一个订阅结果更新全局路由表。
             boolean lastLocal = subscriptionRegistry.unsubscribeAndCheckLast(clientId, topicFilter);
             if (lastLocal) {
                 applyGlobalUnregisterAfterLocal(topicFilter);
@@ -460,9 +357,8 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         byte[] payload = ByteBufUtil.getBytes(message.payload());
         int qos = message.fixedHeader().qosLevel().value();
         String clientId = currentClientId(ctx.channel());
-
         // ACL 鉴权
-        if (allowed(clientId, topic, AclAction.PUBLISH)) {
+        if (isDenied(clientId, topic, AclAction.PUBLISH)) {
             LOG.warning(() -> "[ACL] publish denied clientId=" + clientId + ", topic=" + topic);
             if (qos == 1) {
                 ctx.writeAndFlush(MqttMessageBuilders.pubAck().packetId(message.variableHeader().packetId()).build());
@@ -470,15 +366,13 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             return;
         }
 
+        // Retain 消息进入异步存储，避免阻塞 I/O 线程。
         if (message.fixedHeader().isRetain()) {
-            // 先判断系统是否启用 retained，再异步写入/删除 retained 存储。
             submitRetainedAsync(topic, payload, qos);
         }
 
-        // 单机模式下先完成本地投递，再写桥接通道。
         routeMessage(topic, payload);
 
-        // 消息桥接到对应消息队列
         messageBridge.publish(new BridgeMessage(
             clientId,
             topic,
@@ -554,7 +448,6 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
 
     private void publishInternal(String sourceClientId, String topic, byte[] payload, int qos, boolean retain) {
         if (retain) {
-            // 内部发布同样遵循 retained 开关，并使用异步持久化。
             submitRetainedAsync(topic, payload, qos);
         }
         routeMessage(topic, payload);
@@ -569,14 +462,77 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     private void routeMessage(String topic, byte[] payload) {
+        GlobalSubscriptionMatch globalMatch = globalSubscriptionRegistry == null
+            ? new GlobalSubscriptionMatch(Collections.emptySet(), Collections.emptyMap())
+            : globalSubscriptionRegistry.match(topic);
+        // 始终基于本地订阅表进行一次匹配，避免本地订阅已生效但全局路由尚未传播时漏投递。
+        SubscriptionMatchResult localMatch = subscriptionRegistry.findSubscriptionMatch(topic);
+        Set<String> localSubscribers = new LinkedHashSet<>();
+        localSubscribers.addAll(localMatch.getDirectSubscribers());
+        Map<String, ClusterMessageDispatcher.DispatchTarget> remoteTargetPlans = buildRemoteNormalTargetPlans(globalMatch);
+        selectSharedDeliveryTargets(localMatch, globalMatch, localSubscribers, remoteTargetPlans);
+
+        deliverToLocalSubscribers(topic, payload, localSubscribers);
+        if (!remoteTargetPlans.isEmpty()) {
+            clusterMessageDispatcher.dispatch(topic, payload.clone(), remoteTargetPlans);
+            LOG.fine(() -> "[ROUTE][CLUSTER] topic=" + topic + ", remoteTargets=" + remoteTargetPlans.keySet());
+        }
+    }
+
+    private Map<String, ClusterMessageDispatcher.DispatchTarget> buildRemoteNormalTargetPlans(GlobalSubscriptionMatch globalMatch) {
+        if (globalMatch == null || globalMatch.getNormalNodes().isEmpty()) {
+            return new HashMap<>();
+        }
+        Map<String, ClusterMessageDispatcher.DispatchTarget> plans = new HashMap<>();
+        for (String targetNodeId : globalMatch.getNormalNodes()) {
+            if (targetNodeId == null || targetNodeId.isBlank() || targetNodeId.equals(nodeId)) {
+                continue;
+            }
+            plans.put(targetNodeId, ClusterMessageDispatcher.DispatchTarget.normalOnly());
+        }
+        return plans;
+    }
+
+    /**
+     * 集群远端消息入口。
+     * 远端投递只做本地订阅派发，不再继续向其他节点转发，避免形成环路。
+     *
+     * @param topic   topic
+     * @param payload payload
+     */
+    public void onClusterPublish(String topic, byte[] payload) {
+        onClusterPublish(topic, payload, true, null);
+    }
+
+    public void onClusterPublish(String topic, byte[] payload, boolean includeNormal, Set<String> sharedGroups) {
+        if (topic == null || topic.isBlank() || payload == null) {
+            return;
+        }
+        routeLocalOnly(topic, payload, includeNormal, sharedGroups);
+    }
+
+    private void routeLocalOnly(String topic, byte[] payload, boolean includeNormal, Set<String> sharedGroups) {
+        if (!includeNormal && (sharedGroups == null || sharedGroups.isEmpty())) {
+            return;
+        }
         SubscriptionMatchResult matchResult = subscriptionRegistry.findSubscriptionMatch(topic);
-        Set<String> subscribers = new LinkedHashSet<>(matchResult.getDirectSubscribers());
+        Set<String> subscribers = new LinkedHashSet<>();
+        if (includeNormal) {
+            subscribers.addAll(matchResult.getDirectSubscribers());
+        }
         matchResult.getSharedSubscribersByGroup().forEach((group, candidates) -> {
+            if (sharedGroups != null && !sharedGroups.contains(group)) {
+                return;
+            }
             String selected = sharedSubscriptionManager.selectSubscriber(group, candidates, sessionRegistry);
             if (selected != null) {
                 subscribers.add(selected);
             }
         });
+        deliverToLocalSubscribers(topic, payload, subscribers);
+    }
+
+    private void deliverToLocalSubscribers(String topic, byte[] payload, Set<String> subscribers) {
         LOG.fine(() -> "[ROUTE][LOCAL] topic=" + topic + ", subscribers=" + subscribers.size());
         for (String subscriber : subscribers) {
             Optional<ClientSession> sessionOptional = sessionRegistry.get(subscriber);
@@ -596,39 +552,89 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
                     .payload(Unpooled.wrappedBuffer(payload))
                     .build());
         }
-
-        Set<String> remoteNodeIds = collectRemoteTargetNodes(topic);
-        if (!remoteNodeIds.isEmpty()) {
-            clusterMessageDispatcher.dispatch(topic, payload.clone(), remoteNodeIds);
-            LOG.fine(() -> "[ROUTE][CLUSTER] topic=" + topic + ", remoteNodes=" + remoteNodeIds);
-        }
     }
 
-    private Set<String> collectRemoteTargetNodes(String topic) {
-        if (globalSubscriptionRegistry == null) {
-            return Collections.emptySet();
-        }
-        GlobalSubscriptionMatch globalMatch = globalSubscriptionRegistry.match(topic);
-        Set<String> targetNodes = new LinkedHashSet<>(globalMatch.getNormalNodes());
-        for (Map.Entry<String, Set<String>> entry : globalMatch.getSharedGroupToNodes().entrySet()) {
-            String selectedNode = selectSharedTargetNode(entry.getKey(), entry.getValue());
-            if (selectedNode != null) {
-                targetNodes.add(selectedNode);
+    /**
+     * 共享订阅全局投递决策：
+     * 每个共享组只选择一个目标（本地客户端或远端节点），避免同组重复投递。
+     */
+    private void selectSharedDeliveryTargets(
+        SubscriptionMatchResult localMatch,
+        GlobalSubscriptionMatch globalMatch,
+        Set<String> localSubscribers,
+        Map<String, ClusterMessageDispatcher.DispatchTarget> remoteTargetPlans
+    ) {
+        Map<String, Set<String>> localSharedGroups = localMatch.getSharedSubscribersByGroup();
+        Map<String, Set<String>> globalSharedGroups = globalMatch.getSharedGroupToNodes();
+        Set<String> allGroups = new LinkedHashSet<>(globalSharedGroups.keySet());
+        allGroups.addAll(localSharedGroups.keySet());
+        for (String group : allGroups) {
+            Set<String> localCandidates = localSharedGroups.getOrDefault(group, Collections.emptySet());
+            Set<String> globalNodes = globalSharedGroups.getOrDefault(group, Collections.emptySet());
+            SharedDeliveryTarget target = selectSharedDeliveryTarget(group, localCandidates, globalNodes);
+            if (target == null) {
+                continue;
+            }
+            if (target.localClientId() != null) {
+                localSubscribers.add(target.localClientId());
+            } else if (target.remoteNodeId() != null) {
+                mergeSharedTargetPlan(remoteTargetPlans, target.remoteNodeId(), group);
             }
         }
-        targetNodes.remove(nodeId);
-        return targetNodes;
     }
 
-    private String selectSharedTargetNode(String group, Set<String> nodes) {
-        if (group == null || group.isBlank() || nodes == null || nodes.isEmpty()) {
+    private void mergeSharedTargetPlan(
+        Map<String, ClusterMessageDispatcher.DispatchTarget> remoteTargetPlans,
+        String targetNodeId,
+        String sharedGroup
+    ) {
+        if (targetNodeId == null || targetNodeId.isBlank() || targetNodeId.equals(nodeId)) {
+            return;
+        }
+        ClusterMessageDispatcher.DispatchTarget oldPlan = remoteTargetPlans.get(targetNodeId);
+        Set<String> mergedGroups = new LinkedHashSet<>();
+        boolean includeNormal = false;
+        if (oldPlan != null) {
+            includeNormal = oldPlan.includeNormal();
+            mergedGroups.addAll(oldPlan.sharedGroups());
+        }
+        if (sharedGroup != null && !sharedGroup.isBlank()) {
+            mergedGroups.add(sharedGroup);
+        }
+        remoteTargetPlans.put(targetNodeId, new ClusterMessageDispatcher.DispatchTarget(includeNormal, mergedGroups));
+    }
+
+    private SharedDeliveryTarget selectSharedDeliveryTarget(
+        String group,
+        Set<String> localCandidates,
+        Set<String> globalNodes
+    ) {
+        if (group == null || group.isBlank()) {
             return null;
         }
-        List<String> sortedNodes = new ArrayList<>(nodes);
+        Set<String> nodeCandidates = new LinkedHashSet<>(globalNodes);
+        if (localCandidates != null && !localCandidates.isEmpty()) {
+            nodeCandidates.add(nodeId);
+        }
+        if (nodeCandidates.isEmpty()) {
+            return null;
+        }
+        List<String> sortedNodes = new ArrayList<>(nodeCandidates);
         Collections.sort(sortedNodes);
         AtomicLong cursor = sharedGroupNodeRoundRobin.computeIfAbsent(group, ignored -> new AtomicLong(0));
-        int index = Math.floorMod(cursor.getAndIncrement(), sortedNodes.size());
-        return sortedNodes.get(index);
+        int start = Math.floorMod(cursor.getAndIncrement(), sortedNodes.size());
+        for (int i = 0; i < sortedNodes.size(); i++) {
+            String selectedNode = sortedNodes.get((start + i) % sortedNodes.size());
+            if (selectedNode.equals(nodeId)) {
+                String localClient = sharedSubscriptionManager.selectSubscriber(group, localCandidates, sessionRegistry);
+                if (localClient != null) {
+                    return SharedDeliveryTarget.local(localClient);
+                }
+                continue;
+            }
+            return SharedDeliveryTarget.remote(selectedNode);
+        }
+        return null;
     }
 
     private void replayRetained(Channel channel, String topicFilter) {
@@ -672,7 +678,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             .replace("\"", "\\\"");
     }
 
-    private boolean allowed(String clientId, String topic, AclAction action) {
+    private boolean isDenied(String clientId, String topic, AclAction action) {
         String username = clientId == null ? null : sessionRegistry.get(clientId).map(ClientSession::username).orElse(null);
         return !aclAuthorizer.isAllowed(new AclRequest(clientId, username, topic, action));
     }
@@ -694,11 +700,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         if (committedIndex >= 0) {
             return;
         }
-        if (clusterRoleProvider.role() == NodeRole.REPLICANT) {
-            LOG.warning(() -> "[CLUSTER] metadata gateway unavailable, fallback local register topicFilter=" + topicFilter);
-        }
-        long nextIndex = globalRouteLogIndex.incrementAndGet();
-        globalSubscriptionRegistry.apply(GlobalSubscriptionEvent.register(nextIndex, nodeId, normalized, group));
+        LOG.warning(() -> "[CLUSTER] metadata submit failed, skip global-register apply, topicFilter=" + topicFilter);
     }
 
     private void applyGlobalUnregisterAfterLocal(String topicFilter) {
@@ -718,18 +720,16 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         if (committedIndex >= 0) {
             return;
         }
-        if (clusterRoleProvider.role() == NodeRole.REPLICANT) {
-            LOG.warning(() -> "[CLUSTER] metadata gateway unavailable, fallback local unregister topicFilter=" + topicFilter);
-        }
-        long nextIndex = globalRouteLogIndex.incrementAndGet();
-        globalSubscriptionRegistry.apply(GlobalSubscriptionEvent.unregister(nextIndex, nodeId, normalized, group));
+        LOG.warning(() -> "[CLUSTER] metadata submit failed, skip global-unregister apply, topicFilter=" + topicFilter);
     }
 
     private void submitRetainedAsync(String topic, byte[] payload, int qos) {
+        // 关闭 retain 能力时直接返回。
         if (!retainedEnabled) {
             return;
         }
         byte[] payloadCopy = payload == null ? new byte[0] : payload.clone();
+        // 通过单线程后台队列串行写入 retained 存储。
         retainedStoreExecutor.execute(() -> {
             try {
                 retainedMessageStore.saveOrRemove(new RetainedMessage(topic, payloadCopy, qos, true));
@@ -776,6 +776,16 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             return localHost.getHostAddress();
         } catch (Exception ignored) {
             return "unknown";
+        }
+    }
+
+    private record SharedDeliveryTarget(String localClientId, String remoteNodeId) {
+        private static SharedDeliveryTarget local(String localClientId) {
+            return new SharedDeliveryTarget(localClientId, null);
+        }
+
+        private static SharedDeliveryTarget remote(String remoteNodeId) {
+            return new SharedDeliveryTarget(null, remoteNodeId);
         }
     }
 

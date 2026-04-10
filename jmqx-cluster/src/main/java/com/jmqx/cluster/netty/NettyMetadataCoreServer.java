@@ -26,7 +26,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
@@ -56,11 +61,18 @@ public class NettyMetadataCoreServer implements MetadataReplicator, MetadataLogA
      * 每次触发推送时的最大批量条数，避免单次循环占用过久。
      */
     private final int replicantPushBatchSize;
+    private final long nodeDownCleanupDelayMs;
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final ConcurrentSkipListMap<Long, MetadataCommand> eventHistory = new ConcurrentSkipListMap<>();
     private final AtomicLong lastAppliedLogIndex = new AtomicLong(0L);
     private final Map<String, AtomicLong> replicantAckLogIndex = new ConcurrentHashMap<>();
     private final Map<String, ReplicantSession> replicantSessions = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, ScheduledFuture<?>> pendingNodeCleanupTasks = new ConcurrentHashMap<>();
+    private final ScheduledExecutorService cleanupExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "jmqx-node-cleanup");
+        thread.setDaemon(true);
+        return thread;
+    });
 
     private NioEventLoopGroup bossGroup;
     private NioEventLoopGroup workerGroup;
@@ -73,7 +85,8 @@ public class NettyMetadataCoreServer implements MetadataReplicator, MetadataLogA
         Supplier<MetadataSnapshot> snapshotSupplier,
         int maxReplayEvents,
         int replicantMaxInFlightEvents,
-        int replicantPushBatchSize
+        int replicantPushBatchSize,
+        int nodeDownCleanupDelayMs
     ) {
         this.bindHost = (bindHost == null || bindHost.isBlank()) ? "0.0.0.0" : bindHost;
         this.bindPort = bindPort <= 0 ? 7800 : bindPort;
@@ -82,6 +95,7 @@ public class NettyMetadataCoreServer implements MetadataReplicator, MetadataLogA
         this.maxReplayEvents = Math.max(1000, maxReplayEvents);
         this.replicantMaxInFlightEvents = Math.max(128, replicantMaxInFlightEvents);
         this.replicantPushBatchSize = Math.max(16, replicantPushBatchSize);
+        this.nodeDownCleanupDelayMs = Math.max(1000L, nodeDownCleanupDelayMs);
     }
 
     @Override
@@ -123,6 +137,9 @@ public class NettyMetadataCoreServer implements MetadataReplicator, MetadataLogA
         }
         replicantSessions.values().forEach(session -> session.ctx().close());
         replicantSessions.clear();
+        pendingNodeCleanupTasks.values().forEach(task -> task.cancel(false));
+        pendingNodeCleanupTasks.clear();
+        cleanupExecutor.shutdownNow();
         if (serverChannel != null) {
             serverChannel.close().syncUninterruptibly();
             serverChannel = null;
@@ -182,10 +199,80 @@ public class NettyMetadataCoreServer implements MetadataReplicator, MetadataLogA
         long catchupFrom = Math.max(knownAck, Math.max(request.lastAppliedLogIndex(), 0L));
         ReplicantSession newSession = new ReplicantSession(replicantNodeId, ctx, catchupFrom, catchupFrom);
         ReplicantSession oldSession = replicantSessions.put(replicantNodeId, newSession);
+        cancelNodeCleanup(replicantNodeId);
         if (oldSession != null && oldSession.ctx() != ctx) {
             oldSession.ctx().close();
         }
         catchupReplicant(newSession, catchupFrom);
+    }
+
+    private void scheduleNodeCleanup(String nodeId) {
+        if (!running.get() || nodeId == null || nodeId.isBlank()) {
+            return;
+        }
+        cancelNodeCleanup(nodeId);
+        ScheduledFuture<?> task = cleanupExecutor.schedule(
+            () -> executeNodeCleanup(nodeId),
+            nodeDownCleanupDelayMs,
+            TimeUnit.MILLISECONDS
+        );
+        pendingNodeCleanupTasks.put(nodeId, task);
+    }
+
+    private void cancelNodeCleanup(String nodeId) {
+        if (nodeId == null || nodeId.isBlank()) {
+            return;
+        }
+        ScheduledFuture<?> task = pendingNodeCleanupTasks.remove(nodeId);
+        if (task != null) {
+            task.cancel(false);
+        }
+    }
+
+    private void executeNodeCleanup(String nodeId) {
+        if (!running.get() || nodeId == null || nodeId.isBlank()) {
+            pendingNodeCleanupTasks.remove(nodeId);
+            return;
+        }
+        if (replicantSessions.containsKey(nodeId)) {
+            pendingNodeCleanupTasks.remove(nodeId);
+            return;
+        }
+        MetadataSnapshot snapshot = snapshotSupplier.get();
+        if (snapshot == null || snapshot.commands() == null || snapshot.commands().isEmpty()) {
+            pendingNodeCleanupTasks.remove(nodeId);
+            return;
+        }
+        int failed = 0;
+        for (MetadataCommand command : snapshot.commands()) {
+            if (command == null || !"route.subscription".equals(command.namespace())) {
+                continue;
+            }
+            if (!"register".equals(command.operation())) {
+                continue;
+            }
+            if (!nodeId.equals(command.sourceNodeId())) {
+                continue;
+            }
+            if (command.key() == null || command.key().isBlank()) {
+                continue;
+            }
+            long committed = gateway.submit(new MetadataCommand(
+                "route.subscription",
+                "unregister",
+                command.key(),
+                command.value(),
+                nodeId
+            ));
+            if (committed < 0) {
+                failed++;
+            }
+        }
+        if (failed > 0 && running.get() && !replicantSessions.containsKey(nodeId)) {
+            scheduleNodeCleanup(nodeId);
+            return;
+        }
+        pendingNodeCleanupTasks.remove(nodeId);
     }
 
     private void onAck(ChannelHandlerContext ctx, MetadataWireMessage request) {
@@ -332,23 +419,6 @@ public class NettyMetadataCoreServer implements MetadataReplicator, MetadataLogA
         }
     }
 
-    private List<ReplayEvent> collectReplayEvents(long lastAppliedIndex) {
-        long safeLast = Math.max(lastAppliedIndex, 0L);
-        if (eventHistory.isEmpty()) {
-            return List.of();
-        }
-        Long oldest = eventHistory.firstKey();
-        if (oldest == null) {
-            return List.of();
-        }
-        if (safeLast > 0 && safeLast < oldest - 1) {
-            return null;
-        }
-        List<ReplayEvent> replay = new ArrayList<>();
-        eventHistory.tailMap(safeLast + 1L, true).forEach((index, command) -> replay.add(new ReplayEvent(index, command)));
-        return replay;
-    }
-
     private void trimHistoryIfNeeded() {
         while (eventHistory.size() > maxReplayEvents) {
             Map.Entry<Long, MetadataCommand> entry = eventHistory.pollFirstEntry();
@@ -386,6 +456,7 @@ public class NettyMetadataCoreServer implements MetadataReplicator, MetadataLogA
                 }
                 replicantAckLogIndex.computeIfAbsent(entry.getKey(), ignored -> new AtomicLong(0L))
                     .updateAndGet(previous -> Math.max(previous, session.ackedLogIndex().get()));
+                scheduleNodeCleanup(entry.getKey());
                 return true;
             });
         }
@@ -394,9 +465,6 @@ public class NettyMetadataCoreServer implements MetadataReplicator, MetadataLogA
         public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
             ctx.close();
         }
-    }
-
-    private record ReplayEvent(long logIndex, MetadataCommand command) {
     }
 
     /**

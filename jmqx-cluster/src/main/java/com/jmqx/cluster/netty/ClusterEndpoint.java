@@ -27,4 +27,5 @@ public record ClusterEndpoint(String host, int port) {
             return null;
         }
     }
+
 }

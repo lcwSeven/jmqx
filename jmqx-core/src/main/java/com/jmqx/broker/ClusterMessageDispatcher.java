@@ -1,5 +1,8 @@
 package com.jmqx.broker;
 
+import java.util.Collections;
+import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -10,8 +13,26 @@ import java.util.Set;
  */
 @FunctionalInterface
 public interface ClusterMessageDispatcher {
-    ClusterMessageDispatcher NOOP = (topic, payload, targetNodeIds) -> {
+    ClusterMessageDispatcher NOOP = (topic, payload, targetPlans) -> {
     };
 
-    void dispatch(String topic, byte[] payload, Set<String> targetNodeIds);
+    void dispatch(String topic, byte[] payload, Map<String, DispatchTarget> targetPlans);
+
+    record DispatchTarget(boolean includeNormal, Set<String> sharedGroups) {
+        public DispatchTarget {
+            sharedGroups = sharedGroups == null ? Collections.emptySet() : Collections.unmodifiableSet(new LinkedHashSet<>(sharedGroups));
+        }
+
+        public static DispatchTarget normalOnly() {
+            return new DispatchTarget(true, Collections.emptySet());
+        }
+
+        public static DispatchTarget sharedOnly(Set<String> sharedGroups) {
+            return new DispatchTarget(false, sharedGroups);
+        }
+
+        public static DispatchTarget normalAndShared(Set<String> sharedGroups) {
+            return new DispatchTarget(true, sharedGroups);
+        }
+    }
 }

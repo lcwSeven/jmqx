@@ -58,9 +58,122 @@ mvn -pl jmqx-bench -am exec:java -Dexec.args="--host=127.0.0.1 --port=1883 --cli
 - 配置模板：`jmqx-app/src/main/resources/jmqx-300k.properties`
 - 执行手册：`docs/milestone-300k-single-node.md`
 
+## 集群部署方案（Core + Replicant）
+
+当前集群采用以下模型：
+
+- Core 节点：负责元数据写入与强一致复制（SOFAJRaft）。
+- Replicant 节点：负责海量客户端接入与本地只读路由查询，通过 Netty 异步接收 Core 已提交日志。
+
+推荐最小拓扑：
+
+- 3 个 Core（奇数，保证多数派）
+- N 个 Replicant（按连接规模横向扩容）
+
+### 集群架构示意图
+
+```mermaid
+flowchart LR
+    C1["Core-1 (Leader/Follower)"]
+    C2["Core-2 (Follower)"]
+    C3["Core-3 (Follower)"]
+    R1["Replicant-1 (MQTT Access)"]
+    R2["Replicant-2 (MQTT Access)"]
+    CL["MQTT Clients"]
+
+    C1 <-- "Raft 日志复制" --> C2
+    C2 <-- "Raft 日志复制" --> C3
+    C1 <-- "Raft 日志复制" --> C3
+
+    C1 -->|"Netty 元数据事件流"| R1
+    C2 -->|"Netty 元数据事件流"| R1
+    C3 -->|"Netty 元数据事件流"| R1
+
+    C1 -->|"Netty 元数据事件流"| R2
+    C2 -->|"Netty 元数据事件流"| R2
+    C3 -->|"Netty 元数据事件流"| R2
+
+    CL -->|"CONNECT/SUB/PUB"| R1
+    CL -->|"CONNECT/SUB/PUB"| R2
+```
+
+### 集群配置详细说明
+
+| 配置项 | 默认值 | 角色 | 说明 | 建议 |
+|---|---:|---|---|---|
+| `jmqx.cluster.role` | `core` | Core/Replicant | 节点角色 | Replicant 接入节点必须设为 `replicant` |
+| `jmqx.cluster.coreEndpoints` | `127.0.0.1:7800` | Core/Replicant | Core 元数据服务地址列表（逗号分隔） | 所有节点保持一致并使用内网地址 |
+| `jmqx.cluster.core.bindHost` | `0.0.0.0` | Core | Core Netty 元数据服务绑定地址 | 生产建议绑定内网网卡 |
+| `jmqx.cluster.core.port` | `7800` | Core | Core Netty 元数据服务端口 | 与防火墙放通策略一致 |
+| `jmqx.cluster.netty.requestTimeoutMs` | `3000` | Replicant | 写请求到 Core 的超时 | 低延迟内网建议 `1000~3000` |
+| `jmqx.cluster.netty.reconnectBackoffMs` | `1000` | Replicant | 同步通道重连基准退避 | 不建议低于 `300` |
+| `jmqx.cluster.netty.ackBatchSize` | `64` | Replicant | ACK 批量阈值（事件条数） | 大吞吐可调高到 `128~512` |
+| `jmqx.cluster.netty.ackFlushIntervalMs` | `200` | Replicant | ACK 最长刷出间隔 | 建议 `100~500` |
+| `jmqx.cluster.netty.replicantMaxInFlightEvents` | `2048` | Core | Core 向单个 Replicant 的最大未 ACK 窗口 | 慢消费者多时调低 |
+| `jmqx.cluster.netty.replicantPushBatchSize` | `256` | Core | Core 单次推送上限 | 建议不超过 `1024` |
+| `jmqx.cluster.nodeDownCleanupDelayMs` | `15000` | Core | Replicant 断连后路由清理延迟（毫秒） | 网络抖动多时建议调大 |
+| `jmqx.cluster.replay.maxEvents` | `200000` | Core | Core 内存重放缓冲上限 | 大集群可提升并关注内存 |
+| `jmqx.cluster.raft.groupId` | `jmqx-metadata` | Core | Raft 组名 | 同一集群内保持一致 |
+| `jmqx.cluster.raft.serverId` | `127.0.0.1:17800` | Core | 当前 Core 的 Raft 地址 | 必须是本机可达 IP:Port |
+| `jmqx.cluster.raft.initialConf` | `127.0.0.1:17800` | Core | 初始 Raft 成员列表 | 首次建群时所有 Core 保持一致 |
+| `jmqx.cluster.raft.dataPath` | `data/raft-metadata` | Core | Raft 日志/元数据/快照目录 | 建议独立高性能磁盘 |
+| `jmqx.cluster.raft.electionTimeoutMs` | `1000` | Core | 选举超时 | 跨机房请适当调大 |
+| `jmqx.cluster.raft.snapshotIntervalSecs` | `30` | Core | 快照周期（秒） | 写入密集可适当缩短 |
+
+### 端口规划建议
+
+- MQTT/MQTTS/WS/WSS 业务端口：按节点实际暴露
+- 集群元数据通道（Core 对外）：`jmqx.cluster.core.port`，默认 `7800`
+- Raft 端口（Core 间通信）：`jmqx.cluster.raft.serverId` 中的 `ip:port`，例如 `127.0.0.1:17800`
+
+注意：`jmqx.cluster.raft.serverId` 必须是明确 IP，不可使用 `0.0.0.0`。
+
+### Core 节点配置示例
+
+Core-1:
+
+```bash
+-Djmqx.cluster.role=core
+-Djmqx.cluster.core.bindHost=0.0.0.0
+-Djmqx.cluster.core.port=7800
+-Djmqx.cluster.coreEndpoints=10.0.0.11:7800,10.0.0.12:7800,10.0.0.13:7800
+-Djmqx.cluster.raft.groupId=jmqx-metadata
+-Djmqx.cluster.raft.serverId=10.0.0.11:17800
+-Djmqx.cluster.raft.initialConf=10.0.0.11:17800,10.0.0.12:17800,10.0.0.13:17800
+-Djmqx.cluster.raft.dataPath=/data/jmqx/raft
+```
+
+Core-2 / Core-3 仅替换 `raft.serverId` 与本机 IP，`initialConf` 保持一致。
+
+### Replicant 节点配置示例
+
+```bash
+-Djmqx.cluster.role=replicant
+-Djmqx.cluster.coreEndpoints=10.0.0.11:7800,10.0.0.12:7800,10.0.0.13:7800
+-Djmqx.cluster.netty.requestTimeoutMs=3000
+-Djmqx.cluster.netty.reconnectBackoffMs=1000
+-Djmqx.cluster.netty.ackBatchSize=64
+-Djmqx.cluster.netty.ackFlushIntervalMs=200
+-Djmqx.cluster.netty.replicantMaxInFlightEvents=2048
+-Djmqx.cluster.netty.replicantPushBatchSize=256
+```
+
+### 启动顺序建议
+
+1. 先启动全部 Core，确认 Raft 选主成功。
+2. 再启动 Replicant，让其订阅 Core 日志并追平。
+3. 最后把客户端流量切到 Replicant 节点。
+
+### 验证步骤
+
+1. 在任一 Replicant 上发起订阅/取消订阅操作。
+2. 观察 Core 日志中元数据提交成功。
+3. 观察其他 Replicant 接收增量日志并 ACK。
+4. 人工下线一个 Core，验证写请求可重定向到新 Leader。
+
 ## 当前定位
 
-当前版本专注单机稳定性与性能，不包含集群复制逻辑。
+当前版本已支持 Core + Replicant 集群元数据复制，仍建议优先在压测与故障演练后再用于生产流量。
 
 可通过 JVM 参数覆盖默认监听地址与端口：
 
@@ -341,3 +454,20 @@ allow publish alice sensor/#
 deny  subscribe bob   secure/#
 allow * * #
 ```
+
+### JDK 17 startup error fix
+
+If startup fails with:
+
+`Unable to make field transient java.lang.Object[] java.util.ArrayList.elementData accessible`
+
+this is caused by JDK module encapsulation for reflective access.
+
+For Maven startup, the project already includes:
+
+- `.mvn/jvm.config`
+- `--add-opens=java.base/java.util=ALL-UNNAMED`
+
+If you run `JmqxApplication` directly in IDE, add the same VM option manually:
+
+`--add-opens=java.base/java.util=ALL-UNNAMED`
