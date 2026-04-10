@@ -17,7 +17,6 @@
         <module>jmqx-core</module>
         <module>jmqx-transport</module>
         <module>jmqx-bench</module>
-        <module>jmqx-admin</module>
         <module>jmqx-app</module>
     </modules>
 
