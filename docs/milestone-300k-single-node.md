@@ -1,23 +1,23 @@
-# jmqx Single-Node 300k Connections Milestone
+# jmqx 单机 30 万连接里程碑
 
-This checklist is for the first capacity milestone: stable `300,000` online connections on one node.
+本清单用于第一个容量里程碑：在单节点上稳定承载 `300,000` 在线连接。
 
-## 1. Scope
+## 1. 范围
 
-- Protocol: MQTT over TCP only.
-- Target traffic profile: low message throughput, heartbeat-dominant, long-lived connections.
-- Recommended baseline:
+- 协议范围：仅 MQTT over TCP。
+- 目标流量特征：低消息吞吐、心跳主导、长连接。
+- 建议基线：
   - `QoS0`
-  - retained disabled
-  - bridge disabled
-  - MQTTS/WSS disabled
-  - external auth/acl disabled or strongly cached
+  - 关闭 retained
+  - 关闭 bridge
+  - 关闭 MQTTS/WSS
+  - 外部 auth/acl 关闭或强缓存
 
-## 2. jmqx Runtime Configuration
+## 2. jmqx 运行时配置
 
-Use `jmqx-app/src/main/resources/jmqx-300k.properties` as baseline and keep the effective runtime aligned.
+使用 `jmqx-app/src/main/resources/jmqx-300k.properties` 作为基线，并确保最终生效配置一致。
 
-Key options:
+关键配置：
 
 - `jmqx.broker.mqtts.enabled=false`
 - `jmqx.broker.websocket.enabled=false`
@@ -27,9 +27,9 @@ Key options:
 - `jmqx.auth.type=allow_all`
 - `jmqx.acl.type=allow_all`
 
-## 3. JVM Configuration (Reference)
+## 3. JVM 配置（参考）
 
-Example startup args for Java 17:
+Java 17 启动参数示例：
 
 ```bash
 -Xms8g
@@ -40,15 +40,15 @@ Example startup args for Java 17:
 -Dio.netty.leakDetection.level=disabled
 ```
 
-Notes:
+说明：
 
-- Keep `Xms == Xmx` to avoid runtime heap resizing.
-- Direct memory must be planned together with connection count.
-- Disable expensive debug/leak tools in benchmark runs.
+- 建议 `Xms == Xmx`，避免运行期堆扩容抖动。
+- Direct Memory 需要与连接规模一起规划。
+- 压测期间建议关闭高开销调试项（如泄漏检测）。
 
-## 4. Linux Baseline (Reference)
+## 4. Linux 基线（参考）
 
-Apply on test hosts only:
+仅在压测环境执行：
 
 ```bash
 ulimit -n 2000000
@@ -59,45 +59,46 @@ sysctl -w net.ipv4.ip_local_port_range="10000 65535"
 sysctl -w fs.file-max=4000000
 ```
 
-Also ensure:
+同时确保：
 
-- Sufficient RAM and CPU cores.
-- NIC queue and IRQ affinity tuned.
-- No extra background workloads on benchmark host.
+- 主机内存与 CPU 核数充足。
+- 网卡队列与 IRQ 亲和性已优化。
+- 压测机器不运行其他重负载任务。
 
-## 5. Test Stages
+## 5. 压测阶段
 
-Stage A:
+阶段 A：
 
-- Connect `100k`, hold for `1h`.
-- Acceptance: no OOM, no mass reconnect waves, flat memory trend.
+- 建连 `100k`，保持 `1h`。
+- 验收：无 OOM、无大规模重连波动、内存趋势平稳。
 
-Stage B:
+阶段 B：
 
-- Connect `200k`, hold for `2h`.
-- Acceptance: stable connection count, CPU not saturating for long periods.
+- 建连 `200k`，保持 `2h`。
+- 验收：在线数稳定，CPU 不出现长时间满载。
 
-Stage C (milestone):
+阶段 C（里程碑）：
 
-- Connect `300k`, hold for `12h`.
-- Acceptance:
-  - online connections >= 99.9% target
-  - no long GC pause spikes
-  - reconnect storms absent
-  - process memory trend stable (no unbounded growth)
+- 建连 `300k`，保持 `12h`。
+- 验收：
+  - 在线连接达到目标的 `99.9%` 以上
+  - 无明显长时间 GC 停顿峰值
+  - 无重连风暴
+  - 进程内存无持续无界增长
 
-## 6. Metrics to Record
+## 6. 采集指标
 
-- Online connection count over time.
-- Process RSS / heap / direct memory.
-- GC pause (avg/p99/max).
-- New connect rate and disconnect rate.
-- CPU utilization and system load.
-- Error logs sampled by type.
+- 在线连接数时序
+- 进程 RSS / Heap / Direct Memory
+- GC 停顿（avg / p99 / max）
+- 新建连接速率与断开速率
+- CPU 利用率与系统负载
+- 错误日志按类型抽样统计
 
-## 7. Common Failure Signals
+## 7. 常见失败信号
 
-- Fast RSS growth: often direct memory pressure or buffer retention.
-- Spike reconnect loops: kernel queue limits or keepalive storms.
-- Event-loop latency spikes: logging/bridge/auth in hot path.
-- GC pause bursts: object churn in subscribe/publish route path.
+- RSS 快速增长：通常是 Direct Memory 压力或 Buffer 滞留。
+- 重连峰值：常见于内核队列限制或 KeepAlive 抖动。
+- EventLoop 延迟尖峰：常见于日志、bridge、auth 进入热路径。
+- GC 停顿突增：常见于订阅/路由路径对象分配抖动。
+
