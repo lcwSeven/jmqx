@@ -227,5 +227,4 @@ MySQL：
 1. 配置管理统一使用环境隔离文件，不要直接改默认模板。
 2. 生产环境固定 Core 配置，变更采用灰度。
 3. 对 `cacheMillis`、`timeoutMs`、`queueCapacity` 类参数建立基线。
-4. 重大变更前执行 [集群故障演练手册](/Users/liucaiwen/Documents/java-project/jmqx/docs/05-cluster-failure-drill.md)。
-
+4. 重大变更前执行 [集群故障演练手册](05-cluster-failure-drill.md)。
