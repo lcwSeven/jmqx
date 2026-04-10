@@ -28,8 +28,8 @@ import java.util.logging.Logger;
 public class SharedSubscriptionManager {
     private static final Logger LOG = Logger.getLogger(SharedSubscriptionManager.class.getName());
 
-    private final int maxSubscribersPerGroup;
-    private final int slowConsumerStrikeThreshold;
+    private volatile int maxSubscribersPerGroup;
+    private volatile int slowConsumerStrikeThreshold;
     private final ConcurrentMap<String, SharedGroupState> groupStates = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, Set<String>> groupsByClient = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, AtomicInteger> slowConsumerStrikes = new ConcurrentHashMap<>();
@@ -39,6 +39,14 @@ public class SharedSubscriptionManager {
     }
 
     public SharedSubscriptionManager(int maxSubscribersPerGroup, int slowConsumerStrikeThreshold) {
+        this.maxSubscribersPerGroup = Math.max(maxSubscribersPerGroup, 1);
+        this.slowConsumerStrikeThreshold = Math.max(slowConsumerStrikeThreshold, 1);
+    }
+
+    /**
+     * 动态更新共享订阅限流参数。
+     */
+    public void reconfigure(int maxSubscribersPerGroup, int slowConsumerStrikeThreshold) {
         this.maxSubscribersPerGroup = Math.max(maxSubscribersPerGroup, 1);
         this.slowConsumerStrikeThreshold = Math.max(slowConsumerStrikeThreshold, 1);
     }

@@ -17,6 +17,7 @@
         <module>jmqx-core</module>
         <module>jmqx-transport</module>
         <module>jmqx-bench</module>
+        <module>jmqx-admin</module>
         <module>jmqx-app</module>
     </modules>
 
@@ -94,6 +95,7 @@
                     <version>3.13.0</version>
                     <configuration>
                         <release>${maven.compiler.release}</release>
+                        <parameters>true</parameters>
                     </configuration>
                 </plugin>
             </plugins>

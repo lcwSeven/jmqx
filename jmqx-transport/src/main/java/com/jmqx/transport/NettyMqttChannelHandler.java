@@ -4,6 +4,7 @@ import com.jmqx.protocol.BrokerMessageHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.handler.codec.mqtt.MqttMessage;
+import io.netty.handler.codec.mqtt.MqttPublishMessage;
 
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -31,6 +32,9 @@ public class NettyMqttChannelHandler extends SimpleChannelInboundHandler<MqttMes
 
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, MqttMessage message) {
+        if (message instanceof MqttPublishMessage publishMessage) {
+            connectionMetrics.addInboundBytes(publishMessage.payload().readableBytes());
+        }
         LOG.info(() -> "[RECV] remote=" + ctx.channel().remoteAddress() + ", type=" + message.fixedHeader().messageType());
         brokerMessageHandler.onMessage(ctx, message);
     }

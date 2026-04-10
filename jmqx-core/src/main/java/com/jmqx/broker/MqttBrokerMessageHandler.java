@@ -1,5 +1,6 @@
 package com.jmqx.broker;
 
+import com.jmqx.admin.AdminReporter;
 import com.jmqx.acl.AclAction;
 import com.jmqx.acl.AclAuthorizer;
 import com.jmqx.acl.AclRequest;
@@ -78,6 +79,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
 
     private static final String TOPIC_CLIENT_CONNECTED = "$SYS/jmqx/events/client/connected";
     private static final String TOPIC_CLIENT_DISCONNECTED = "$SYS/jmqx/events/client/disconnected";
+    private static final String DASHBOARD_TOPIC_PREFIX = "$SYS/dashboard/";
     private static final String SUBSCRIPTION_NAMESPACE = "route.subscription";
     private static final String OP_REGISTER = "register";
     private static final String OP_UNREGISTER = "unregister";
@@ -95,6 +97,8 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     private final String nodeId;
     private final MetadataCommandGateway metadataCommandGateway;
     private final ClusterMessageDispatcher clusterMessageDispatcher;
+    private final AdminReporter adminReporter;
+    private final String dashboardClusterId;
     private final ConcurrentMap<String, AtomicLong> sharedGroupNodeRoundRobin = new ConcurrentHashMap<>();
 
 
@@ -110,7 +114,9 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             GlobalSubscriptionRegistry globalSubscriptionRegistry,
             String nodeId,
             MetadataCommandGateway metadataCommandGateway,
-            ClusterMessageDispatcher clusterMessageDispatcher) {
+            ClusterMessageDispatcher clusterMessageDispatcher,
+            AdminReporter adminReporter,
+            String dashboardClusterId) {
         this.sessionRegistry = sessionRegistry;
         this.subscriptionRegistry = subscriptionRegistry;
         this.retainedMessageStore = retainedMessageStore;
@@ -125,6 +131,10 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         this.nodeId = (nodeId == null || nodeId.isBlank()) ? "node-1" : nodeId;
         this.metadataCommandGateway = Objects.requireNonNull(metadataCommandGateway, "metadataCommandGateway");
         this.clusterMessageDispatcher = Objects.requireNonNull(clusterMessageDispatcher, "clusterMessageDispatcher");
+        this.adminReporter = adminReporter == null ? AdminReporter.NOOP : adminReporter;
+        this.dashboardClusterId = (dashboardClusterId == null || dashboardClusterId.isBlank())
+            ? "default"
+            : dashboardClusterId.trim();
         this.retainedStoreExecutor = Executors.newSingleThreadExecutor(runnable -> {
             Thread thread = new Thread(runnable, "jmqx-retained-store");
             thread.setDaemon(true);
@@ -176,6 +186,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         String connectionType = session == null ? null : session.connectionType();
         String serviceNodeIp = session == null ? null : session.serviceNodeIp();
         int keepAliveSeconds = session == null ? 0 : session.keepAliveSeconds();
+        String clientIp = resolveClientIp(channel);
         boolean cleanSession = Optional.ofNullable(channel.attr(CLEAN_SESSION).get()).orElse(false);
         boolean gracefulDisconnect = Optional.ofNullable(channel.attr(GRACEFUL_DISCONNECT).get()).orElse(false);
 
@@ -183,6 +194,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             publishWillMessageIfPresent(channel, clientId);
         }
 
+        adminReporter.removeClientSession(clientId);
         sessionRegistry.remove(clientId);
         if (cleanSession) {
             sharedSubscriptionManager.removeClient(clientId);
@@ -191,7 +203,22 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         }
         publishClientLifecycleEvent(
             TOPIC_CLIENT_DISCONNECTED,
+            dashboardClusterId,
+            nodeId,
             clientId,
+            clientIp,
+            username,
+            connectionType,
+            serviceNodeIp,
+            keepAliveSeconds,
+            gracefulDisconnect ? "graceful" : "unexpected"
+        );
+        publishClientLifecycleEvent(
+            dashboardTopic("client/disconnected"),
+            dashboardClusterId,
+            nodeId,
+            clientId,
+            clientIp,
             username,
             connectionType,
             serviceNodeIp,
@@ -261,13 +288,38 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
                 .build());
         publishClientLifecycleEvent(
             TOPIC_CLIENT_CONNECTED,
+            dashboardClusterId,
+            nodeId,
             clientId,
+            resolveClientIp(ctx.channel()),
             username,
             connectionType,
             serviceNodeIp,
             keepAliveSeconds,
             "connected"
         );
+        publishClientLifecycleEvent(
+            dashboardTopic("client/connected"),
+            dashboardClusterId,
+            nodeId,
+            clientId,
+            resolveClientIp(ctx.channel()),
+            username,
+            connectionType,
+            serviceNodeIp,
+            keepAliveSeconds,
+            "connected"
+        );
+        adminReporter.upsertClientSession(
+            clientId,
+            nodeId,
+            resolveClientIp(ctx.channel()),
+            keepAliveSeconds,
+            connectionType,
+            username,
+            Instant.now().toEpochMilli()
+        );
+        syncClientSubscriptionsForAdmin(clientId);
         if (LOG.isLoggable(Level.FINE)) {
             LOG.fine("[CONNECT] accepted clientId=" + clientId
                 + ", connectionType=" + connectionType
@@ -329,6 +381,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             subAckBuilder.addGrantedQos(mqttQoS);
         });
         ctx.writeAndFlush(subAckBuilder.build());
+        syncClientSubscriptionsForAdmin(clientId);
     }
 
     private void handleUnsubscribe(ChannelHandlerContext ctx, MqttUnsubscribeMessage message) {
@@ -349,6 +402,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             }
         });
         ctx.writeAndFlush(MqttMessageBuilders.unsubAck().packetId(message.variableHeader().messageId()).build());
+        syncClientSubscriptionsForAdmin(clientId);
         LOG.fine(() -> "[UNSUBSCRIBE] clientId=" + clientId + ", topics=" + message.payload().topics());
     }
 
@@ -423,14 +477,20 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
 
     private void publishClientLifecycleEvent(
             String topic,
+            String clusterId,
+            String nodeId,
             String clientId,
+            String clientIp,
             String username,
             String connectionType,
             String serviceNodeIp,
             int keepAliveSeconds,
             String eventType) {
         String payload = "{\"event\":\"" + safeJson(eventType)
+            + "\",\"clusterId\":\"" + safeJson(clusterId)
+            + "\",\"nodeId\":\"" + safeJson(nodeId)
             + "\",\"clientId\":\"" + safeJson(clientId)
+            + "\",\"clientIp\":\"" + safeJson(clientIp)
             + "\",\"username\":\"" + safeJson(username)
             + "\",\"connectionType\":\"" + safeJson(connectionType)
             + "\",\"serviceNodeIp\":\"" + safeJson(serviceNodeIp)
@@ -459,6 +519,22 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             retain,
             System.currentTimeMillis()
         ));
+    }
+
+    /**
+     * 发布系统主题消息（用于 Dashboard 等内部主题）。
+     */
+    public void publishSystemTopic(String topic, byte[] payload) {
+        if (topic == null || topic.isBlank() || payload == null) {
+            return;
+        }
+        publishInternal(
+            "system",
+            topic,
+            payload,
+            MqttQoS.AT_MOST_ONCE.value(),
+            false
+        );
     }
 
     private void routeMessage(String topic, byte[] payload) {
@@ -669,6 +745,33 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         return value;
     }
 
+    private void syncClientSubscriptionsForAdmin(String clientId) {
+        if (clientId == null || clientId.isBlank()) {
+            return;
+        }
+        try {
+            List<String> topics = new ArrayList<>(subscriptionRegistry.findSubscriptions(clientId).keySet());
+            adminReporter.upsertClientSubscriptions(clientId, topics);
+        } catch (Exception exception) {
+            LOG.warning("[ADMIN] sync subscriptions failed, clientId=" + clientId + ", error=" + exception.getMessage());
+        }
+    }
+
+    private String resolveClientIp(Channel channel) {
+        if (channel == null) {
+            return "unknown";
+        }
+        SocketAddress remote = channel.remoteAddress();
+        if (remote instanceof InetSocketAddress socketAddress) {
+            InetAddress address = socketAddress.getAddress();
+            if (address != null) {
+                return address.getHostAddress();
+            }
+            return socketAddress.getHostString();
+        }
+        return "unknown";
+    }
+
     private String safeJson(String value) {
         if (value == null) {
             return "";
@@ -676,6 +779,10 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         return value
             .replace("\\", "\\\\")
             .replace("\"", "\\\"");
+    }
+
+    private String dashboardTopic(String suffix) {
+        return DASHBOARD_TOPIC_PREFIX + dashboardClusterId + "/" + suffix;
     }
 
     private boolean isDenied(String clientId, String topic, AclAction action) {
@@ -740,6 +847,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     public void shutdown() {
+        adminReporter.shutdown();
         retainedStoreExecutor.shutdown();
         try {
             if (!retainedStoreExecutor.awaitTermination(3, TimeUnit.SECONDS)) {

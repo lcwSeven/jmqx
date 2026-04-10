@@ -1,5 +1,9 @@
 package com.jmqx;
 
+import com.jmqx.admin.AdminReporter;
+import com.jmqx.admin.HttpAdminReporter;
+import com.jmqx.admin.embedded.AdminPanelServer;
+import com.jmqx.admin.embedded.EmbeddedAdminStateStore;
 import com.jmqx.acl.AclAuthorizerFactory;
 import com.jmqx.acl.AclProperties;
 import com.jmqx.acl.ReloadableAclAuthorizer;
@@ -43,6 +47,8 @@ import com.jmqx.transport.NettyMqttEndpointServer;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.Inet4Address;
+import java.net.InetAddress;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.ArrayList;
@@ -50,7 +56,10 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
 import java.util.Set;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 应用启动装配入口，负责把 broker 和插件组装起来。
@@ -80,6 +89,8 @@ public class JmqxApplication {
         AclProperties aclProperties = loadAclProperties(config);
         BridgeProperties bridgeProperties = loadBridgeProperties(config);
         RetainedStoreProperties retainedStoreProperties = loadRetainedStoreProperties(config);
+        AdminSyncSettings adminSyncSettings = loadAdminSyncSettings(config);
+        AdminPanelSettings adminPanelSettings = loadAdminPanelSettings(config);
         int sharedMaxSubscribers = getIntProperty(config, "jmqx.shared.maxSubscribersPerGroup", 1000);
         int sharedSlowThreshold = getIntProperty(config, "jmqx.shared.slowConsumerStrikeThreshold", 3);
         String nodeId = getStringProperty(config, "jmqx.node.id", "node-1");
@@ -122,7 +133,9 @@ public class JmqxApplication {
                 sessionRegistry,
                 subscriptionRegistry,
                 globalSubscriptionRegistry,
-                clusterSettings
+                clusterSettings,
+                adminSyncSettings,
+                adminPanelSettings
         );
     }
 
@@ -180,6 +193,11 @@ public class JmqxApplication {
         ReloadableAclAuthorizer aclAuthorizer = new ReloadableAclAuthorizer(AclAuthorizerFactory.create(context.aclProperties()));
         MessageBridge messageBridge = MessageBridgeFactory.create(context.bridgeProperties());
         ConnectionMetrics connectionMetrics = new ConnectionMetrics();
+        AdminReporter adminReporter = buildAdminReporter(
+                context.adminSyncSettings(),
+                context.clusterRoleProvider().nodeId(),
+                connectionMetrics
+        );
 
         MqttBrokerMessageHandler brokerMessageHandler = new MqttBrokerMessageHandler(
                 context.sessionRegistry(),
@@ -193,13 +211,47 @@ public class JmqxApplication {
                 context.globalSubscriptionRegistry(),
                 context.clusterRoleProvider().nodeId(),
                 metadataRuntime.gateway(),
-                clusterMessageDispatcher
+                clusterMessageDispatcher,
+                adminReporter,
+                context.adminSyncSettings().clusterId()
         );
         clusterMessageTransport.setMessageConsumer(
             (topic, payload, includeNormal, sharedGroups) ->
                 brokerMessageHandler.onClusterPublish(topic, payload, includeNormal, sharedGroups)
         );
         clusterMessageTransport.start();
+        ScheduledExecutorService dashboardPublisher = startDashboardPublisher(
+                brokerMessageHandler,
+                context.clusterRoleProvider().nodeId(),
+                context.clusterRoleProvider().role().name(),
+                context.adminSyncSettings().clusterId(),
+                context.adminSyncSettings().nodeIp(),
+                connectionMetrics,
+                context.adminSyncSettings().dashboardPublishIntervalMs()
+        );
+        AdminPanelServer adminPanelServer = startAdminPanelServer(
+                context.adminPanelSettings(),
+                context.adminSyncSettings().clusterId(),
+                context.clusterRoleProvider().nodeId(),
+                context.clusterRoleProvider().role().name(),
+                context.sessionRegistry(),
+                context.subscriptionRegistry(),
+                connectionMetrics,
+                buildInitialSecurityConfig(context.authProperties(), context.aclProperties()),
+                buildInitialClusterConfig(context),
+                (clusterId, securityConfig) -> applyRuntimeSecurityConfig(
+                        context.authProperties(),
+                        context.aclProperties(),
+                        authProvider,
+                        aclAuthorizer,
+                        securityConfig
+                ),
+                (clusterId, clusterConfig) -> applyRuntimeClusterConfig(
+                        sharedSubscriptionManager,
+                        context.sharedSlowThreshold(),
+                        clusterConfig
+                )
+        );
 
         EndpointServers endpointServers = startEndpointServers(context.brokerProperties(), brokerMessageHandler, connectionMetrics);
         return new RuntimeComponents(
@@ -209,7 +261,9 @@ public class JmqxApplication {
                 brokerMessageHandler,
                 retainedMessageStore,
                 messageBridge,
-                endpointServers
+                endpointServers,
+                dashboardPublisher,
+                adminPanelServer
         );
     }
 
@@ -290,6 +344,8 @@ public class JmqxApplication {
 
     private static void registerShutdownHook(RuntimeComponents runtimeComponents) {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            runtimeComponents.adminPanelServer().stop();
+            runtimeComponents.dashboardPublisher().shutdownNow();
             runtimeComponents.brokerMessageHandler().shutdown();
             runtimeComponents.retainedMessageStore().close();
             runtimeComponents.messageBridge().close();
@@ -333,6 +389,17 @@ public class JmqxApplication {
                 + ", overflowStrategy=" + context.retainedStoreProperties().getOverflowStrategy());
         System.out.println("SHARED maxSubscribersPerGroup=" + context.sharedMaxSubscribers()
                 + ", slowConsumerStrikeThreshold=" + context.sharedSlowThreshold());
+        System.out.println("ADMIN-SYNC enabled=" + context.adminSyncSettings().enabled()
+                + ", url=" + context.adminSyncSettings().url()
+                + ", clusterId=" + context.adminSyncSettings().clusterId()
+                + ", nodeIp=" + context.adminSyncSettings().nodeIp()
+                + ", metricsIntervalMs=" + context.adminSyncSettings().metricsIntervalMs()
+                + ", dashboardPublishIntervalMs=" + context.adminSyncSettings().dashboardPublishIntervalMs());
+        System.out.println("ADMIN-PANEL enabled=" + context.adminPanelSettings().enabled()
+                + ", host=" + context.adminPanelSettings().host()
+                + ", port=" + context.adminPanelSettings().port()
+                + ", path=" + context.adminPanelSettings().basePath()
+                + ", backendUrl=" + context.adminPanelSettings().backendUrl());
         System.out.println("CLUSTER role=" + clusterRoleProvider.role()
                 + ", nodeId=" + clusterRoleProvider.nodeId()
                 + ", transport=netty"
@@ -642,6 +709,130 @@ public class JmqxApplication {
         return new RocksDbRetainedMessageStore(properties);
     }
 
+    private static AdminSyncSettings loadAdminSyncSettings(Properties config) {
+        return new AdminSyncSettings(
+                getBooleanProperty(config, "jmqx.admin.enabled", false),
+                getStringProperty(config, "jmqx.admin.url", "http://127.0.0.1:18080"),
+                getStringProperty(config, "jmqx.admin.clusterId", "default"),
+                getStringProperty(config, "jmqx.admin.nodeIp", ""),
+                getIntProperty(config, "jmqx.admin.http.connectTimeoutMs", 1500),
+                getIntProperty(config, "jmqx.admin.http.requestTimeoutMs", 3000),
+                getIntProperty(config, "jmqx.admin.metrics.intervalMs", 5000),
+                getIntProperty(config, "jmqx.admin.dashboard.publishIntervalMs", 2000)
+        );
+    }
+
+    private static AdminPanelSettings loadAdminPanelSettings(Properties config) {
+        return new AdminPanelSettings(
+                getBooleanProperty(config, "jmqx.admin.panel.enabled", true),
+                getStringProperty(config, "jmqx.admin.panel.host", "0.0.0.0"),
+                getIntProperty(config, "jmqx.admin.panel.port", 18081),
+                getStringProperty(config, "jmqx.admin.panel.basePath", "/admin"),
+                getStringProperty(config, "jmqx.admin.panel.backendUrl", "http://127.0.0.1:18080")
+        );
+    }
+
+    private static AdminReporter buildAdminReporter(
+            AdminSyncSettings settings,
+            String nodeId,
+            ConnectionMetrics connectionMetrics
+    ) {
+        if (settings == null || !settings.enabled()) {
+            return AdminReporter.NOOP;
+        }
+        String nodeIp = settings.nodeIp();
+        if (nodeIp == null || nodeIp.isBlank()) {
+            nodeIp = resolveLocalNodeIp();
+        }
+        return new HttpAdminReporter(
+                settings.url(),
+                settings.clusterId(),
+                nodeId,
+                nodeIp,
+                connectionMetrics,
+                settings.connectTimeoutMs(),
+                settings.requestTimeoutMs(),
+                settings.metricsIntervalMs()
+        );
+    }
+
+    private static ScheduledExecutorService startDashboardPublisher(
+            MqttBrokerMessageHandler brokerMessageHandler,
+            String nodeId,
+            String nodeRole,
+            String clusterId,
+            String configuredNodeIp,
+            ConnectionMetrics connectionMetrics,
+            long publishIntervalMs
+    ) {
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread thread = new Thread(r, "jmqx-dashboard-publisher");
+            thread.setDaemon(true);
+            return thread;
+        });
+        String safeClusterId = (clusterId == null || clusterId.isBlank()) ? "default" : clusterId.trim();
+        String nodeIp = configuredNodeIp;
+        if (nodeIp == null || nodeIp.isBlank()) {
+            nodeIp = resolveLocalNodeIp();
+        }
+        final String topic = "$SYS/dashboard/" + safeClusterId + "/cluster/overview";
+        final String safeNodeIp = nodeIp;
+        scheduler.scheduleWithFixedDelay(() -> {
+            try {
+                String payload = "{"
+                        + "\"clusterId\":\"" + safeJson(safeClusterId) + "\","
+                        + "\"nodeId\":\"" + safeJson(nodeId) + "\","
+                        + "\"role\":\"" + safeJson(nodeRole) + "\","
+                        + "\"nodeIp\":\"" + safeJson(safeNodeIp) + "\","
+                        + "\"connections\":" + connectionMetrics.getActiveConnections() + ","
+                        + "\"inboundBytes\":" + connectionMetrics.getInboundBytes() + ","
+                        + "\"outboundBytes\":" + connectionMetrics.getOutboundBytes() + ","
+                        + "\"timestamp\":" + System.currentTimeMillis()
+                        + "}";
+                brokerMessageHandler.publishSystemTopic(topic, payload.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            } catch (Exception ignored) {
+            }
+        }, 1500, Math.max(500, publishIntervalMs), TimeUnit.MILLISECONDS);
+        return scheduler;
+    }
+
+    private static AdminPanelServer startAdminPanelServer(
+            AdminPanelSettings settings,
+            String clusterId,
+            String nodeId,
+            String nodeRole,
+            SessionRegistry sessionRegistry,
+            SubscriptionRegistry subscriptionRegistry,
+            ConnectionMetrics connectionMetrics,
+            EmbeddedAdminStateStore.SecurityConfig initialSecurityConfig,
+            EmbeddedAdminStateStore.ClusterConfig initialClusterConfig,
+            AdminPanelServer.SecurityConfigUpdater securityConfigUpdater,
+            AdminPanelServer.ClusterConfigUpdater clusterConfigUpdater
+    ) {
+        String panelNodeIp = resolveLocalNodeIp();
+        AdminPanelServer server = new AdminPanelServer(
+                settings.host(),
+                settings.port(),
+                settings.basePath(),
+                settings.backendUrl(),
+                clusterId,
+                nodeId,
+                panelNodeIp,
+                nodeRole,
+                sessionRegistry,
+                subscriptionRegistry,
+                connectionMetrics,
+                initialSecurityConfig,
+                initialClusterConfig,
+                securityConfigUpdater,
+                clusterConfigUpdater
+        );
+        if (settings.enabled()) {
+            server.start();
+        }
+        return server;
+    }
+
     private static MetadataRuntime buildMetadataRuntime(
             ClusterRoleProvider clusterRoleProvider,
             GlobalSubscriptionRegistry globalSubscriptionRegistry,
@@ -782,6 +973,149 @@ public class JmqxApplication {
         }
     }
 
+    private static EmbeddedAdminStateStore.SecurityConfig buildInitialSecurityConfig(
+            AuthProperties authProperties,
+            AclProperties aclProperties
+    ) {
+        List<String> authChain = resolveAuthChain(authProperties);
+        List<String> aclChain = resolveAclChain(aclProperties);
+        boolean authEnabled = !authChain.isEmpty() && !"allow_all".equalsIgnoreCase(firstOrEmpty(authChain));
+        boolean aclEnabled = !aclChain.isEmpty() && !"allow_all".equalsIgnoreCase(firstOrEmpty(aclChain));
+        long cacheTtlMs = Math.max(authProperties.getCacheMillis(), aclProperties.getCacheMillis());
+        return new EmbeddedAdminStateStore.SecurityConfig(
+                aclEnabled,
+                aclChain,
+                authEnabled,
+                authChain,
+                Math.max(cacheTtlMs, 0)
+        );
+    }
+
+    private static EmbeddedAdminStateStore.ClusterConfig buildInitialClusterConfig(StartupContext context) {
+        List<String> coreNodes = new ArrayList<>(context.clusterRoleProvider().coreEndpoints());
+        if (coreNodes.isEmpty()) {
+            coreNodes.add(context.clusterSettings().coreBindHost() + ":" + context.clusterSettings().coreBindPort());
+        }
+        return new EmbeddedAdminStateStore.ClusterConfig(
+                coreNodes,
+                List.of(),
+                true,
+                context.sharedMaxSubscribers()
+        );
+    }
+
+    private static void applyRuntimeSecurityConfig(
+            AuthProperties authProperties,
+            AclProperties aclProperties,
+            ReloadableAuthProvider reloadableAuthProvider,
+            ReloadableAclAuthorizer reloadableAclAuthorizer,
+            EmbeddedAdminStateStore.SecurityConfig securityConfig
+    ) {
+        if (securityConfig == null) {
+            return;
+        }
+        int cacheMillis = (int) Math.max(0, Math.min(Integer.MAX_VALUE, securityConfig.cacheTtlMs()));
+        synchronized (JmqxApplication.class) {
+            authProperties.setCacheMillis(cacheMillis);
+            aclProperties.setCacheMillis(cacheMillis);
+
+            List<String> authChain = normalizePluginList(securityConfig.authChain());
+            if (!securityConfig.authEnabled()) {
+                authProperties.setType("allow_all");
+                authProperties.setChain("");
+            } else {
+                if (authChain.isEmpty()) {
+                    authChain = List.of("file");
+                }
+                authProperties.setType(firstOrEmpty(authChain));
+                authProperties.setChain(String.join(",", authChain));
+            }
+
+            List<String> aclChain = normalizePluginList(securityConfig.aclChain());
+            if (!securityConfig.aclEnabled()) {
+                aclProperties.setType("allow_all");
+            } else {
+                if (aclChain.isEmpty()) {
+                    aclChain = List.of("file");
+                }
+                aclProperties.setType(firstOrEmpty(aclChain));
+            }
+
+            reloadableAuthProvider.setDelegate(AuthProviderFactory.create(authProperties));
+            reloadableAclAuthorizer.setDelegate(AclAuthorizerFactory.create(aclProperties));
+        }
+    }
+
+    private static void applyRuntimeClusterConfig(
+            SharedSubscriptionManager sharedSubscriptionManager,
+            int slowConsumerStrikeThreshold,
+            EmbeddedAdminStateStore.ClusterConfig clusterConfig
+    ) {
+        if (sharedSubscriptionManager == null || clusterConfig == null) {
+            return;
+        }
+        sharedSubscriptionManager.reconfigure(
+                clusterConfig.sharedSubscriptionMaxMembersPerGroup(),
+                slowConsumerStrikeThreshold
+        );
+    }
+
+    private static List<String> resolveAuthChain(AuthProperties authProperties) {
+        List<String> fromChain = normalizePluginList(splitCommaList(authProperties.getChain()));
+        if (!fromChain.isEmpty()) {
+            return fromChain;
+        }
+        String type = authProperties.getType();
+        if (type == null || type.isBlank()) {
+            return List.of("allow_all");
+        }
+        return List.of(type.trim().toLowerCase());
+    }
+
+    private static List<String> resolveAclChain(AclProperties aclProperties) {
+        String type = aclProperties.getType();
+        if (type == null || type.isBlank()) {
+            return List.of("allow_all");
+        }
+        return List.of(type.trim().toLowerCase());
+    }
+
+    private static List<String> splitCommaList(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return List.of();
+        }
+        String[] items = raw.split(",");
+        List<String> result = new ArrayList<>();
+        for (String item : items) {
+            if (item == null || item.isBlank()) {
+                continue;
+            }
+            result.add(item.trim());
+        }
+        return result;
+    }
+
+    private static List<String> normalizePluginList(List<String> raw) {
+        if (raw == null || raw.isEmpty()) {
+            return List.of();
+        }
+        List<String> result = new ArrayList<>();
+        for (String item : raw) {
+            if (item == null || item.isBlank()) {
+                continue;
+            }
+            result.add(item.trim().toLowerCase());
+        }
+        return result;
+    }
+
+    private static String firstOrEmpty(List<String> values) {
+        if (values == null || values.isEmpty() || values.get(0) == null) {
+            return "";
+        }
+        return values.get(0);
+    }
+
     private static String getStringProperty(Properties config, String key, String defaultValue) {
         String system = System.getProperty(key);
         if (system != null && !system.isBlank()) {
@@ -870,6 +1204,35 @@ public class JmqxApplication {
         return defaultValue;
     }
 
+    private static String resolveLocalNodeIp() {
+        String fromJvm = System.getProperty("jmqx.node.ip");
+        if (fromJvm != null && !fromJvm.isBlank()) {
+            return fromJvm.trim();
+        }
+        String fromEnv = System.getenv("JMQX_NODE_IP");
+        if (fromEnv != null && !fromEnv.isBlank()) {
+            return fromEnv.trim();
+        }
+        try {
+            InetAddress localHost = InetAddress.getLocalHost();
+            if (localHost instanceof Inet4Address) {
+                return localHost.getHostAddress();
+            }
+            return localHost.getHostAddress();
+        } catch (Exception ignored) {
+            return "unknown";
+        }
+    }
+
+    private static String safeJson(String value) {
+        if (value == null) {
+            return "";
+        }
+        return value
+                .replace("\\", "\\\\")
+                .replace("\"", "\\\"");
+    }
+
     private static Set<String> getStringSetProperty(Properties config, String key) {
         String raw = getStringProperty(config, key, "");
         if (raw.isBlank()) {
@@ -929,7 +1292,9 @@ public class JmqxApplication {
             SessionRegistry sessionRegistry,
             SubscriptionRegistry subscriptionRegistry,
             GlobalSubscriptionRegistry globalSubscriptionRegistry,
-            ClusterSettings clusterSettings
+            ClusterSettings clusterSettings,
+            AdminSyncSettings adminSyncSettings,
+            AdminPanelSettings adminPanelSettings
     ) {
     }
 
@@ -963,6 +1328,39 @@ public class JmqxApplication {
     }
 
     /**
+     * 管理端上报配置。
+     *
+     * @author liucaiwen
+     * @date 2026/4/10
+     */
+    private record AdminSyncSettings(
+            boolean enabled,
+            String url,
+            String clusterId,
+            String nodeIp,
+            int connectTimeoutMs,
+            int requestTimeoutMs,
+            int metricsIntervalMs,
+            int dashboardPublishIntervalMs
+    ) {
+    }
+
+    /**
+     * 内嵌管理页面配置。
+     *
+     * @author liucaiwen
+     * @date 2026/4/10
+     */
+    private record AdminPanelSettings(
+            boolean enabled,
+            String host,
+            int port,
+            String basePath,
+            String backendUrl
+    ) {
+    }
+
+    /**
      * 网络端点服务集合。
      *
      * @author liucaiwen
@@ -989,7 +1387,9 @@ public class JmqxApplication {
             MqttBrokerMessageHandler brokerMessageHandler,
             RetainedMessageStore retainedMessageStore,
             MessageBridge messageBridge,
-            EndpointServers endpointServers
+            EndpointServers endpointServers,
+            ScheduledExecutorService dashboardPublisher,
+            AdminPanelServer adminPanelServer
     ) {
     }
 

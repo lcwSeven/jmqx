@@ -14,6 +14,7 @@ JMQX 是一个基于 Java + Netty 的 MQTT Broker，目标是提供可读、可�
   - [最佳实践](docs/03-best-practices.md)
   - [配置项完整参考](docs/04-configuration-reference.md)
   - [集群故障演练手册](docs/05-cluster-failure-drill.md)
+  - [管理页面（Admin Console）](docs/06-admin-console.md)
   - [单机 30 万连接里程碑](docs/milestone-300k-single-node.md)
   - [变更记录（Changelog）](CHANGELOG.md)
 
@@ -38,7 +39,7 @@ JMQX 是一个基于 Java + Netty 的 MQTT Broker，目标是提供可读、可�
 - `jmqx-cluster`：集群元数据与节点间消息通道
 - `jmqx-transport`：MQTT / MQTTS / WS / WSS 接入
 - `jmqx-bench`：压测工具
-- `jmqx-app`：启动装配
+- `jmqx-app`：启动装配 + 内嵌管理页面（Admin Console）
 
 ### 运行角色
 
@@ -65,6 +66,19 @@ mvn -DskipTests compile
 ```bash
 mvn -pl jmqx-app -am exec:java
 ```
+
+### 访问管理页面
+
+默认地址：
+
+- `http://127.0.0.1:18081/admin/`
+
+默认配置（见 `jmqx-app/src/main/resources/jmqx.properties`）：
+
+- `jmqx.admin.panel.enabled=true`
+- `jmqx.admin.panel.host=0.0.0.0`
+- `jmqx.admin.panel.port=18081`
+- `jmqx.admin.panel.basePath=/admin`
 
 ### 启动压测工具
 
@@ -137,6 +151,34 @@ Retained 常用参数：
 -Djmqx.shared.maxSubscribersPerGroup=1000
 -Djmqx.shared.slowConsumerStrikeThreshold=3
 ```
+
+## 管理页面（Admin Console）
+
+### 功能范围
+
+- 集群概览：节点连接数、流量、节点角色
+- 客户端列表与详情：`clientId / username / IP / keepalive / 连接方式 / 订阅主题`
+- ACL 鉴权配置：启用状态、插件链、缓存时间
+- 连接鉴权配置：启用状态、插件链、缓存时间、向导式创建
+- 集群配置：共享订阅成员上限等参数
+
+### 数据打通状态
+
+已打通（读链路）：
+
+- 概览与客户端数据来自 JMQX 运行态（`ConnectionMetrics`、`SessionRegistry`、`SubscriptionRegistry`）
+- 实时数据来自 Broker 内部主题（`$SYS/dashboard/{clusterId}/...`）
+
+已打通（写链路，动态生效）：
+
+- `security/config` 保存后，动态重载 AUTH / ACL 插件链（无须重启）
+- `cluster/config` 中 `sharedSubscriptionMaxMembersPerGroup` 保存后，动态更新共享订阅限制
+
+暂未动态生效（仅管理态保存）：
+
+- `coreNodes / replicantNodes / coreAcceptClientConnections`
+
+详细设计与接口见 [管理页面（Admin Console）](docs/06-admin-console.md)。
 
 ## 插件能力
 
