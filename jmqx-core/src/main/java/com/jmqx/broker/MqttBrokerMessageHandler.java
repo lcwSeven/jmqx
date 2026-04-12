@@ -21,10 +21,7 @@ import com.jmqx.session.SessionRegistry;
 import com.jmqx.store.RetainedMessage;
 import com.jmqx.store.RetainedMessageStore;
 import com.jmqx.store.Qos1InflightStore;
-import com.jmqx.store.Qos1InflightMessage;
 import com.jmqx.store.Qos2InflightStore;
-import com.jmqx.store.Qos2InboundInflightMessage;
-import com.jmqx.store.Qos2OutboundInflightMessage;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
@@ -35,9 +32,7 @@ import io.netty.handler.codec.mqtt.MqttMessage;
 import io.netty.handler.codec.mqtt.MqttMessageBuilders;
 import io.netty.handler.codec.mqtt.MqttFixedHeader;
 import io.netty.handler.codec.mqtt.MqttMessageType;
-import io.netty.handler.codec.mqtt.MqttMessageIdVariableHeader;
 import io.netty.handler.codec.mqtt.MqttProperties;
-import io.netty.handler.codec.mqtt.MqttPublishVariableHeader;
 import io.netty.handler.codec.mqtt.MqttPublishMessage;
 import io.netty.handler.codec.mqtt.MqttPubAckMessage;
 import io.netty.handler.codec.mqtt.MqttQoS;
@@ -54,7 +49,6 @@ import java.net.SocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
@@ -69,7 +63,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -94,26 +87,17 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     private static final String DASHBOARD_TOPIC_PREFIX = "$SYS/dashboard/";
     private static final String SUBSCRIPTION_NAMESPACE = "route.subscription";
     private static final String SESSION_NAMESPACE = "session.client";
-    private static final String RETAINED_NAMESPACE = "retained.message";
     private static final String OP_REGISTER = "register";
     private static final String OP_UNREGISTER = "unregister";
     private static final String OP_ONLINE = "online";
-    private static final String OP_RETAINED_UPSERT = "upsert";
-    private static final String OP_RETAINED_REMOVE = "remove";
     private static final long SESSION_EXPIRY_IMMEDIATE = 0L;
     private static final long SESSION_EXPIRY_PERSISTENT = Long.MAX_VALUE;
-    private static final int MAX_PACKET_ID = 0xFFFF;
-    private static final long QOS1_RETRY_INTERVAL_MS = 5000L;
-    private static final int QOS1_MAX_RETRIES = 3;
-    private static final long QOS2_RETRY_INTERVAL_MS = 5000L;
-    private static final int QOS2_MAX_RETRIES = 5;
     private static final long RETAINED_RETRY_INTERVAL_MS = 2000L;
 
     private final SessionRegistry sessionRegistry;
     private final SubscriptionRegistry subscriptionRegistry;
     private final RetainedMessageStore retainedMessageStore;
-    private final Qos1InflightStore qos1InflightStore;
-    private final Qos2InflightStore qos2InflightStore;
+    private final BrokerInflightManager inflightManager;
     private final ClientAuthenticator clientAuthenticator;
     private final AclAuthorizer aclAuthorizer;
     private final SharedSubscriptionManager sharedSubscriptionManager;
@@ -127,10 +111,8 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     private final String dashboardClusterId;
     private final List<String> bridgeTopicFilters;
     private final ConcurrentMap<String, AtomicLong> sharedGroupNodeRoundRobin = new ConcurrentHashMap<>();
-    private final ConcurrentMap<String, AtomicInteger> outboundPacketIdByClient = new ConcurrentHashMap<>();
-    private final ConcurrentMap<String, ConcurrentMap<Integer, OutboundInflightMessage>> outboundInflightByClient = new ConcurrentHashMap<>();
-    private final ConcurrentMap<String, ConcurrentMap<Integer, InboundQos2Publish>> inboundQos2ByClient = new ConcurrentHashMap<>();
-    private final ConcurrentMap<String, MetadataCommand> pendingRetainedCommands = new ConcurrentHashMap<>();
+    private final RetainedCommandReplicator retainedCommandReplicator;
+    private final BrokerRateLimiter rateLimiter;
     private final ScheduledExecutorService qos1RetryExecutor;
 
 
@@ -151,7 +133,8 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             ClusterMessageDispatcher clusterMessageDispatcher,
             AdminReporter adminReporter,
             String dashboardClusterId,
-            String bridgeTopicFilters) {
+            String bridgeTopicFilters,
+            BrokerRateLimitConfig rateLimitConfig) {
         this.sessionRegistry = sessionRegistry;
         this.subscriptionRegistry = subscriptionRegistry;
         this.retainedMessageStore = retainedMessageStore;
@@ -162,8 +145,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             : sharedSubscriptionManager;
         this.messageBridge = messageBridge == null ? MessageBridge.NOOP : messageBridge;
         this.retainedEnabled = retainedEnabled;
-        this.qos1InflightStore = qos1InflightStore == null ? Qos1InflightStore.NOOP : qos1InflightStore;
-        this.qos2InflightStore = qos2InflightStore == null ? Qos2InflightStore.NOOP : qos2InflightStore;
+        this.inflightManager = new BrokerInflightManager(qos1InflightStore, qos2InflightStore, LOG);
         this.globalSubscriptionRegistry = globalSubscriptionRegistry;
         this.nodeId = (nodeId == null || nodeId.isBlank()) ? "node-1" : nodeId;
         this.metadataCommandGateway = Objects.requireNonNull(metadataCommandGateway, "metadataCommandGateway");
@@ -173,6 +155,8 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             ? "default"
             : dashboardClusterId.trim();
         this.bridgeTopicFilters = parseBridgeTopicFilters(bridgeTopicFilters);
+        this.rateLimiter = new BrokerRateLimiter(rateLimitConfig);
+        this.retainedCommandReplicator = new RetainedCommandReplicator(this.metadataCommandGateway, this.nodeId, LOG);
         this.qos1RetryExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
             Thread thread = new Thread(runnable, "jmqx-qos1-retry");
             thread.setDaemon(true);
@@ -245,13 +229,9 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
 
         adminReporter.removeClientSession(clientId);
         sessionRegistry.remove(clientId);
-        outboundInflightByClient.remove(clientId);
-        inboundQos2ByClient.remove(clientId);
-        outboundPacketIdByClient.remove(clientId);
+        inflightManager.removeRuntimeState(clientId);
         if (shouldClearSessionState(cleanStart, sessionExpirySeconds)) {
-            qos1InflightStore.removeClient(clientId);
-            qos2InflightStore.removeInboundClient(clientId);
-            qos2InflightStore.removeOutboundClient(clientId);
+            inflightManager.clearPersistentState(clientId);
             sharedSubscriptionManager.removeClient(clientId);
             Set<String> removedLastTopics = subscriptionRegistry.removeClientAndCollectLastTopics(clientId);
             removedLastTopics.forEach(this::applyGlobalUnregisterAfterLocal);
@@ -297,6 +277,9 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             LOG.warning(() -> "[CONNECT] rejected unsupported protocol version, remote=" + ctx.channel().remoteAddress()
                 + ", version=" + message.variableHeader().version());
             rejectConnection(ctx, MqttConnectReturnCode.CONNECTION_REFUSED_UNACCEPTABLE_PROTOCOL_VERSION, false);
+            return;
+        }
+        if (isConnectRateLimited(ctx, mqtt5)) {
             return;
         }
 
@@ -353,7 +336,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         int keepAliveSeconds = Math.max(message.variableHeader().keepAliveTimeSeconds(), 0);
         String serviceNodeIp = resolveServiceNodeIp(ctx.channel());
         String clientIp = resolveClientIp(ctx.channel());
-        boolean sessionPresent = !cleanStart && hasPersistedSessionState(clientId);
+        boolean sessionPresent = !cleanStart && inflightManager.hasPersistedSessionState(clientId, subscriptionRegistry);
         ctx.channel().attr(CLIENT_ID).set(clientId);
         ctx.channel().attr(CLEAN_START).set(cleanStart);
         ctx.channel().attr(GRACEFUL_DISCONNECT).set(false);
@@ -380,7 +363,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
                     .build());
         }
         // 第六步：在会话对外可见前恢复 inflight 状态，避免恢复窗口内 packetId 竞争。
-        restoreInflightState(clientId, sessionPresent, ctx.channel());
+        inflightManager.restoreInflightState(clientId, sessionPresent, ctx.channel());
 
         // 第七步：恢复完成后再注册会话并广播上线，形成稳定连接状态。
         Instant connectedAt = Instant.now();
@@ -532,6 +515,9 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             ctx.close();
             return;
         }
+        if (isPublishRateLimited(ctx, clientId, qos, packetId, topic)) {
+            return;
+        }
         // ACL 鉴权
         if (isDenied(clientId, topic, AclAction.PUBLISH)) {
             handleDeniedPublish(ctx, clientId, topic, qos, packetId);
@@ -562,7 +548,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             return;
         }
         if (qos == 2) {
-            ctx.writeAndFlush(buildPubRecMessage(packetId));
+            ctx.writeAndFlush(MqttPacketFactory.buildPubRecMessage(packetId));
         }
     }
 
@@ -577,24 +563,16 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         int packetId,
         boolean retain
     ) {
-        ConcurrentMap<Integer, InboundQos2Publish> pending = inboundQos2ByClient
-            .computeIfAbsent(clientId, ignored -> new ConcurrentHashMap<>());
-        pending.computeIfAbsent(packetId, ignored -> new InboundQos2Publish(topic, payload.clone(), retain));
-        qos2InflightStore.saveInbound(clientId, new Qos2InboundInflightMessage(
-            packetId,
-            topic,
-            payload.clone(),
-            retain
-        ));
-        ctx.writeAndFlush(buildPubRecMessage(packetId));
+        inflightManager.saveInboundQos2(clientId, packetId, topic, payload, retain);
+        ctx.writeAndFlush(MqttPacketFactory.buildPubRecMessage(packetId));
     }
 
     /**
      * 普通业务发布处理（QoS0/QoS1 直接投递，QoS2 在 PUBREL 阶段调用）。
      */
     private void processApplicationPublish(String clientId, String topic, byte[] payload, int qos, boolean retain) {
-        if (retain) {
-            submitRetainedWithClusterSync(topic, payload, qos);
+        if (retain && retainedEnabled) {
+            retainedCommandReplicator.submitRetainedWithClusterSync(topic, payload, qos);
         }
         routeMessage(topic, payload, qos);
         if (shouldBridgeTopic(topic)) {
@@ -615,64 +593,27 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             return;
         }
         int packetId = message.variableHeader().messageId();
-        ConcurrentMap<Integer, OutboundInflightMessage> inflight = outboundInflightByClient.get(clientId);
-        if (inflight == null) {
-            qos1InflightStore.remove(clientId, packetId);
-            return;
-        }
-        OutboundInflightMessage existing = inflight.get(packetId);
-        if (existing == null || existing.qos() != MqttQoS.AT_LEAST_ONCE.value()) {
-            return;
-        }
-        removeOutboundInflight(clientId, packetId, inflight);
-        if (inflight.isEmpty()) {
-            outboundInflightByClient.remove(clientId, inflight);
-        }
+        inflightManager.onPubAck(clientId, packetId);
     }
 
     private void handlePubRec(ChannelHandlerContext ctx, MqttMessage message) {
         String clientId = currentClientId(ctx.channel());
-        Integer packetId = extractPacketId(message);
+        Integer packetId = MqttPacketFactory.extractPacketId(message);
         if (clientId == null || packetId == null) {
             return;
         }
-        ConcurrentMap<Integer, OutboundInflightMessage> inflight = outboundInflightByClient.get(clientId);
-        if (inflight == null) {
-            return;
+        if (inflightManager.onPubRec(clientId, packetId)) {
+            ctx.writeAndFlush(MqttPacketFactory.buildPubRelMessage(packetId));
         }
-        OutboundInflightMessage existing = inflight.get(packetId);
-        if (existing == null || existing.qos() != MqttQoS.EXACTLY_ONCE.value()) {
-            return;
-        }
-        if (existing.qos2State() == Qos2State.WAIT_PUBCOMP) {
-            ctx.writeAndFlush(buildPubRelMessage(packetId));
-            return;
-        }
-        if (existing.qos2State() != Qos2State.WAIT_PUBREC) {
-            return;
-        }
-        ctx.writeAndFlush(buildPubRelMessage(packetId));
-        OutboundInflightMessage next = existing.toQos2WaitPubComp(System.currentTimeMillis());
-        putOutboundInflight(clientId, packetId, next, inflight);
     }
 
     private void handlePubRel(ChannelHandlerContext ctx, MqttMessage message) {
         String clientId = currentClientId(ctx.channel());
-        Integer packetId = extractPacketId(message);
+        Integer packetId = MqttPacketFactory.extractPacketId(message);
         if (clientId == null || packetId == null) {
             return;
         }
-        ConcurrentMap<Integer, InboundQos2Publish> pending = inboundQos2ByClient.get(clientId);
-        InboundQos2Publish publish = pending == null ? null : pending.remove(packetId);
-        if (publish == null) {
-            publish = qos2InflightStore.getInbound(clientId, packetId)
-                .map(message1 -> new InboundQos2Publish(
-                    message1.topic(),
-                    message1.payload() == null ? new byte[0] : message1.payload().clone(),
-                    message1.retain()
-                ))
-                .orElse(null);
-        }
+        InboundQos2Publish publish = inflightManager.onPubRel(clientId, packetId);
         if (publish != null) {
             processApplicationPublish(
                 clientId,
@@ -682,32 +623,16 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
                 publish.retain()
             );
         }
-        if (pending != null && pending.isEmpty()) {
-            inboundQos2ByClient.remove(clientId, pending);
-        }
-        qos2InflightStore.removeInbound(clientId, packetId);
-        ctx.writeAndFlush(buildPubCompMessage(packetId));
+        ctx.writeAndFlush(MqttPacketFactory.buildPubCompMessage(packetId));
     }
 
     private void handlePubComp(ChannelHandlerContext ctx, MqttMessage message) {
         String clientId = currentClientId(ctx.channel());
-        Integer packetId = extractPacketId(message);
+        Integer packetId = MqttPacketFactory.extractPacketId(message);
         if (clientId == null || packetId == null) {
             return;
         }
-        ConcurrentMap<Integer, OutboundInflightMessage> inflight = outboundInflightByClient.get(clientId);
-        if (inflight == null) {
-            return;
-        }
-        OutboundInflightMessage existing = inflight.get(packetId);
-        if (existing == null || existing.qos() != MqttQoS.EXACTLY_ONCE.value()
-            || existing.qos2State() != Qos2State.WAIT_PUBCOMP) {
-            return;
-        }
-        removeOutboundInflight(clientId, packetId, inflight);
-        if (inflight.isEmpty()) {
-            outboundInflightByClient.remove(clientId, inflight);
-        }
+        inflightManager.onPubComp(clientId, packetId);
     }
 
     private WillMessage buildWillMessage(MqttConnectMessage connectMessage) {
@@ -775,23 +700,6 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
 
     private void publishInternal(String sourceClientId, String topic, byte[] payload, int qos, boolean retain) {
         processApplicationPublish(sourceClientId, topic, payload, qos, retain);
-    }
-
-    private void submitRetainedWithClusterSync(String topic, byte[] payload, int qos) {
-        if (!retainedEnabled) {
-            return;
-        }
-        MetadataCommand command = buildRetainedCommand(topic, payload, qos);
-        if (command == null) {
-            return;
-        }
-        // 优先通过集群元数据通道提交，确保 retained 在所有节点按同一日志顺序生效。
-        if (submitRetainedCommand(command)) {
-            pendingRetainedCommands.remove(topic);
-            return;
-        }
-        // 提交失败时进入待重试队列，不做本地兜底写，避免节点间 retained 视图不一致。
-        pendingRetainedCommands.put(topic, command);
     }
 
     /**
@@ -913,17 +821,17 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
                         .retained(false)
                         .qos(MqttQoS.AT_MOST_ONCE)
                         .payload(Unpooled.wrappedBuffer(payload))
-                        .build());
+                .build());
                 continue;
             }
-            int packetId = nextOutboundPacketId(subscriber);
+            int packetId = inflightManager.nextOutboundPacketId(subscriber);
             if (outboundQos == MqttQoS.AT_LEAST_ONCE.value()) {
-                channel.writeAndFlush(buildQos1PublishMessage(topic, payload, packetId, false));
-                trackInflightQos1(subscriber, packetId, topic, payload);
+                channel.writeAndFlush(MqttPacketFactory.buildQos1PublishMessage(topic, payload, packetId, false));
+                inflightManager.trackInflightQos1(subscriber, packetId, topic, payload);
                 continue;
             }
-            channel.writeAndFlush(buildQos2PublishMessage(topic, payload, packetId, false));
-            trackInflightQos2(subscriber, packetId, topic, payload);
+            channel.writeAndFlush(MqttPacketFactory.buildQos2PublishMessage(topic, payload, packetId, false));
+            inflightManager.trackInflightQos2(subscriber, packetId, topic, payload);
         }
     }
 
@@ -1272,37 +1180,6 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         LOG.warning(() -> "[CLUSTER] metadata submit failed, skip session-online apply, clientId=" + clientId);
     }
 
-    private MetadataCommand buildRetainedCommand(String topic, byte[] payload, int qos) {
-        if (topic == null || topic.isBlank()) {
-            return null;
-        }
-        byte[] safePayload = payload == null ? new byte[0] : payload;
-        String operation = safePayload.length == 0 ? OP_RETAINED_REMOVE : OP_RETAINED_UPSERT;
-        String value = safePayload.length == 0
-            ? null
-            : qos + "|" + Base64.getEncoder().encodeToString(safePayload);
-        return new MetadataCommand(
-            RETAINED_NAMESPACE,
-            operation,
-            topic,
-            value,
-            nodeId
-        );
-    }
-
-    private boolean submitRetainedCommand(MetadataCommand command) {
-        if (command == null) {
-            return false;
-        }
-        long committedIndex = metadataCommandGateway.submit(command);
-        if (committedIndex >= 0) {
-            return true;
-        }
-        LOG.warning(() -> "[CLUSTER] retained metadata submit failed, topic=" + command.key()
-            + ", operation=" + command.operation());
-        return false;
-    }
-
     public void shutdown() {
         adminReporter.shutdown();
         qos1RetryExecutor.shutdown();
@@ -1314,324 +1191,74 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             Thread.currentThread().interrupt();
             qos1RetryExecutor.shutdownNow();
         } finally {
-            qos1InflightStore.close();
-            qos2InflightStore.close();
+            inflightManager.close();
         }
     }
 
-    private int nextOutboundPacketId(String clientId) {
-        AtomicInteger sequence = outboundPacketIdByClient.computeIfAbsent(clientId, ignored -> new AtomicInteger(0));
-        ConcurrentMap<Integer, OutboundInflightMessage> inflight = outboundInflightByClient.get(clientId);
-        for (int i = 0; i < MAX_PACKET_ID; i++) {
-            int next = sequence.updateAndGet(current -> current >= MAX_PACKET_ID ? 1 : current + 1);
-            if (next <= 0) {
-                sequence.set(1);
-                continue;
-            }
-            if (inflight == null || !inflight.containsKey(next)) {
-                return next;
-            }
-        }
-        // 全部 packetId 都在使用（理论极端场景），返回当前值并记录告警。
-        int fallback = sequence.get();
-        LOG.warning(() -> "[INFLIGHT] no free packetId for clientId=" + clientId + ", fallbackPacketId=" + fallback);
-        return fallback > 0 ? fallback : 1;
-    }
-
-    private MqttPublishMessage buildQos1PublishMessage(String topic, byte[] payload, int packetId, boolean dup) {
-        return new MqttPublishMessage(
-            new MqttFixedHeader(MqttMessageType.PUBLISH, dup, MqttQoS.AT_LEAST_ONCE, false, 0),
-            new MqttPublishVariableHeader(topic, packetId, MqttProperties.NO_PROPERTIES),
-            Unpooled.wrappedBuffer(payload)
-        );
-    }
-
-    private MqttPublishMessage buildQos2PublishMessage(String topic, byte[] payload, int packetId, boolean dup) {
-        return new MqttPublishMessage(
-            new MqttFixedHeader(MqttMessageType.PUBLISH, dup, MqttQoS.EXACTLY_ONCE, false, 0),
-            new MqttPublishVariableHeader(topic, packetId, MqttProperties.NO_PROPERTIES),
-            Unpooled.wrappedBuffer(payload)
-        );
-    }
-
-    private MqttMessage buildPubRecMessage(int packetId) {
-        return new MqttMessage(
-            new MqttFixedHeader(MqttMessageType.PUBREC, false, MqttQoS.AT_MOST_ONCE, false, 0),
-            MqttMessageIdVariableHeader.from(packetId)
-        );
-    }
-
-    private MqttMessage buildPubRelMessage(int packetId) {
-        return new MqttMessage(
-            new MqttFixedHeader(MqttMessageType.PUBREL, false, MqttQoS.AT_LEAST_ONCE, false, 0),
-            MqttMessageIdVariableHeader.from(packetId)
-        );
-    }
-
-    private MqttMessage buildPubCompMessage(int packetId) {
-        return new MqttMessage(
-            new MqttFixedHeader(MqttMessageType.PUBCOMP, false, MqttQoS.AT_MOST_ONCE, false, 0),
-            MqttMessageIdVariableHeader.from(packetId)
-        );
-    }
-
-    private Integer extractPacketId(MqttMessage message) {
-        if (message == null) {
-            return null;
-        }
-        if (message.variableHeader() instanceof MqttMessageIdVariableHeader messageIdVariableHeader) {
-            return messageIdVariableHeader.messageId();
-        }
-        return null;
-    }
-
-    private void putOutboundInflight(
-        String clientId,
-        int packetId,
-        OutboundInflightMessage message,
-        ConcurrentMap<Integer, OutboundInflightMessage> inflight
-    ) {
-        if (clientId == null || clientId.isBlank() || packetId <= 0 || message == null || inflight == null) {
-            return;
-        }
-        inflight.put(packetId, message);
-        if (message.qos() == MqttQoS.AT_LEAST_ONCE.value()) {
-            qos1InflightStore.save(clientId, new Qos1InflightMessage(
-                packetId,
-                message.topic(),
-                message.payload() == null ? new byte[0] : message.payload().clone(),
-                message.lastSentAtMs(),
-                Math.max(0, message.retryCount())
-            ));
-            qos2InflightStore.removeOutbound(clientId, packetId);
-            return;
-        }
-        qos2InflightStore.saveOutbound(clientId, new Qos2OutboundInflightMessage(
-            packetId,
-            message.topic(),
-            message.payload() == null ? new byte[0] : message.payload().clone(),
-            message.qos2State() == null ? Qos2State.WAIT_PUBREC.code() : message.qos2State().code(),
-            message.lastSentAtMs()
-        ));
-        qos1InflightStore.remove(clientId, packetId);
-    }
-
-    private void removeOutboundInflight(
-        String clientId,
-        int packetId,
-        ConcurrentMap<Integer, OutboundInflightMessage> inflight
-    ) {
-        if (inflight != null) {
-            inflight.remove(packetId);
-        }
-        qos1InflightStore.remove(clientId, packetId);
-        qos2InflightStore.removeOutbound(clientId, packetId);
-    }
-
-    private void trackInflightQos1(String clientId, int packetId, String topic, byte[] payload) {
-        byte[] copy = payload == null ? new byte[0] : payload.clone();
-        OutboundInflightMessage inflightMessage = OutboundInflightMessage.qos1(topic, copy, System.currentTimeMillis(), 0);
-        ConcurrentMap<Integer, OutboundInflightMessage> inflight = outboundInflightByClient
-            .computeIfAbsent(clientId, ignored -> new ConcurrentHashMap<>());
-        putOutboundInflight(clientId, packetId, inflightMessage, inflight);
-    }
-
-    private void trackInflightQos2(String clientId, int packetId, String topic, byte[] payload) {
-        byte[] copy = payload == null ? new byte[0] : payload.clone();
-        ConcurrentMap<Integer, OutboundInflightMessage> inflight = outboundInflightByClient
-            .computeIfAbsent(clientId, ignored -> new ConcurrentHashMap<>());
-        putOutboundInflight(clientId, packetId, OutboundInflightMessage.qos2WaitPubRec(topic, copy, System.currentTimeMillis()), inflight);
-    }
 
     private void runPeriodicMaintenance() {
         try {
-            retryInflightQos1Messages();
+            inflightManager.retryInflight(sessionRegistry);
         } catch (Exception exception) {
-            LOG.warning("[INFLIGHT] qos1 retry task failed: " + exception.getMessage());
+            LOG.warning("[INFLIGHT] retry task failed: " + exception.getMessage());
         }
         try {
-            retryInflightQos2Messages();
-        } catch (Exception exception) {
-            LOG.warning("[INFLIGHT] qos2 retry task failed: " + exception.getMessage());
-        }
-        try {
-            retryPendingRetainedCommands();
+            retainedCommandReplicator.retryPendingCommands();
         } catch (Exception exception) {
             LOG.warning("[RETAINED] pending command retry task failed: " + exception.getMessage());
         }
+        try {
+            cleanupRateLimitState();
+        } catch (Exception exception) {
+            LOG.warning("[RATE_LIMIT] cleanup task failed: " + exception.getMessage());
+        }
     }
 
-    private void retryInflightQos1Messages() {
+    private boolean isPublishRateLimited(ChannelHandlerContext ctx, String clientId, int qos, int packetId, String topic) {
         long now = System.currentTimeMillis();
-        outboundInflightByClient.forEach((clientId, inflight) -> {
-            ClientSession session = sessionRegistry.get(clientId).orElse(null);
-            if (session == null || session.channel() == null || !session.channel().isActive()) {
-                return;
-            }
-            Channel channel = session.channel();
-            inflight.forEach((packetId, entry) -> {
-                if (entry.qos() != MqttQoS.AT_LEAST_ONCE.value()) {
-                    return;
-                }
-                if (now - entry.lastSentAtMs() < QOS1_RETRY_INTERVAL_MS) {
-                    return;
-                }
-                if (entry.retryCount() >= QOS1_MAX_RETRIES) {
-                    removeOutboundInflight(clientId, packetId, inflight);
-                    return;
-                }
-                channel.writeAndFlush(buildQos1PublishMessage(entry.topic(), entry.payload(), packetId, true));
-                OutboundInflightMessage retried = entry.nextQos1Retry(now);
-                putOutboundInflight(clientId, packetId, retried, inflight);
-            });
-            if (inflight.isEmpty()) {
-                outboundInflightByClient.remove(clientId, inflight);
-            }
-        });
-    }
-
-    private void retryInflightQos2Messages() {
-        long now = System.currentTimeMillis();
-        outboundInflightByClient.forEach((clientId, inflight) -> {
-            ClientSession session = sessionRegistry.get(clientId).orElse(null);
-            if (session == null || session.channel() == null || !session.channel().isActive()) {
-                return;
-            }
-            Channel channel = session.channel();
-            inflight.forEach((packetId, entry) -> {
-                if (entry.qos() != MqttQoS.EXACTLY_ONCE.value()) {
-                    return;
-                }
-                if (now - entry.lastSentAtMs() < QOS2_RETRY_INTERVAL_MS) {
-                    return;
-                }
-                if (entry.retryCount() >= QOS2_MAX_RETRIES) {
-                    removeOutboundInflight(clientId, packetId, inflight);
-                    return;
-                }
-                if (entry.qos2State() == Qos2State.WAIT_PUBCOMP) {
-                    channel.writeAndFlush(buildPubRelMessage(packetId));
-                } else {
-                    channel.writeAndFlush(buildQos2PublishMessage(entry.topic(), entry.payload(), packetId, true));
-                }
-                OutboundInflightMessage retried = entry.nextQos2Retry(now);
-                putOutboundInflight(clientId, packetId, retried, inflight);
-            });
-            if (inflight.isEmpty()) {
-                outboundInflightByClient.remove(clientId, inflight);
-            }
-        });
-    }
-
-    private void retryPendingRetainedCommands() {
-        if (pendingRetainedCommands.isEmpty()) {
-            return;
-        }
-        pendingRetainedCommands.forEach((topic, command) -> {
-            long committed = metadataCommandGateway.submit(command);
-            if (committed >= 0) {
-                pendingRetainedCommands.remove(topic, command);
-            }
-        });
-    }
-
-    private void restoreInflightState(String clientId, boolean sessionPresent, Channel channel) {
-        if (clientId == null || clientId.isBlank()) {
-            return;
-        }
-        if (!sessionPresent) {
-            qos1InflightStore.removeClient(clientId);
-            qos2InflightStore.removeInboundClient(clientId);
-            qos2InflightStore.removeOutboundClient(clientId);
-            outboundPacketIdByClient.remove(clientId);
-            outboundInflightByClient.remove(clientId);
-            inboundQos2ByClient.remove(clientId);
-            return;
-        }
-        restoreInboundQos2State(clientId);
-        restoreOutboundInflightState(clientId, channel);
-    }
-
-    private void restoreOutboundInflightState(String clientId, Channel channel) {
-        ConcurrentMap<Integer, OutboundInflightMessage> inflight = new ConcurrentHashMap<>();
-        int maxPacketId = 0;
-        long now = System.currentTimeMillis();
-        for (Qos1InflightMessage message : qos1InflightStore.listByClient(clientId)) {
-            if (message == null || message.packetId() <= 0 || message.topic() == null || message.topic().isBlank()) {
-                continue;
-            }
-            byte[] payload = message.payload() == null ? new byte[0] : message.payload().clone();
-            OutboundInflightMessage restored = OutboundInflightMessage.qos1(
-                message.topic(), payload, now, Math.max(0, message.retryCount()));
-            putOutboundInflight(clientId, message.packetId(), restored, inflight);
-            maxPacketId = Math.max(maxPacketId, message.packetId());
-            if (channel != null && channel.isActive()) {
-                channel.writeAndFlush(buildQos1PublishMessage(restored.topic(), restored.payload(), message.packetId(), true));
-            }
-        }
-        for (Qos2OutboundInflightMessage message : qos2InflightStore.listOutbound(clientId)) {
-            if (message == null || message.packetId() <= 0 || message.topic() == null || message.topic().isBlank()) {
-                continue;
-            }
-            Qos2State state = Qos2State.fromCode(message.state());
-            byte[] payload = message.payload() == null ? new byte[0] : message.payload().clone();
-            OutboundInflightMessage restored = OutboundInflightMessage.qos2(message.topic(), payload, state, now);
-            putOutboundInflight(clientId, message.packetId(), restored, inflight);
-            maxPacketId = Math.max(maxPacketId, message.packetId());
-            if (channel != null && channel.isActive()) {
-                if (state == Qos2State.WAIT_PUBREC) {
-                    channel.writeAndFlush(buildQos2PublishMessage(restored.topic(), restored.payload(), message.packetId(), true));
-                } else {
-                    channel.writeAndFlush(buildPubRelMessage(message.packetId()));
-                }
-            }
-        }
-        if (inflight.isEmpty()) {
-            outboundPacketIdByClient.remove(clientId);
-            outboundInflightByClient.remove(clientId);
-            return;
-        }
-        outboundInflightByClient.put(clientId, inflight);
-        if (maxPacketId > 0) {
-            int restoredMaxPacketId = maxPacketId;
-            AtomicInteger sequence = outboundPacketIdByClient.computeIfAbsent(clientId, ignored -> new AtomicInteger(0));
-            sequence.updateAndGet(current -> Math.max(current, restoredMaxPacketId));
-        }
-    }
-
-    private void restoreInboundQos2State(String clientId) {
-        ConcurrentMap<Integer, InboundQos2Publish> inbound = new ConcurrentHashMap<>();
-        for (Qos2InboundInflightMessage message : qos2InflightStore.listInbound(clientId)) {
-            if (message == null || message.packetId() <= 0 || message.topic() == null || message.topic().isBlank()) {
-                continue;
-            }
-            inbound.put(message.packetId(), new InboundQos2Publish(
-                message.topic(),
-                message.payload() == null ? new byte[0] : message.payload().clone(),
-                message.retain()
-            ));
-        }
-        if (inbound.isEmpty()) {
-            inboundQos2ByClient.remove(clientId);
-            return;
-        }
-        inboundQos2ByClient.put(clientId, inbound);
-    }
-
-    private boolean hasPersistedSessionState(String clientId) {
-        if (clientId == null || clientId.isBlank()) {
-            return false;
-        }
-        if (!subscriptionRegistry.findSubscriptions(clientId).isEmpty()) {
+        String limitedType = rateLimiter.checkPublish(clientId, resolveClientIp(ctx.channel()), now);
+        if (limitedType != null) {
+            handleRateLimitedPublish(ctx, clientId, limitedType, qos, packetId, topic);
             return true;
         }
-        if (qos1InflightStore.maxPacketId(clientId) > 0) {
+        return false;
+    }
+
+    private void handleRateLimitedPublish(
+            ChannelHandlerContext ctx,
+            String clientId,
+            String type,
+            int qos,
+            int packetId,
+            String topic
+    ) {
+        LOG.warning(() -> "[RATE_LIMIT] publish throttled type=" + type
+                + ", clientId=" + clientId + ", topic=" + topic + ", qos=" + qos);
+        if (qos == 1) {
+            ctx.writeAndFlush(MqttMessageBuilders.pubAck().packetId(packetId).build());
+            return;
+        }
+        if (qos == 2) {
+            ctx.writeAndFlush(MqttPacketFactory.buildPubRecMessage(packetId));
+        }
+    }
+
+    private void cleanupRateLimitState() {
+        rateLimiter.cleanupIfDue(System.currentTimeMillis());
+    }
+
+    private boolean isConnectRateLimited(ChannelHandlerContext ctx, boolean mqtt5) {
+        String limitedType = rateLimiter.checkConnect(resolveClientIp(ctx.channel()), System.currentTimeMillis());
+        if (limitedType != null) {
+            handleRateLimitedConnect(ctx, limitedType, mqtt5);
             return true;
         }
-        if (qos2InflightStore.maxOutboundPacketId(clientId) > 0) {
-            return true;
-        }
-        return !qos2InflightStore.listInbound(clientId).isEmpty();
+        return false;
+    }
+
+    private void handleRateLimitedConnect(ChannelHandlerContext ctx, String type, boolean mqtt5) {
+        LOG.warning(() -> "[RATE_LIMIT] connect throttled type=" + type + ", remote=" + ctx.channel().remoteAddress());
+        rejectConnection(ctx, MqttConnectReturnCode.CONNECTION_REFUSED_SERVER_UNAVAILABLE, mqtt5);
     }
 
     private String resolveServiceNodeIp(Channel channel) {

@@ -24,6 +24,15 @@ public class BrokerProperties {
     private String tlsCertChainFile = "";
     private String tlsPrivateKeyFile = "";
     private String tlsPrivateKeyPassword = "";
+    private boolean rateLimitClientIdEnabled = false;
+    private int rateLimitClientIdPerSecond = 0;
+    private boolean rateLimitIpEnabled = false;
+    private int rateLimitIpPerSecond = 0;
+    private boolean rateLimitConnectEnabled = false;
+    private int rateLimitConnectGlobalPerSecond = 0;
+    private int rateLimitConnectIpPerSecond = 0;
+    private int rateLimitCleanupIntervalSeconds = 60;
+    private int rateLimitIdleSeconds = 300;
 
     public String getHost() {
         return host;
@@ -175,5 +184,77 @@ public class BrokerProperties {
 
     public void setTlsPrivateKeyPassword(String tlsPrivateKeyPassword) {
         this.tlsPrivateKeyPassword = tlsPrivateKeyPassword;
+    }
+
+    public boolean isRateLimitClientIdEnabled() {
+        return rateLimitClientIdEnabled;
+    }
+
+    public void setRateLimitClientIdEnabled(boolean rateLimitClientIdEnabled) {
+        this.rateLimitClientIdEnabled = rateLimitClientIdEnabled;
+    }
+
+    public int getRateLimitClientIdPerSecond() {
+        return rateLimitClientIdPerSecond;
+    }
+
+    public void setRateLimitClientIdPerSecond(int rateLimitClientIdPerSecond) {
+        this.rateLimitClientIdPerSecond = rateLimitClientIdPerSecond;
+    }
+
+    public boolean isRateLimitIpEnabled() {
+        return rateLimitIpEnabled;
+    }
+
+    public void setRateLimitIpEnabled(boolean rateLimitIpEnabled) {
+        this.rateLimitIpEnabled = rateLimitIpEnabled;
+    }
+
+    public int getRateLimitIpPerSecond() {
+        return rateLimitIpPerSecond;
+    }
+
+    public void setRateLimitIpPerSecond(int rateLimitIpPerSecond) {
+        this.rateLimitIpPerSecond = rateLimitIpPerSecond;
+    }
+
+    public boolean isRateLimitConnectEnabled() {
+        return rateLimitConnectEnabled;
+    }
+
+    public void setRateLimitConnectEnabled(boolean rateLimitConnectEnabled) {
+        this.rateLimitConnectEnabled = rateLimitConnectEnabled;
+    }
+
+    public int getRateLimitConnectGlobalPerSecond() {
+        return rateLimitConnectGlobalPerSecond;
+    }
+
+    public void setRateLimitConnectGlobalPerSecond(int rateLimitConnectGlobalPerSecond) {
+        this.rateLimitConnectGlobalPerSecond = rateLimitConnectGlobalPerSecond;
+    }
+
+    public int getRateLimitConnectIpPerSecond() {
+        return rateLimitConnectIpPerSecond;
+    }
+
+    public void setRateLimitConnectIpPerSecond(int rateLimitConnectIpPerSecond) {
+        this.rateLimitConnectIpPerSecond = rateLimitConnectIpPerSecond;
+    }
+
+    public int getRateLimitCleanupIntervalSeconds() {
+        return rateLimitCleanupIntervalSeconds;
+    }
+
+    public void setRateLimitCleanupIntervalSeconds(int rateLimitCleanupIntervalSeconds) {
+        this.rateLimitCleanupIntervalSeconds = rateLimitCleanupIntervalSeconds;
+    }
+
+    public int getRateLimitIdleSeconds() {
+        return rateLimitIdleSeconds;
+    }
+
+    public void setRateLimitIdleSeconds(int rateLimitIdleSeconds) {
+        this.rateLimitIdleSeconds = rateLimitIdleSeconds;
     }
 }

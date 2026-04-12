@@ -12,6 +12,7 @@ import com.jmqx.auth.AuthProviderFactory;
 import com.jmqx.auth.AuthRequest;
 import com.jmqx.auth.ReloadableAuthProvider;
 import com.jmqx.broker.ClusterMessageDispatcher;
+import com.jmqx.broker.BrokerRateLimitConfig;
 import com.jmqx.broker.MqttBrokerMessageHandler;
 import com.jmqx.bridge.BridgeProperties;
 import com.jmqx.bridge.MessageBridge;
@@ -275,7 +276,18 @@ public class JmqxApplication {
                 clusterMessageDispatcher,
                 adminReporter,
                 context.adminSyncSettings().clusterId(),
-                context.bridgeProperties().getTopicFilters()
+                context.bridgeProperties().getTopicFilters(),
+                BrokerRateLimitConfig.of(
+                        context.brokerProperties().isRateLimitClientIdEnabled(),
+                        context.brokerProperties().getRateLimitClientIdPerSecond(),
+                        context.brokerProperties().isRateLimitIpEnabled(),
+                        context.brokerProperties().getRateLimitIpPerSecond(),
+                        context.brokerProperties().isRateLimitConnectEnabled(),
+                        context.brokerProperties().getRateLimitConnectGlobalPerSecond(),
+                        context.brokerProperties().getRateLimitConnectIpPerSecond(),
+                        context.brokerProperties().getRateLimitCleanupIntervalSeconds(),
+                        context.brokerProperties().getRateLimitIdleSeconds()
+                )
         );
         // 绑定集群入站消息回调：收到跨节点消息后交给 Broker 路由。
         clusterMessageTransport.setMessageConsumer(
@@ -451,6 +463,15 @@ public class JmqxApplication {
         System.out.println("BRIDGE enabled=" + context.bridgeProperties().isEnabled()
                 + ", types=" + context.bridgeProperties().getTypes()
                 + ", topicFilters=" + context.bridgeProperties().getTopicFilters());
+        System.out.println("RATE_LIMIT clientIdEnabled=" + brokerProperties.isRateLimitClientIdEnabled()
+                + ", clientIdPerSecond=" + brokerProperties.getRateLimitClientIdPerSecond()
+                + ", ipEnabled=" + brokerProperties.isRateLimitIpEnabled()
+                + ", ipPerSecond=" + brokerProperties.getRateLimitIpPerSecond()
+                + ", connectEnabled=" + brokerProperties.isRateLimitConnectEnabled()
+                + ", connectGlobalPerSecond=" + brokerProperties.getRateLimitConnectGlobalPerSecond()
+                + ", connectIpPerSecond=" + brokerProperties.getRateLimitConnectIpPerSecond()
+                + ", cleanupIntervalSeconds=" + brokerProperties.getRateLimitCleanupIntervalSeconds()
+                + ", idleSeconds=" + brokerProperties.getRateLimitIdleSeconds());
         System.out.println("RETAINED maxEntries=" + context.retainedStoreProperties().getMaxEntries()
                 + ", maxBytes=" + context.retainedStoreProperties().getMaxBytes()
                 + ", maxPayloadBytes=" + context.retainedStoreProperties().getMaxPayloadBytes()
@@ -646,6 +667,51 @@ public class JmqxApplication {
                 config,
                 "jmqx.broker.tls.privateKeyPassword",
                 properties.getTlsPrivateKeyPassword()
+        ));
+        properties.setRateLimitClientIdEnabled(getBooleanProperty(
+                config,
+                "jmqx.broker.rateLimit.clientId.enabled",
+                properties.isRateLimitClientIdEnabled()
+        ));
+        properties.setRateLimitClientIdPerSecond(getIntProperty(
+                config,
+                "jmqx.broker.rateLimit.clientId.perSecond",
+                properties.getRateLimitClientIdPerSecond()
+        ));
+        properties.setRateLimitIpEnabled(getBooleanProperty(
+                config,
+                "jmqx.broker.rateLimit.ip.enabled",
+                properties.isRateLimitIpEnabled()
+        ));
+        properties.setRateLimitIpPerSecond(getIntProperty(
+                config,
+                "jmqx.broker.rateLimit.ip.perSecond",
+                properties.getRateLimitIpPerSecond()
+        ));
+        properties.setRateLimitConnectEnabled(getBooleanProperty(
+                config,
+                "jmqx.broker.rateLimit.connect.enabled",
+                properties.isRateLimitConnectEnabled()
+        ));
+        properties.setRateLimitConnectGlobalPerSecond(getIntProperty(
+                config,
+                "jmqx.broker.rateLimit.connect.globalPerSecond",
+                properties.getRateLimitConnectGlobalPerSecond()
+        ));
+        properties.setRateLimitConnectIpPerSecond(getIntProperty(
+                config,
+                "jmqx.broker.rateLimit.connect.ipPerSecond",
+                properties.getRateLimitConnectIpPerSecond()
+        ));
+        properties.setRateLimitCleanupIntervalSeconds(getIntProperty(
+                config,
+                "jmqx.broker.rateLimit.cleanupIntervalSeconds",
+                properties.getRateLimitCleanupIntervalSeconds()
+        ));
+        properties.setRateLimitIdleSeconds(getIntProperty(
+                config,
+                "jmqx.broker.rateLimit.idleSeconds",
+                properties.getRateLimitIdleSeconds()
         ));
         return properties;
     }

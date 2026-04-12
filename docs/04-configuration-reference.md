@@ -38,6 +38,15 @@
 | `jmqx.broker.wss.host` | `0.0.0.0` | WSS 监听地址 |
 | `jmqx.broker.wss.port` | `8084` | WSS 监听端口 |
 | `jmqx.broker.wss.path` | `/mqtt` | WSS 握手路径 |
+| `jmqx.broker.rateLimit.clientId.enabled` | `false` | 是否启用按 clientId 限流 |
+| `jmqx.broker.rateLimit.clientId.perSecond` | `0` | 按 clientId 每秒 PUBLISH 限额（`0` 表示关闭） |
+| `jmqx.broker.rateLimit.ip.enabled` | `false` | 是否启用按 IP 限流 |
+| `jmqx.broker.rateLimit.ip.perSecond` | `0` | 按 IP 每秒 PUBLISH 限额（`0` 表示关闭） |
+| `jmqx.broker.rateLimit.connect.enabled` | `false` | 是否启用 CONNECT 限流 |
+| `jmqx.broker.rateLimit.connect.globalPerSecond` | `0` | 全局每秒 CONNECT 限额（`0` 表示关闭） |
+| `jmqx.broker.rateLimit.connect.ipPerSecond` | `0` | 单 IP 每秒 CONNECT 限额（`0` 表示关闭） |
+| `jmqx.broker.rateLimit.cleanupIntervalSeconds` | `60` | 限流状态清理周期（秒） |
+| `jmqx.broker.rateLimit.idleSeconds` | `300` | 限流键空闲清理阈值（秒） |
 
 TLS 配置：
 

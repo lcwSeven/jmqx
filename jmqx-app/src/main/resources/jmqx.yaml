@@ -13,6 +13,17 @@
 #     port: 1883
 #     websocket:
 #       port: 8083
+#     rateLimit:
+#       clientId:
+#         enabled: true
+#         perSecond: 300
+#       ip:
+#         enabled: false
+#         perSecond: 0
+#       connect:
+#         enabled: true
+#         globalPerSecond: 200
+#         ipPerSecond: 20
 #   auth:
 #     type: allow_all
 #   acl:

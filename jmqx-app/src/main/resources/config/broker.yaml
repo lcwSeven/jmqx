@@ -31,3 +31,21 @@ jmqx:
       certChainFile: ""
       privateKeyFile: ""
       privateKeyPassword: ""
+    # Publish rate limit (per second), can be enabled by clientId and/or IP.
+    rateLimit:
+      # PUBLISH throttling by clientId.
+      clientId:
+        enabled: false
+        perSecond: 0
+      # PUBLISH throttling by source IP.
+      ip:
+        enabled: false
+        perSecond: 0
+      # CONNECT throttling for restart/reconnect storms.
+      connect:
+        enabled: false
+        globalPerSecond: 0
+        ipPerSecond: 0
+      # Rate-limit state cleanup/eviction controls.
+      cleanupIntervalSeconds: 60
+      idleSeconds: 300

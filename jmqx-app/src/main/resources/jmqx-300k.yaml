@@ -14,6 +14,17 @@ jmqx:
     bossThreads: 1
     workerThreads: 0
     readerIdleSeconds: 180
+    rateLimit:
+      clientId:
+        enabled: false
+        perSecond: 0
+      ip:
+        enabled: false
+        perSecond: 0
+      connect:
+        enabled: false
+        globalPerSecond: 0
+        ipPerSecond: 0
 
   retained:
     enabled: false
