@@ -1,4 +1,4 @@
-package com.jmqx.broker;
+package com.jmqx.broker.ratelimit;
 
 import java.util.ArrayDeque;
 import java.util.Map;

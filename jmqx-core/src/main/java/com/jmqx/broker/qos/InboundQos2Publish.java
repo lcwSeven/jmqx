@@ -1,4 +1,4 @@
-package com.jmqx.broker;
+package com.jmqx.broker.qos;
 
 /**
  * QoS2 上行阶段暂存消息（等待 PUBREL）。

@@ -1,4 +1,4 @@
-package com.jmqx.broker;
+package com.jmqx.broker.ratelimit;
 
 /**
  * 限流策略接口。

@@ -1,4 +1,4 @@
-package com.jmqx.broker;
+package com.jmqx.broker.ratelimit;
 
 /**
  * Broker 限流配置快照。

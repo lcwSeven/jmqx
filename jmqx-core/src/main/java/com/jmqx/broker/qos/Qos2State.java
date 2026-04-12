@@ -1,4 +1,4 @@
-package com.jmqx.broker;
+package com.jmqx.broker.qos;
 
 /**
  * QoS2 下行消息状态机阶段。

@@ -1,4 +1,4 @@
-package com.jmqx.broker;
+package com.jmqx.broker.ratelimit;
 
 /**
  * MQTT Broker 连接/发布限流控制器。

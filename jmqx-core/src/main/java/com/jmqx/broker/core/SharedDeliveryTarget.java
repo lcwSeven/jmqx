@@ -1,4 +1,4 @@
-package com.jmqx.broker;
+package com.jmqx.broker.core;
 
 /**
  * 共享订阅投递目标：

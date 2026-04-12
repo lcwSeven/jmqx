@@ -1,4 +1,4 @@
-package com.jmqx.broker;
+package com.jmqx.broker.qos;
 
 import io.netty.handler.codec.mqtt.MqttQoS;
 

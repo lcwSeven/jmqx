@@ -1,5 +1,6 @@
-package com.jmqx.broker;
+package com.jmqx.broker.qos;
 
+import com.jmqx.broker.protocol.MqttPacketFactory;
 import com.jmqx.router.SubscriptionRegistry;
 import com.jmqx.session.ClientSession;
 import com.jmqx.session.SessionRegistry;

@@ -1,4 +1,4 @@
-package com.jmqx.broker;
+package com.jmqx.broker.protocol;
 
 import io.netty.buffer.Unpooled;
 import io.netty.handler.codec.mqtt.MqttFixedHeader;

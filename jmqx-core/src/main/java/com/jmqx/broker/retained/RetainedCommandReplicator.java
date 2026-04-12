@@ -1,4 +1,4 @@
-package com.jmqx.broker;
+package com.jmqx.broker.retained;
 
 import com.jmqx.cluster.MetadataCommand;
 import com.jmqx.cluster.MetadataCommandGateway;

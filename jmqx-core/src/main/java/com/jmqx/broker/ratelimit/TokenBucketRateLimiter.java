@@ -1,4 +1,4 @@
-package com.jmqx.broker;
+package com.jmqx.broker.ratelimit;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;

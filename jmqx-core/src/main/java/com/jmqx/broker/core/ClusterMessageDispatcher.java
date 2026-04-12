@@ -1,4 +1,4 @@
-package com.jmqx.broker;
+package com.jmqx.broker.core;
 
 import java.util.Collections;
 import java.util.LinkedHashSet;

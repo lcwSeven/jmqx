@@ -1,4 +1,4 @@
-package com.jmqx.broker;
+package com.jmqx.broker.core;
 
 /**
  * 连接建立时缓存的遗嘱消息。
