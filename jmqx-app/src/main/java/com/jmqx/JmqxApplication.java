@@ -282,9 +282,11 @@ public class JmqxApplication {
                         context.brokerProperties().getRateLimitClientIdPerSecond(),
                         context.brokerProperties().isRateLimitIpEnabled(),
                         context.brokerProperties().getRateLimitIpPerSecond(),
+                        context.brokerProperties().getRateLimitPublishStrategy(),
                         context.brokerProperties().isRateLimitConnectEnabled(),
                         context.brokerProperties().getRateLimitConnectGlobalPerSecond(),
                         context.brokerProperties().getRateLimitConnectIpPerSecond(),
+                        context.brokerProperties().getRateLimitConnectStrategy(),
                         context.brokerProperties().getRateLimitCleanupIntervalSeconds(),
                         context.brokerProperties().getRateLimitIdleSeconds()
                 )
@@ -688,6 +690,11 @@ public class JmqxApplication {
                 "jmqx.broker.rateLimit.ip.perSecond",
                 properties.getRateLimitIpPerSecond()
         ));
+        properties.setRateLimitPublishStrategy(getStringProperty(
+                config,
+                "jmqx.broker.rateLimit.publish.strategy",
+                properties.getRateLimitPublishStrategy()
+        ));
         properties.setRateLimitConnectEnabled(getBooleanProperty(
                 config,
                 "jmqx.broker.rateLimit.connect.enabled",
@@ -702,6 +709,11 @@ public class JmqxApplication {
                 config,
                 "jmqx.broker.rateLimit.connect.ipPerSecond",
                 properties.getRateLimitConnectIpPerSecond()
+        ));
+        properties.setRateLimitConnectStrategy(getStringProperty(
+                config,
+                "jmqx.broker.rateLimit.connect.strategy",
+                properties.getRateLimitConnectStrategy()
         ));
         properties.setRateLimitCleanupIntervalSeconds(getIntProperty(
                 config,

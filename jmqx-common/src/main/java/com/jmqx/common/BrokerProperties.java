@@ -28,9 +28,11 @@ public class BrokerProperties {
     private int rateLimitClientIdPerSecond = 0;
     private boolean rateLimitIpEnabled = false;
     private int rateLimitIpPerSecond = 0;
+    private String rateLimitPublishStrategy = "fixed_window";
     private boolean rateLimitConnectEnabled = false;
     private int rateLimitConnectGlobalPerSecond = 0;
     private int rateLimitConnectIpPerSecond = 0;
+    private String rateLimitConnectStrategy = "fixed_window";
     private int rateLimitCleanupIntervalSeconds = 60;
     private int rateLimitIdleSeconds = 300;
 
@@ -218,6 +220,14 @@ public class BrokerProperties {
         this.rateLimitIpPerSecond = rateLimitIpPerSecond;
     }
 
+    public String getRateLimitPublishStrategy() {
+        return rateLimitPublishStrategy;
+    }
+
+    public void setRateLimitPublishStrategy(String rateLimitPublishStrategy) {
+        this.rateLimitPublishStrategy = rateLimitPublishStrategy;
+    }
+
     public boolean isRateLimitConnectEnabled() {
         return rateLimitConnectEnabled;
     }
@@ -240,6 +250,14 @@ public class BrokerProperties {
 
     public void setRateLimitConnectIpPerSecond(int rateLimitConnectIpPerSecond) {
         this.rateLimitConnectIpPerSecond = rateLimitConnectIpPerSecond;
+    }
+
+    public String getRateLimitConnectStrategy() {
+        return rateLimitConnectStrategy;
+    }
+
+    public void setRateLimitConnectStrategy(String rateLimitConnectStrategy) {
+        this.rateLimitConnectStrategy = rateLimitConnectStrategy;
     }
 
     public int getRateLimitCleanupIntervalSeconds() {

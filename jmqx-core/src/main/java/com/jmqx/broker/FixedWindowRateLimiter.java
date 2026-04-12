@@ -9,7 +9,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * @author liucaiwen
  * @date 2026/4/12
  */
-public class FixedWindowRateLimiter {
+public class FixedWindowRateLimiter implements RateLimitStrategy {
     private final int limitPerSecond;
     private final long idleEvictMs;
     private final ConcurrentHashMap<String, Counter> counters = new ConcurrentHashMap<>();
@@ -24,6 +24,7 @@ public class FixedWindowRateLimiter {
      *
      * @return true=通过，false=超限
      */
+    @Override
     public boolean tryAcquire(String key, long nowMs) {
         if (limitPerSecond <= 0) {
             return true;
@@ -50,6 +51,7 @@ public class FixedWindowRateLimiter {
     /**
      * 清理长时间未访问的 key，避免 map 持续膨胀。
      */
+    @Override
     public void cleanup(long nowMs) {
         for (Map.Entry<String, Counter> entry : counters.entrySet()) {
             Counter counter = entry.getValue();

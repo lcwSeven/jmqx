@@ -41,11 +41,16 @@ jmqx:
       ip:
         enabled: false
         perSecond: 0
+      # PUBLISH limit algorithm: fixed_window / sliding_window / token_bucket.
+      publish:
+        strategy: fixed_window
       # CONNECT throttling for restart/reconnect storms.
       connect:
         enabled: false
         globalPerSecond: 0
         ipPerSecond: 0
+        # CONNECT limit algorithm: fixed_window / sliding_window / token_bucket.
+        strategy: fixed_window
       # Rate-limit state cleanup/eviction controls.
       cleanupIntervalSeconds: 60
       idleSeconds: 300

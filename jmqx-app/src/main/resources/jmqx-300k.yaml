@@ -21,10 +21,13 @@ jmqx:
       ip:
         enabled: false
         perSecond: 0
+      publish:
+        strategy: fixed_window
       connect:
         enabled: false
         globalPerSecond: 0
         ipPerSecond: 0
+        strategy: fixed_window
 
   retained:
     enabled: false

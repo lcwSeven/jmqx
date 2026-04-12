@@ -20,10 +20,13 @@
 #       ip:
 #         enabled: false
 #         perSecond: 0
+#       publish:
+#         strategy: fixed_window
 #       connect:
 #         enabled: true
 #         globalPerSecond: 200
 #         ipPerSecond: 20
+#         strategy: fixed_window
 #   auth:
 #     type: allow_all
 #   acl:

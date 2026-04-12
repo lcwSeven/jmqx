@@ -42,9 +42,11 @@
 | `jmqx.broker.rateLimit.clientId.perSecond` | `0` | 按 clientId 每秒 PUBLISH 限额（`0` 表示关闭） |
 | `jmqx.broker.rateLimit.ip.enabled` | `false` | 是否启用按 IP 限流 |
 | `jmqx.broker.rateLimit.ip.perSecond` | `0` | 按 IP 每秒 PUBLISH 限额（`0` 表示关闭） |
+| `jmqx.broker.rateLimit.publish.strategy` | `fixed_window` | PUBLISH 限流策略：`fixed_window` / `sliding_window` / `token_bucket` |
 | `jmqx.broker.rateLimit.connect.enabled` | `false` | 是否启用 CONNECT 限流 |
 | `jmqx.broker.rateLimit.connect.globalPerSecond` | `0` | 全局每秒 CONNECT 限额（`0` 表示关闭） |
 | `jmqx.broker.rateLimit.connect.ipPerSecond` | `0` | 单 IP 每秒 CONNECT 限额（`0` 表示关闭） |
+| `jmqx.broker.rateLimit.connect.strategy` | `fixed_window` | CONNECT 限流策略：`fixed_window` / `sliding_window` / `token_bucket` |
 | `jmqx.broker.rateLimit.cleanupIntervalSeconds` | `60` | 限流状态清理周期（秒） |
 | `jmqx.broker.rateLimit.idleSeconds` | `300` | 限流键空闲清理阈值（秒） |
 

@@ -11,9 +11,11 @@ public record BrokerRateLimitConfig(
         int publishClientIdPerSecond,
         boolean publishIpEnabled,
         int publishIpPerSecond,
+        String publishStrategy,
         boolean connectEnabled,
         int connectGlobalPerSecond,
         int connectIpPerSecond,
+        String connectStrategy,
         int cleanupIntervalSeconds,
         int idleSeconds
 ) {
@@ -22,9 +24,11 @@ public record BrokerRateLimitConfig(
             int publishClientIdPerSecond,
             boolean publishIpEnabled,
             int publishIpPerSecond,
+            String publishStrategy,
             boolean connectEnabled,
             int connectGlobalPerSecond,
             int connectIpPerSecond,
+            String connectStrategy,
             int cleanupIntervalSeconds,
             int idleSeconds
     ) {
@@ -33,9 +37,11 @@ public record BrokerRateLimitConfig(
                 publishClientIdPerSecond,
                 publishIpEnabled,
                 publishIpPerSecond,
+                publishStrategy,
                 connectEnabled,
                 connectGlobalPerSecond,
                 connectIpPerSecond,
+                connectStrategy,
                 cleanupIntervalSeconds,
                 idleSeconds
         );
