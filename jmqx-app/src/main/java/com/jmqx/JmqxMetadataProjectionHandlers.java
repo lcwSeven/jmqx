@@ -5,8 +5,11 @@ import com.jmqx.cluster.MetadataCommand;
 import com.jmqx.router.global.GlobalSubscriptionEvent;
 import com.jmqx.router.global.GlobalSubscriptionRegistry;
 import com.jmqx.session.SessionRegistry;
+import com.jmqx.store.RetainedMessage;
+import com.jmqx.store.RetainedMessageStore;
 import io.netty.util.AttributeKey;
 
+import java.util.Base64;
 import java.util.logging.Logger;
 
 /**
@@ -19,17 +22,22 @@ import java.util.logging.Logger;
 public class JmqxMetadataProjectionHandlers {
     private static final Logger LOG = Logger.getLogger(JmqxMetadataProjectionHandlers.class.getName());
     private static final String OP_ONLINE = "online";
+    private static final String OP_RETAINED_UPSERT = "upsert";
+    private static final String OP_RETAINED_REMOVE = "remove";
     private static final AttributeKey<Boolean> GRACEFUL_DISCONNECT = AttributeKey.valueOf("jmqx.gracefulDisconnect");
 
     private final GlobalSubscriptionRegistry globalSubscriptionRegistry;
     private final SessionRegistry sessionRegistry;
+    private final RetainedMessageStore retainedMessageStore;
 
     public JmqxMetadataProjectionHandlers(
             GlobalSubscriptionRegistry globalSubscriptionRegistry,
-            SessionRegistry sessionRegistry
+            SessionRegistry sessionRegistry,
+            RetainedMessageStore retainedMessageStore
     ) {
         this.globalSubscriptionRegistry = globalSubscriptionRegistry;
         this.sessionRegistry = sessionRegistry;
+        this.retainedMessageStore = retainedMessageStore;
     }
 
     /**
@@ -94,6 +102,48 @@ public class JmqxMetadataProjectionHandlers {
             LOG.info(() -> "[CLUSTER] kicked duplicated client session, clientId=" + clientId
                     + ", localNodeId=" + localNodeId + ", ownerNodeId=" + sourceNodeId);
         });
+    }
+
+    /**
+     * 应用 retained 命令，确保各节点 retained 存储一致。
+     */
+    public void applyRetainedCommand(long logIndex, String localNodeId, MetadataCommand command) {
+        if (retainedMessageStore == null || command == null) {
+            return;
+        }
+        if (!ClusterMetadataCommandApplier.RETAINED_NAMESPACE.equals(command.namespace())) {
+            return;
+        }
+        String topic = command.key();
+        if (topic == null || topic.isBlank()) {
+            return;
+        }
+        String operation = command.operation();
+        if (OP_RETAINED_REMOVE.equals(operation)) {
+            retainedMessageStore.saveOrRemove(new RetainedMessage(topic, new byte[0], 0, true));
+            return;
+        }
+        if (!OP_RETAINED_UPSERT.equals(operation)) {
+            return;
+        }
+        String value = command.value();
+        if (value == null || value.isBlank()) {
+            return;
+        }
+        int split = value.indexOf('|');
+        if (split <= 0 || split >= value.length() - 1) {
+            return;
+        }
+        int qos = (int) parseLong(value.substring(0, split), 0L);
+        String base64Payload = value.substring(split + 1);
+        byte[] payload;
+        try {
+            payload = Base64.getDecoder().decode(base64Payload);
+        } catch (IllegalArgumentException exception) {
+            LOG.warning("[CLUSTER] retained payload decode failed topic=" + topic + ", error=" + exception.getMessage());
+            return;
+        }
+        retainedMessageStore.saveOrRemove(new RetainedMessage(topic, payload, qos, true));
     }
 
     private static long parseLong(String value, long defaultValue) {

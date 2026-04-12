@@ -12,19 +12,23 @@ import java.util.Objects;
 public class ClusterMetadataCommandApplier {
     public static final String SUBSCRIPTION_NAMESPACE = "route.subscription";
     public static final String SESSION_NAMESPACE = "session.client";
+    public static final String RETAINED_NAMESPACE = "retained.message";
 
     private final String localNodeId;
     private final RouteSubscriptionCommandHandler routeHandler;
     private final ClientOnlineCommandHandler clientOnlineHandler;
+    private final RetainedCommandHandler retainedCommandHandler;
 
     public ClusterMetadataCommandApplier(
             String localNodeId,
             RouteSubscriptionCommandHandler routeHandler,
-            ClientOnlineCommandHandler clientOnlineHandler
+            ClientOnlineCommandHandler clientOnlineHandler,
+            RetainedCommandHandler retainedCommandHandler
     ) {
         this.localNodeId = localNodeId;
         this.routeHandler = Objects.requireNonNull(routeHandler, "routeHandler");
         this.clientOnlineHandler = Objects.requireNonNull(clientOnlineHandler, "clientOnlineHandler");
+        this.retainedCommandHandler = Objects.requireNonNull(retainedCommandHandler, "retainedCommandHandler");
     }
 
     /**
@@ -40,6 +44,10 @@ public class ClusterMetadataCommandApplier {
         }
         if (SESSION_NAMESPACE.equals(command.namespace())) {
             clientOnlineHandler.apply(localNodeId, command);
+            return;
+        }
+        if (RETAINED_NAMESPACE.equals(command.namespace())) {
+            retainedCommandHandler.apply(logIndex, localNodeId, command);
         }
     }
 
@@ -57,5 +65,13 @@ public class ClusterMetadataCommandApplier {
     @FunctionalInterface
     public interface ClientOnlineCommandHandler {
         void apply(String localNodeId, MetadataCommand command);
+    }
+
+    /**
+     * Retained 命令处理器。
+     */
+    @FunctionalInterface
+    public interface RetainedCommandHandler {
+        void apply(long logIndex, String localNodeId, MetadataCommand command);
     }
 }

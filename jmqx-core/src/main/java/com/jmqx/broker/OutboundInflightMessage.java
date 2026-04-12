@@ -36,4 +36,8 @@ public record OutboundInflightMessage(
     public OutboundInflightMessage nextQos1Retry(long sentAtMs) {
         return new OutboundInflightMessage(qos, topic, payload, qos2State, sentAtMs, retryCount + 1);
     }
+
+    public OutboundInflightMessage nextQos2Retry(long sentAtMs) {
+        return new OutboundInflightMessage(qos, topic, payload, qos2State, sentAtMs, retryCount + 1);
+    }
 }

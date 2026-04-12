@@ -65,7 +65,6 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -106,6 +105,9 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     private static final int MAX_PACKET_ID = 0xFFFF;
     private static final long QOS1_RETRY_INTERVAL_MS = 5000L;
     private static final int QOS1_MAX_RETRIES = 3;
+    private static final long QOS2_RETRY_INTERVAL_MS = 5000L;
+    private static final int QOS2_MAX_RETRIES = 5;
+    private static final long RETAINED_RETRY_INTERVAL_MS = 2000L;
 
     private final SessionRegistry sessionRegistry;
     private final SubscriptionRegistry subscriptionRegistry;
@@ -117,7 +119,6 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     private final SharedSubscriptionManager sharedSubscriptionManager;
     private final MessageBridge messageBridge;
     private final boolean retainedEnabled;
-    private final ExecutorService retainedStoreExecutor;
     private final GlobalSubscriptionRegistry globalSubscriptionRegistry;
     private final String nodeId;
     private final MetadataCommandGateway metadataCommandGateway;
@@ -129,6 +130,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     private final ConcurrentMap<String, AtomicInteger> outboundPacketIdByClient = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, ConcurrentMap<Integer, OutboundInflightMessage>> outboundInflightByClient = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, ConcurrentMap<Integer, InboundQos2Publish>> inboundQos2ByClient = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, MetadataCommand> pendingRetainedCommands = new ConcurrentHashMap<>();
     private final ScheduledExecutorService qos1RetryExecutor;
 
 
@@ -171,20 +173,15 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             ? "default"
             : dashboardClusterId.trim();
         this.bridgeTopicFilters = parseBridgeTopicFilters(bridgeTopicFilters);
-        this.retainedStoreExecutor = Executors.newSingleThreadExecutor(runnable -> {
-            Thread thread = new Thread(runnable, "jmqx-retained-store");
-            thread.setDaemon(true);
-            return thread;
-        });
         this.qos1RetryExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
             Thread thread = new Thread(runnable, "jmqx-qos1-retry");
             thread.setDaemon(true);
             return thread;
         });
         this.qos1RetryExecutor.scheduleAtFixedRate(
-            this::retryInflightQos1Messages,
-            QOS1_RETRY_INTERVAL_MS,
-            QOS1_RETRY_INTERVAL_MS,
+            this::runPeriodicMaintenance,
+            RETAINED_RETRY_INTERVAL_MS,
+            RETAINED_RETRY_INTERVAL_MS,
             TimeUnit.MILLISECONDS
         );
     }
@@ -348,27 +345,15 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             return;
         }
 
-        // 第四步：构建并注册会话对象，MQTT5 使用 cleanStart + sessionExpiry，MQTT3 兼容 cleanSession 语义。
+        // 第四步：解析会话参数，MQTT5 使用 cleanStart + sessionExpiry，MQTT3 兼容 cleanSession 语义。
         boolean cleanStart = message.variableHeader().isCleanSession();
         long sessionExpirySeconds = mqtt5
             ? resolveSessionExpiryIntervalSeconds(message)
             : (cleanStart ? SESSION_EXPIRY_IMMEDIATE : SESSION_EXPIRY_PERSISTENT);
         int keepAliveSeconds = Math.max(message.variableHeader().keepAliveTimeSeconds(), 0);
         String serviceNodeIp = resolveServiceNodeIp(ctx.channel());
+        String clientIp = resolveClientIp(ctx.channel());
         boolean sessionPresent = !cleanStart && hasPersistedSessionState(clientId);
-        sessionRegistry.register(new ClientSession(
-            clientId,
-            ctx.channel(),
-            connectionType,
-            cleanStart,
-            sessionExpirySeconds,
-            username,
-            serviceNodeIp,
-            keepAliveSeconds,
-            Instant.now()
-        ));
-        // 第四步补充：把“客户端已上线”写入集群元数据，其他节点据此清理同 clientId 旧连接。
-        applyGlobalClientOnlineAfterLocalConnect(clientId, System.currentTimeMillis());
         ctx.channel().attr(CLIENT_ID).set(clientId);
         ctx.channel().attr(CLEAN_START).set(cleanStart);
         ctx.channel().attr(GRACEFUL_DISCONNECT).set(false);
@@ -381,7 +366,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             ctx.channel().attr(WILL_MESSAGE).set(null);
         }
 
-        // 第六步：发送 CONNACK 成功回包，完成 MQTT CONNECT 握手。
+        // 第五步：发送 CONNACK 成功回包，完成 MQTT CONNECT 握手。
         if (mqtt5) {
             ctx.writeAndFlush(MqttMessageBuilders.connAck()
                     .sessionPresent(sessionPresent)
@@ -394,15 +379,31 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
                     .returnCode(MqttConnectReturnCode.CONNECTION_ACCEPTED)
                     .build());
         }
-        // CONNACK 成功后恢复 inflight 状态（QoS1/QoS2），避免违反 MQTT 报文时序。
-        restoreInflightState(clientId, sessionPresent);
-        // 第七步：发布系统事件到公共主题，供监控与管理台实时订阅。
+        // 第六步：在会话对外可见前恢复 inflight 状态，避免恢复窗口内 packetId 竞争。
+        restoreInflightState(clientId, sessionPresent, ctx.channel());
+
+        // 第七步：恢复完成后再注册会话并广播上线，形成稳定连接状态。
+        Instant connectedAt = Instant.now();
+        sessionRegistry.register(new ClientSession(
+            clientId,
+            ctx.channel(),
+            connectionType,
+            cleanStart,
+            sessionExpirySeconds,
+            username,
+            serviceNodeIp,
+            keepAliveSeconds,
+            connectedAt
+        ));
+        applyGlobalClientOnlineAfterLocalConnect(clientId, connectedAt.toEpochMilli());
+
+        // 第八步：发布系统事件到公共主题，供监控与管理台实时订阅。
         publishClientLifecycleEvent(
             TOPIC_CLIENT_CONNECTED,
             dashboardClusterId,
             nodeId,
             clientId,
-            resolveClientIp(ctx.channel()),
+            clientIp,
             username,
             connectionType,
             serviceNodeIp,
@@ -414,22 +415,22 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             dashboardClusterId,
             nodeId,
             clientId,
-            resolveClientIp(ctx.channel()),
+            clientIp,
             username,
             connectionType,
             serviceNodeIp,
             keepAliveSeconds,
             "connected"
         );
-        // 第八步：刷新管理台会话视图，确保客户端列表可见最新连接信息。
+        // 第九步：刷新管理台会话视图，确保客户端列表可见最新连接信息。
         adminReporter.upsertClientSession(
             clientId,
             nodeId,
-            resolveClientIp(ctx.channel()),
+            clientIp,
             keepAliveSeconds,
             connectionType,
             username,
-            Instant.now().toEpochMilli()
+            connectedAt.toEpochMilli()
         );
         syncClientSubscriptionsForAdmin(clientId);
         if (LOG.isLoggable(Level.FINE)) {
@@ -780,13 +781,17 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         if (!retainedEnabled) {
             return;
         }
-        // 元数据提交成功时，集群同步成功时，忽略本地写。
-        boolean replicated = submitRetainedCommand(topic, payload, qos);
-        if (replicated) {
+        MetadataCommand command = buildRetainedCommand(topic, payload, qos);
+        if (command == null) {
             return;
         }
-        // 元数据提交失败时兜底本地写，避免丢 retained。
-        submitRetainedAsync(topic, payload, qos);
+        // 优先通过集群元数据通道提交，确保 retained 在所有节点按同一日志顺序生效。
+        if (submitRetainedCommand(command)) {
+            pendingRetainedCommands.remove(topic);
+            return;
+        }
+        // 提交失败时进入待重试队列，不做本地兜底写，避免节点间 retained 视图不一致。
+        pendingRetainedCommands.put(topic, command);
     }
 
     /**
@@ -1267,66 +1272,47 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         LOG.warning(() -> "[CLUSTER] metadata submit failed, skip session-online apply, clientId=" + clientId);
     }
 
-    /**
-     * 提交保留消息
-     * @param topic topic
-     * @param payload payload
-     * @param qos qos
-     */
-    private void submitRetainedAsync(String topic, byte[] payload, int qos) {
-        // 关闭 retain 能力时直接返回。
-        if (!retainedEnabled) {
-            return;
-        }
-        byte[] payloadCopy = payload == null ? new byte[0] : payload.clone();
-        // 通过单线程后台队列串行写入 retained 存储。
-        retainedStoreExecutor.execute(() -> {
-            try {
-                retainedMessageStore.saveOrRemove(new RetainedMessage(topic, payloadCopy, qos, true));
-            } catch (Exception e) {
-                LOG.warning("[RETAINED] async save/remove failed topic=" + topic + ", error=" + e.getMessage());
-            }
-        });
-    }
-
-    private boolean submitRetainedCommand(String topic, byte[] payload, int qos) {
+    private MetadataCommand buildRetainedCommand(String topic, byte[] payload, int qos) {
         if (topic == null || topic.isBlank()) {
-            return false;
+            return null;
         }
         byte[] safePayload = payload == null ? new byte[0] : payload;
         String operation = safePayload.length == 0 ? OP_RETAINED_REMOVE : OP_RETAINED_UPSERT;
         String value = safePayload.length == 0
             ? null
             : qos + "|" + Base64.getEncoder().encodeToString(safePayload);
-        long committedIndex = metadataCommandGateway.submit(new MetadataCommand(
+        return new MetadataCommand(
             RETAINED_NAMESPACE,
             operation,
             topic,
             value,
             nodeId
-        ));
+        );
+    }
+
+    private boolean submitRetainedCommand(MetadataCommand command) {
+        if (command == null) {
+            return false;
+        }
+        long committedIndex = metadataCommandGateway.submit(command);
         if (committedIndex >= 0) {
             return true;
         }
-        LOG.warning(() -> "[CLUSTER] retained metadata submit failed, topic=" + topic + ", operation=" + operation);
+        LOG.warning(() -> "[CLUSTER] retained metadata submit failed, topic=" + command.key()
+            + ", operation=" + command.operation());
         return false;
     }
 
     public void shutdown() {
         adminReporter.shutdown();
         qos1RetryExecutor.shutdown();
-        retainedStoreExecutor.shutdown();
         try {
             if (!qos1RetryExecutor.awaitTermination(3, TimeUnit.SECONDS)) {
                 qos1RetryExecutor.shutdownNow();
             }
-            if (!retainedStoreExecutor.awaitTermination(3, TimeUnit.SECONDS)) {
-                retainedStoreExecutor.shutdownNow();
-            }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             qos1RetryExecutor.shutdownNow();
-            retainedStoreExecutor.shutdownNow();
         } finally {
             qos1InflightStore.close();
             qos2InflightStore.close();
@@ -1457,6 +1443,24 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         putOutboundInflight(clientId, packetId, OutboundInflightMessage.qos2WaitPubRec(topic, copy, System.currentTimeMillis()), inflight);
     }
 
+    private void runPeriodicMaintenance() {
+        try {
+            retryInflightQos1Messages();
+        } catch (Exception exception) {
+            LOG.warning("[INFLIGHT] qos1 retry task failed: " + exception.getMessage());
+        }
+        try {
+            retryInflightQos2Messages();
+        } catch (Exception exception) {
+            LOG.warning("[INFLIGHT] qos2 retry task failed: " + exception.getMessage());
+        }
+        try {
+            retryPendingRetainedCommands();
+        } catch (Exception exception) {
+            LOG.warning("[RETAINED] pending command retry task failed: " + exception.getMessage());
+        }
+    }
+
     private void retryInflightQos1Messages() {
         long now = System.currentTimeMillis();
         outboundInflightByClient.forEach((clientId, inflight) -> {
@@ -1486,7 +1490,52 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         });
     }
 
-    private void restoreInflightState(String clientId, boolean sessionPresent) {
+    private void retryInflightQos2Messages() {
+        long now = System.currentTimeMillis();
+        outboundInflightByClient.forEach((clientId, inflight) -> {
+            ClientSession session = sessionRegistry.get(clientId).orElse(null);
+            if (session == null || session.channel() == null || !session.channel().isActive()) {
+                return;
+            }
+            Channel channel = session.channel();
+            inflight.forEach((packetId, entry) -> {
+                if (entry.qos() != MqttQoS.EXACTLY_ONCE.value()) {
+                    return;
+                }
+                if (now - entry.lastSentAtMs() < QOS2_RETRY_INTERVAL_MS) {
+                    return;
+                }
+                if (entry.retryCount() >= QOS2_MAX_RETRIES) {
+                    removeOutboundInflight(clientId, packetId, inflight);
+                    return;
+                }
+                if (entry.qos2State() == Qos2State.WAIT_PUBCOMP) {
+                    channel.writeAndFlush(buildPubRelMessage(packetId));
+                } else {
+                    channel.writeAndFlush(buildQos2PublishMessage(entry.topic(), entry.payload(), packetId, true));
+                }
+                OutboundInflightMessage retried = entry.nextQos2Retry(now);
+                putOutboundInflight(clientId, packetId, retried, inflight);
+            });
+            if (inflight.isEmpty()) {
+                outboundInflightByClient.remove(clientId, inflight);
+            }
+        });
+    }
+
+    private void retryPendingRetainedCommands() {
+        if (pendingRetainedCommands.isEmpty()) {
+            return;
+        }
+        pendingRetainedCommands.forEach((topic, command) -> {
+            long committed = metadataCommandGateway.submit(command);
+            if (committed >= 0) {
+                pendingRetainedCommands.remove(topic, command);
+            }
+        });
+    }
+
+    private void restoreInflightState(String clientId, boolean sessionPresent, Channel channel) {
         if (clientId == null || clientId.isBlank()) {
             return;
         }
@@ -1500,14 +1549,12 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             return;
         }
         restoreInboundQos2State(clientId);
-        restoreOutboundInflightState(clientId);
+        restoreOutboundInflightState(clientId, channel);
     }
 
-    private void restoreOutboundInflightState(String clientId) {
+    private void restoreOutboundInflightState(String clientId, Channel channel) {
         ConcurrentMap<Integer, OutboundInflightMessage> inflight = new ConcurrentHashMap<>();
         int maxPacketId = 0;
-        ClientSession session = sessionRegistry.get(clientId).orElse(null);
-        Channel channel = session == null ? null : session.channel();
         long now = System.currentTimeMillis();
         for (Qos1InflightMessage message : qos1InflightStore.listByClient(clientId)) {
             if (message == null || message.packetId() <= 0 || message.topic() == null || message.topic().isBlank()) {
