@@ -31,6 +31,7 @@ import com.jmqx.cluster.netty.NettyMetadataCommandGateway;
 import com.jmqx.cluster.netty.NettyMetadataCoreServer;
 import com.jmqx.cluster.netty.NettyMetadataReplicantSyncClient;
 import com.jmqx.common.BrokerProperties;
+import com.jmqx.config.ClusterSettings;
 import com.jmqx.config.JmqxConfig;
 import com.jmqx.config.JmqxConfigMappers;
 import com.jmqx.protocol.ClientAuthenticator;
@@ -113,27 +114,7 @@ public class JmqxApplication {
         SessionRegistry sessionRegistry = new LocalSessionRegistry();
         SubscriptionRegistry subscriptionRegistry = new LocalSubscriptionRegistry();
         GlobalSubscriptionRegistry globalSubscriptionRegistry = new DefaultGlobalSubscriptionRegistry();
-        ClusterSettings clusterSettings = new ClusterSettings(
-                getStringProperty(config, "jmqx.cluster.core.bindHost", "0.0.0.0"),
-                getIntProperty(config, "jmqx.cluster.core.port", 7800),
-                getIntProperty(config, "jmqx.cluster.netty.requestTimeoutMs", 3000),
-                getIntProperty(config, "jmqx.cluster.replay.maxEvents", 200000),
-                getIntProperty(config, "jmqx.cluster.netty.reconnectBackoffMs", 1000),
-                getIntProperty(config, "jmqx.cluster.netty.ackBatchSize", 64),
-                getIntProperty(config, "jmqx.cluster.netty.ackFlushIntervalMs", 200),
-                getIntProperty(config, "jmqx.cluster.netty.replicantMaxInFlightEvents", 2048),
-                getIntProperty(config, "jmqx.cluster.netty.replicantPushBatchSize", 256),
-                getIntProperty(config, "jmqx.cluster.nodeDownCleanupDelayMs", 15000),
-                getStringProperty(config, "jmqx.cluster.message.bindHost", "0.0.0.0"),
-                getIntProperty(config, "jmqx.cluster.message.port", 7900),
-                getStringMapProperty(config, "jmqx.cluster.nodeEndpoints"),
-                getStringProperty(config, "jmqx.cluster.raft.groupId", "jmqx-metadata"),
-                getStringProperty(config, "jmqx.cluster.raft.serverId", "127.0.0.1:17800"),
-                getStringProperty(config, "jmqx.cluster.raft.initialConf", getStringProperty(config, "jmqx.cluster.raft.serverId", "127.0.0.1:17800")),
-                getStringProperty(config, "jmqx.cluster.raft.dataPath", "data/raft-metadata"),
-                getIntProperty(config, "jmqx.cluster.raft.electionTimeoutMs", 1000),
-                getIntProperty(config, "jmqx.cluster.raft.snapshotIntervalSecs", 30)
-        );
+        ClusterSettings clusterSettings = JmqxConfigMappers.loadClusterSettings(config);
         return new StartupContext(
                 brokerProperties,
                 authProperties,
@@ -915,10 +896,6 @@ public class JmqxApplication {
         return config.getStringSet(key);
     }
 
-    private static Map<String, String> getStringMapProperty(JmqxConfig config, String key) {
-        return config.getStringMap(key);
-    }
-
     /**
      * 启动期配置与基础组件上下文。
      *
@@ -942,35 +919,6 @@ public class JmqxApplication {
             ClusterSettings clusterSettings,
             AdminSyncSettings adminSyncSettings,
             AdminPanelSettings adminPanelSettings
-    ) {
-    }
-
-    /**
-     * 集群相关配置集合。
-     *
-     * @author liucaiwen
-     * @date 2026/4/9
-     */
-    private record ClusterSettings(
-            String coreBindHost,
-            int coreBindPort,
-            int clusterRequestTimeoutMs,
-            int clusterReplayMaxEvents,
-            int clusterReconnectBackoffMs,
-            int clusterAckBatchSize,
-            int clusterAckFlushIntervalMs,
-            int clusterReplicantMaxInFlightEvents,
-            int clusterReplicantPushBatchSize,
-            int clusterNodeDownCleanupDelayMs,
-            String clusterMessageBindHost,
-            int clusterMessageBindPort,
-            Map<String, String> clusterNodeEndpoints,
-            String raftGroupId,
-            String raftServerId,
-            String raftInitialConf,
-            String raftDataPath,
-            int raftElectionTimeoutMs,
-            int raftSnapshotIntervalSecs
     ) {
     }
 

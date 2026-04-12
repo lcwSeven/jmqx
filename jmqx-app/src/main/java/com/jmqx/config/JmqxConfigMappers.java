@@ -141,6 +141,31 @@ public final class JmqxConfigMappers {
         return properties;
     }
 
+    public static ClusterSettings loadClusterSettings(JmqxConfig config) {
+        String raftServerId = config.getString("jmqx.cluster.raft.serverId", "127.0.0.1:17800");
+        return new ClusterSettings(
+                config.getString("jmqx.cluster.core.bindHost", "0.0.0.0"),
+                config.getInt("jmqx.cluster.core.port", 7800),
+                config.getInt("jmqx.cluster.netty.requestTimeoutMs", 3000),
+                config.getInt("jmqx.cluster.replay.maxEvents", 200000),
+                config.getInt("jmqx.cluster.netty.reconnectBackoffMs", 1000),
+                config.getInt("jmqx.cluster.netty.ackBatchSize", 64),
+                config.getInt("jmqx.cluster.netty.ackFlushIntervalMs", 200),
+                config.getInt("jmqx.cluster.netty.replicantMaxInFlightEvents", 2048),
+                config.getInt("jmqx.cluster.netty.replicantPushBatchSize", 256),
+                config.getInt("jmqx.cluster.nodeDownCleanupDelayMs", 15000),
+                config.getString("jmqx.cluster.message.bindHost", "0.0.0.0"),
+                config.getInt("jmqx.cluster.message.port", 7900),
+                config.getStringMap("jmqx.cluster.nodeEndpoints"),
+                config.getString("jmqx.cluster.raft.groupId", "jmqx-metadata"),
+                raftServerId,
+                config.getString("jmqx.cluster.raft.initialConf", raftServerId),
+                config.getString("jmqx.cluster.raft.dataPath", "data/raft-metadata"),
+                config.getInt("jmqx.cluster.raft.electionTimeoutMs", 1000),
+                config.getInt("jmqx.cluster.raft.snapshotIntervalSecs", 30)
+        );
+    }
+
     public static List<String> resolveAuthChain(AuthProperties authProperties) {
         List<String> fromChain = normalizePluginList(splitCommaList(authProperties.getChain()));
         if (!fromChain.isEmpty()) {

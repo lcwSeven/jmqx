@@ -4,11 +4,7 @@ import com.jmqx.cluster.MetadataReplicator;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.buffer.ByteBuf;
-import io.netty.channel.Channel;
-import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelInitializer;
-import io.netty.channel.ChannelOption;
-import io.netty.channel.SimpleChannelInboundHandler;
+import io.netty.channel.*;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
@@ -61,6 +57,8 @@ public class NettyClusterMessageTransport implements MetadataReplicator {
     };
     private NioEventLoopGroup serverBossGroup;
     private NioEventLoopGroup serverWorkerGroup;
+    private NioEventLoopGroup clientGroup;
+    private Bootstrap clientBootstrap;
     private Channel serverChannel;
 
     /**
@@ -142,6 +140,8 @@ public class NettyClusterMessageTransport implements MetadataReplicator {
         // 启动接收端：一个 boss 负责 accept，worker 负责读写与编解码。
         serverBossGroup = new NioEventLoopGroup(1);
         serverWorkerGroup = new NioEventLoopGroup();
+        // 启动发送端共享资源，避免每次 dispatch 重建 EventLoop 导致额外开销。
+        clientGroup = new NioEventLoopGroup(1);
         try {
             ServerBootstrap bootstrap = new ServerBootstrap();
             bootstrap.group(serverBossGroup, serverWorkerGroup)
@@ -161,6 +161,17 @@ public class NettyClusterMessageTransport implements MetadataReplicator {
                     }
                 });
             serverChannel = bootstrap.bind(bindHost, bindPort).syncUninterruptibly().channel();
+            clientBootstrap = new Bootstrap();
+            clientBootstrap.group(clientGroup)
+                    .channel(NioSocketChannel.class)
+                    .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, requestTimeoutMs)
+                    .handler(new ChannelInitializer<SocketChannel>() {
+                        @Override
+                        protected void initChannel(SocketChannel ch) {
+                            ch.pipeline().addLast(new LengthFieldPrepender(4));
+                            ch.pipeline().addLast(new ClusterFrameEncoder());
+                        }
+                    });
             LOG.info(() -> "[CLUSTER][MSG] server started nodeId=" + localNodeId + ", bind=" + bindHost + ":" + bindPort);
         } catch (Exception exception) {
             running.set(false);
@@ -187,33 +198,38 @@ public class NettyClusterMessageTransport implements MetadataReplicator {
             serverBossGroup.shutdownGracefully().syncUninterruptibly();
             serverBossGroup = null;
         }
+        if (clientGroup != null) {
+            clientGroup.shutdownGracefully().syncUninterruptibly();
+            clientGroup = null;
+        }
+        clientBootstrap = null;
         LOG.info("[CLUSTER][MSG] server stopped");
     }
 
     private void sendOnce(ClusterEndpoint endpoint, byte[] frame) {
-        // 当前实现是“短连接单次发送”模型：每次 dispatch 临时建连、发送、关闭。
-        // 优点：实现简单；缺点：高频跨节点场景下连接开销较大，后续可演进连接池。
-        NioEventLoopGroup clientGroup = new NioEventLoopGroup(1);
-        try {
-            Bootstrap bootstrap = new Bootstrap();
-            bootstrap.group(clientGroup)
-                .channel(NioSocketChannel.class)
-                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, requestTimeoutMs)
-                .handler(new ChannelInitializer<SocketChannel>() {
-                    @Override
-                    protected void initChannel(SocketChannel ch) {
-                        ch.pipeline().addLast(new LengthFieldPrepender(4));
-                        ch.pipeline().addLast(new ClusterFrameEncoder());
-                    }
-                });
-            Channel channel = bootstrap.connect(endpoint.host(), endpoint.port()).syncUninterruptibly().channel();
-            channel.writeAndFlush(frame).syncUninterruptibly();
-            channel.close().syncUninterruptibly();
-        } catch (Exception exception) {
-            LOG.fine(() -> "[CLUSTER][MSG] dispatch failed endpoint=" + endpoint + ", error=" + exception.getMessage());
-        } finally {
-            clientGroup.shutdownGracefully().syncUninterruptibly();
+        // 复用发送端 EventLoop 和 Bootstrap，降低高频跨节点发送开销。
+        Bootstrap bootstrap = clientBootstrap;
+        if (bootstrap == null || clientGroup == null) {
+            return;
         }
+        ChannelFuture connectFuture = bootstrap.connect(endpoint.host(), endpoint.port());
+        connectFuture.addListener((ChannelFutureListener) future -> {
+            if (!future.isSuccess()) {
+                Throwable cause = future.cause();
+                String error = cause == null ? "unknown" : cause.getMessage();
+                LOG.fine(() -> "[CLUSTER][MSG] connect failed endpoint=" + endpoint + ", error=" + error);
+                return;
+            }
+            Channel channel = future.channel();
+            channel.writeAndFlush(frame).addListener((ChannelFutureListener) writeFuture -> {
+                if (!writeFuture.isSuccess()) {
+                    Throwable cause = writeFuture.cause();
+                    String error = cause == null ? "unknown" : cause.getMessage();
+                    LOG.fine(() -> "[CLUSTER][MSG] send failed endpoint=" + endpoint + ", error=" + error);
+                }
+                channel.close();
+            });
+        });
     }
 
     /**
@@ -315,7 +331,7 @@ public class NettyClusterMessageTransport implements MetadataReplicator {
         if (qos >= 2) {
             return 2;
         }
-        return qos >= 1 ? 1 : 0;
+        return qos == 1 ? 1 : 0;
     }
 
     /**
