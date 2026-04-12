@@ -20,6 +20,11 @@ import com.jmqx.session.ClientSession;
 import com.jmqx.session.SessionRegistry;
 import com.jmqx.store.RetainedMessage;
 import com.jmqx.store.RetainedMessageStore;
+import com.jmqx.store.Qos1InflightStore;
+import com.jmqx.store.Qos1InflightMessage;
+import com.jmqx.store.Qos2InflightStore;
+import com.jmqx.store.Qos2InboundInflightMessage;
+import com.jmqx.store.Qos2OutboundInflightMessage;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
@@ -30,8 +35,11 @@ import io.netty.handler.codec.mqtt.MqttMessage;
 import io.netty.handler.codec.mqtt.MqttMessageBuilders;
 import io.netty.handler.codec.mqtt.MqttFixedHeader;
 import io.netty.handler.codec.mqtt.MqttMessageType;
+import io.netty.handler.codec.mqtt.MqttMessageIdVariableHeader;
 import io.netty.handler.codec.mqtt.MqttProperties;
+import io.netty.handler.codec.mqtt.MqttPublishVariableHeader;
 import io.netty.handler.codec.mqtt.MqttPublishMessage;
+import io.netty.handler.codec.mqtt.MqttPubAckMessage;
 import io.netty.handler.codec.mqtt.MqttQoS;
 import io.netty.handler.codec.mqtt.MqttSubscribeMessage;
 import io.netty.handler.codec.mqtt.MqttTopicSubscription;
@@ -46,6 +54,7 @@ import java.net.SocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
@@ -58,8 +67,10 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -84,15 +95,23 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     private static final String DASHBOARD_TOPIC_PREFIX = "$SYS/dashboard/";
     private static final String SUBSCRIPTION_NAMESPACE = "route.subscription";
     private static final String SESSION_NAMESPACE = "session.client";
+    private static final String RETAINED_NAMESPACE = "retained.message";
     private static final String OP_REGISTER = "register";
     private static final String OP_UNREGISTER = "unregister";
     private static final String OP_ONLINE = "online";
+    private static final String OP_RETAINED_UPSERT = "upsert";
+    private static final String OP_RETAINED_REMOVE = "remove";
     private static final long SESSION_EXPIRY_IMMEDIATE = 0L;
     private static final long SESSION_EXPIRY_PERSISTENT = Long.MAX_VALUE;
+    private static final int MAX_PACKET_ID = 0xFFFF;
+    private static final long QOS1_RETRY_INTERVAL_MS = 5000L;
+    private static final int QOS1_MAX_RETRIES = 3;
 
     private final SessionRegistry sessionRegistry;
     private final SubscriptionRegistry subscriptionRegistry;
     private final RetainedMessageStore retainedMessageStore;
+    private final Qos1InflightStore qos1InflightStore;
+    private final Qos2InflightStore qos2InflightStore;
     private final ClientAuthenticator clientAuthenticator;
     private final AclAuthorizer aclAuthorizer;
     private final SharedSubscriptionManager sharedSubscriptionManager;
@@ -107,6 +126,10 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     private final String dashboardClusterId;
     private final List<String> bridgeTopicFilters;
     private final ConcurrentMap<String, AtomicLong> sharedGroupNodeRoundRobin = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, AtomicInteger> outboundPacketIdByClient = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, ConcurrentMap<Integer, OutboundInflightMessage>> outboundInflightByClient = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, ConcurrentMap<Integer, InboundQos2Publish>> inboundQos2ByClient = new ConcurrentHashMap<>();
+    private final ScheduledExecutorService qos1RetryExecutor;
 
 
     public MqttBrokerMessageHandler(
@@ -118,6 +141,8 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             SharedSubscriptionManager sharedSubscriptionManager,
             MessageBridge messageBridge,
             boolean retainedEnabled,
+            Qos1InflightStore qos1InflightStore,
+            Qos2InflightStore qos2InflightStore,
             GlobalSubscriptionRegistry globalSubscriptionRegistry,
             String nodeId,
             MetadataCommandGateway metadataCommandGateway,
@@ -135,6 +160,8 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             : sharedSubscriptionManager;
         this.messageBridge = messageBridge == null ? MessageBridge.NOOP : messageBridge;
         this.retainedEnabled = retainedEnabled;
+        this.qos1InflightStore = qos1InflightStore == null ? Qos1InflightStore.NOOP : qos1InflightStore;
+        this.qos2InflightStore = qos2InflightStore == null ? Qos2InflightStore.NOOP : qos2InflightStore;
         this.globalSubscriptionRegistry = globalSubscriptionRegistry;
         this.nodeId = (nodeId == null || nodeId.isBlank()) ? "node-1" : nodeId;
         this.metadataCommandGateway = Objects.requireNonNull(metadataCommandGateway, "metadataCommandGateway");
@@ -149,6 +176,17 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             thread.setDaemon(true);
             return thread;
         });
+        this.qos1RetryExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "jmqx-qos1-retry");
+            thread.setDaemon(true);
+            return thread;
+        });
+        this.qos1RetryExecutor.scheduleAtFixedRate(
+            this::retryInflightQos1Messages,
+            QOS1_RETRY_INTERVAL_MS,
+            QOS1_RETRY_INTERVAL_MS,
+            TimeUnit.MILLISECONDS
+        );
     }
 
     @Override
@@ -167,6 +205,10 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             case SUBSCRIBE -> handleSubscribe(ctx, (MqttSubscribeMessage) message);
             case UNSUBSCRIBE -> handleUnsubscribe(ctx, (MqttUnsubscribeMessage) message);
             case PUBLISH -> handlePublish(ctx, (MqttPublishMessage) message);
+            case PUBACK -> handlePubAck(ctx, (MqttPubAckMessage) message);
+            case PUBREC -> handlePubRec(ctx, message);
+            case PUBREL -> handlePubRel(ctx, message);
+            case PUBCOMP -> handlePubComp(ctx, message);
             case PINGREQ -> {
                 LOG.fine(() -> "[PING] clientId=" + currentClientId(ctx.channel()));
                 ctx.writeAndFlush(new MqttMessage(
@@ -206,7 +248,13 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
 
         adminReporter.removeClientSession(clientId);
         sessionRegistry.remove(clientId);
+        outboundInflightByClient.remove(clientId);
+        inboundQos2ByClient.remove(clientId);
+        outboundPacketIdByClient.remove(clientId);
         if (shouldClearSessionState(cleanStart, sessionExpirySeconds)) {
+            qos1InflightStore.removeClient(clientId);
+            qos2InflightStore.removeInboundClient(clientId);
+            qos2InflightStore.removeOutboundClient(clientId);
             sharedSubscriptionManager.removeClient(clientId);
             Set<String> removedLastTopics = subscriptionRegistry.removeClientAndCollectLastTopics(clientId);
             removedLastTopics.forEach(this::applyGlobalUnregisterAfterLocal);
@@ -307,7 +355,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             : (cleanStart ? SESSION_EXPIRY_IMMEDIATE : SESSION_EXPIRY_PERSISTENT);
         int keepAliveSeconds = Math.max(message.variableHeader().keepAliveTimeSeconds(), 0);
         String serviceNodeIp = resolveServiceNodeIp(ctx.channel());
-        boolean sessionPresent = !cleanStart && sessionRegistry.get(clientId).isPresent();
+        boolean sessionPresent = !cleanStart && hasPersistedSessionState(clientId);
         sessionRegistry.register(new ClientSession(
             clientId,
             ctx.channel(),
@@ -346,6 +394,8 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
                     .returnCode(MqttConnectReturnCode.CONNECTION_ACCEPTED)
                     .build());
         }
+        // CONNACK 成功后恢复 inflight 状态（QoS1/QoS2），避免违反 MQTT 报文时序。
+        restoreInflightState(clientId, sessionPresent);
         // 第七步：发布系统事件到公共主题，供监控与管理台实时订阅。
         publishClientLifecycleEvent(
             TOPIC_CLIENT_CONNECTED,
@@ -417,7 +467,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
                 LOG.warning(() -> "[ACL] subscribe denied clientId=" + clientId + ", topicFilter=" + topicFilter);
                 continue;
             }
-            int qos = Math.min(subscription.qualityOfService().value(), 1);
+            int qos = Math.min(subscription.qualityOfService().value(), 2);
             SharedSubscription.Parsed shared = SharedSubscription.parse(topicFilter);
             if (shared != null && !sharedSubscriptionManager.register(shared.group(), clientId)) {
                 grantedQos.add(MqttQoS.FAILURE.value());
@@ -474,40 +524,188 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         String topic = message.variableHeader().topicName();
         byte[] payload = ByteBufUtil.getBytes(message.payload());
         int qos = message.fixedHeader().qosLevel().value();
+        int packetId = message.variableHeader().packetId();
         String clientId = currentClientId(ctx.channel());
+        if (qos > 0 && packetId <= 0) {
+            LOG.warning(() -> "[PUBLISH] invalid packetId clientId=" + clientId + ", qos=" + qos);
+            ctx.close();
+            return;
+        }
         // ACL 鉴权
         if (isDenied(clientId, topic, AclAction.PUBLISH)) {
-            LOG.warning(() -> "[ACL] publish denied clientId=" + clientId + ", topic=" + topic);
-            if (qos == 1) {
-                ctx.writeAndFlush(MqttMessageBuilders.pubAck().packetId(message.variableHeader().packetId()).build());
-            }
+            handleDeniedPublish(ctx, clientId, topic, qos, packetId);
             return;
         }
 
-        // Retain 消息进入异步存储，避免阻塞 I/O 线程。
-        if (message.fixedHeader().isRetain()) {
-            submitRetainedAsync(topic, payload, qos);
+        if (qos == 2) {
+            handleInboundQos2Publish(ctx, clientId, topic, payload, packetId, message.fixedHeader().isRetain());
+            return;
         }
 
-        //  路由消息 发送到指定 client
-        routeMessage(topic, payload);
+        processApplicationPublish(clientId, topic, payload, qos, message.fixedHeader().isRetain());
+        LOG.fine(() -> "[PUBLISH] clientId=" + clientId + ", topic=" + topic
+                + ", qos=" + qos + ", retain=" + message.fixedHeader().isRetain() + ", bytes=" + payload.length);
 
-        // 判断是否需要桥接消息
+        if (qos == 1) {
+            ctx.writeAndFlush(MqttMessageBuilders.pubAck().packetId(packetId).build());
+        }
+    }
+
+    /**
+     * ACL 拒绝时按 QoS 返回协议应答。
+     */
+    private void handleDeniedPublish(ChannelHandlerContext ctx, String clientId, String topic, int qos, int packetId) {
+        LOG.warning(() -> "[ACL] publish denied clientId=" + clientId + ", topic=" + topic);
+        if (qos == 1) {
+            ctx.writeAndFlush(MqttMessageBuilders.pubAck().packetId(packetId).build());
+            return;
+        }
+        if (qos == 2) {
+            ctx.writeAndFlush(buildPubRecMessage(packetId));
+        }
+    }
+
+    /**
+     * QoS2 第一阶段：缓存 PUBLISH 并回复 PUBREC，等待 PUBREL 后再真正投递。
+     */
+    private void handleInboundQos2Publish(
+        ChannelHandlerContext ctx,
+        String clientId,
+        String topic,
+        byte[] payload,
+        int packetId,
+        boolean retain
+    ) {
+        ConcurrentMap<Integer, InboundQos2Publish> pending = inboundQos2ByClient
+            .computeIfAbsent(clientId, ignored -> new ConcurrentHashMap<>());
+        pending.computeIfAbsent(packetId, ignored -> new InboundQos2Publish(topic, payload.clone(), retain));
+        qos2InflightStore.saveInbound(clientId, new Qos2InboundInflightMessage(
+            packetId,
+            topic,
+            payload.clone(),
+            retain
+        ));
+        ctx.writeAndFlush(buildPubRecMessage(packetId));
+    }
+
+    /**
+     * 普通业务发布处理（QoS0/QoS1 直接投递，QoS2 在 PUBREL 阶段调用）。
+     */
+    private void processApplicationPublish(String clientId, String topic, byte[] payload, int qos, boolean retain) {
+        if (retain) {
+            submitRetainedWithClusterSync(topic, payload, qos);
+        }
+        routeMessage(topic, payload, qos);
         if (shouldBridgeTopic(topic)) {
             messageBridge.publish(new BridgeMessage(
                 clientId,
                 topic,
                 payload,
                 qos,
-                message.fixedHeader().isRetain(),
+                retain,
                 System.currentTimeMillis()
             ));
         }
-        LOG.fine(() -> "[PUBLISH] clientId=" + clientId + ", topic=" + topic
-                + ", qos=" + qos + ", retain=" + message.fixedHeader().isRetain() + ", bytes=" + payload.length);
+    }
 
-        if (qos == 1) {
-            ctx.writeAndFlush(MqttMessageBuilders.pubAck().packetId(message.variableHeader().packetId()).build());
+    private void handlePubAck(ChannelHandlerContext ctx, MqttPubAckMessage message) {
+        String clientId = currentClientId(ctx.channel());
+        if (clientId == null || message == null || message.variableHeader() == null) {
+            return;
+        }
+        int packetId = message.variableHeader().messageId();
+        ConcurrentMap<Integer, OutboundInflightMessage> inflight = outboundInflightByClient.get(clientId);
+        if (inflight == null) {
+            qos1InflightStore.remove(clientId, packetId);
+            return;
+        }
+        OutboundInflightMessage existing = inflight.get(packetId);
+        if (existing == null || existing.qos() != MqttQoS.AT_LEAST_ONCE.value()) {
+            return;
+        }
+        removeOutboundInflight(clientId, packetId, inflight);
+        if (inflight.isEmpty()) {
+            outboundInflightByClient.remove(clientId, inflight);
+        }
+    }
+
+    private void handlePubRec(ChannelHandlerContext ctx, MqttMessage message) {
+        String clientId = currentClientId(ctx.channel());
+        Integer packetId = extractPacketId(message);
+        if (clientId == null || packetId == null) {
+            return;
+        }
+        ConcurrentMap<Integer, OutboundInflightMessage> inflight = outboundInflightByClient.get(clientId);
+        if (inflight == null) {
+            return;
+        }
+        OutboundInflightMessage existing = inflight.get(packetId);
+        if (existing == null || existing.qos() != MqttQoS.EXACTLY_ONCE.value()) {
+            return;
+        }
+        if (existing.qos2State() == Qos2State.WAIT_PUBCOMP) {
+            ctx.writeAndFlush(buildPubRelMessage(packetId));
+            return;
+        }
+        if (existing.qos2State() != Qos2State.WAIT_PUBREC) {
+            return;
+        }
+        ctx.writeAndFlush(buildPubRelMessage(packetId));
+        OutboundInflightMessage next = existing.toQos2WaitPubComp(System.currentTimeMillis());
+        putOutboundInflight(clientId, packetId, next, inflight);
+    }
+
+    private void handlePubRel(ChannelHandlerContext ctx, MqttMessage message) {
+        String clientId = currentClientId(ctx.channel());
+        Integer packetId = extractPacketId(message);
+        if (clientId == null || packetId == null) {
+            return;
+        }
+        ConcurrentMap<Integer, InboundQos2Publish> pending = inboundQos2ByClient.get(clientId);
+        InboundQos2Publish publish = pending == null ? null : pending.remove(packetId);
+        if (publish == null) {
+            publish = qos2InflightStore.getInbound(clientId, packetId)
+                .map(message1 -> new InboundQos2Publish(
+                    message1.topic(),
+                    message1.payload() == null ? new byte[0] : message1.payload().clone(),
+                    message1.retain()
+                ))
+                .orElse(null);
+        }
+        if (publish != null) {
+            processApplicationPublish(
+                clientId,
+                publish.topic(),
+                publish.payload(),
+                MqttQoS.EXACTLY_ONCE.value(),
+                publish.retain()
+            );
+        }
+        if (pending != null && pending.isEmpty()) {
+            inboundQos2ByClient.remove(clientId, pending);
+        }
+        qos2InflightStore.removeInbound(clientId, packetId);
+        ctx.writeAndFlush(buildPubCompMessage(packetId));
+    }
+
+    private void handlePubComp(ChannelHandlerContext ctx, MqttMessage message) {
+        String clientId = currentClientId(ctx.channel());
+        Integer packetId = extractPacketId(message);
+        if (clientId == null || packetId == null) {
+            return;
+        }
+        ConcurrentMap<Integer, OutboundInflightMessage> inflight = outboundInflightByClient.get(clientId);
+        if (inflight == null) {
+            return;
+        }
+        OutboundInflightMessage existing = inflight.get(packetId);
+        if (existing == null || existing.qos() != MqttQoS.EXACTLY_ONCE.value()
+            || existing.qos2State() != Qos2State.WAIT_PUBCOMP) {
+            return;
+        }
+        removeOutboundInflight(clientId, packetId, inflight);
+        if (inflight.isEmpty()) {
+            outboundInflightByClient.remove(clientId, inflight);
         }
     }
 
@@ -575,18 +773,20 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     private void publishInternal(String sourceClientId, String topic, byte[] payload, int qos, boolean retain) {
-        if (retain) {
-            submitRetainedAsync(topic, payload, qos);
+        processApplicationPublish(sourceClientId, topic, payload, qos, retain);
+    }
+
+    private void submitRetainedWithClusterSync(String topic, byte[] payload, int qos) {
+        if (!retainedEnabled) {
+            return;
         }
-        routeMessage(topic, payload);
-        messageBridge.publish(new BridgeMessage(
-            sourceClientId,
-            topic,
-            payload,
-            qos,
-            retain,
-            System.currentTimeMillis()
-        ));
+        // 元数据提交成功时，集群同步成功时，忽略本地写。
+        boolean replicated = submitRetainedCommand(topic, payload, qos);
+        if (replicated) {
+            return;
+        }
+        // 元数据提交失败时兜底本地写，避免丢 retained。
+        submitRetainedAsync(topic, payload, qos);
     }
 
     /**
@@ -605,7 +805,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         );
     }
 
-    private void routeMessage(String topic, byte[] payload) {
+    private void routeMessage(String topic, byte[] payload, int publishQos) {
         GlobalSubscriptionMatch globalMatch = globalSubscriptionRegistry == null
             ? new GlobalSubscriptionMatch(Collections.emptySet(), Collections.emptyMap())
             : globalSubscriptionRegistry.match(topic);
@@ -615,9 +815,9 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         Map<String, ClusterMessageDispatcher.DispatchTarget> remoteTargetPlans = buildRemoteNormalTargetPlans(globalMatch);
         selectSharedDeliveryTargets(localMatch, globalMatch, localSubscribers, remoteTargetPlans);
 
-        deliverToLocalSubscribers(topic, payload, localSubscribers);
+        deliverToLocalSubscribers(topic, payload, localSubscribers, publishQos);
         if (!remoteTargetPlans.isEmpty()) {
-            clusterMessageDispatcher.dispatch(topic, payload.clone(), remoteTargetPlans);
+            clusterMessageDispatcher.dispatch(topic, payload.clone(), publishQos, remoteTargetPlans);
             LOG.fine(() -> "[ROUTE][CLUSTER] topic=" + topic + ", remoteTargets=" + remoteTargetPlans.keySet());
         }
     }
@@ -645,15 +845,20 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
      * @param topic   topic
      * @param payload payload
      */
-    public void onClusterPublish(String topic, byte[] payload, boolean includeNormal, Set<String> sharedGroups) {
+    public void onClusterPublish(String topic, byte[] payload, int publishQos, boolean includeNormal, Set<String> sharedGroups) {
         if (topic == null || topic.isBlank() || payload == null) {
             return;
         }
+        int normalizedQos = publishQos >= MqttQoS.AT_LEAST_ONCE.value()
+            ? (publishQos >= MqttQoS.EXACTLY_ONCE.value()
+                ? MqttQoS.EXACTLY_ONCE.value()
+                : MqttQoS.AT_LEAST_ONCE.value())
+            : MqttQoS.AT_MOST_ONCE.value();
         // 路由到本地订阅客户端
-        routeLocalOnly(topic, payload, includeNormal, sharedGroups);
+        routeLocalOnly(topic, payload, includeNormal, sharedGroups, normalizedQos);
     }
 
-    private void routeLocalOnly(String topic, byte[] payload, boolean includeNormal, Set<String> sharedGroups) {
+    private void routeLocalOnly(String topic, byte[] payload, boolean includeNormal, Set<String> sharedGroups, int publishQos) {
         if (!includeNormal && (sharedGroups == null || sharedGroups.isEmpty())) {
             return;
         }
@@ -671,7 +876,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
                 subscribers.add(selected);
             }
         });
-        deliverToLocalSubscribers(topic, payload, subscribers);
+        deliverToLocalSubscribers(topic, payload, subscribers, publishQos);
     }
 
     /**
@@ -680,7 +885,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
      * @param payload  payload
      * @param subscribers  subscribers
      */
-    private void deliverToLocalSubscribers(String topic, byte[] payload, Set<String> subscribers) {
+    private void deliverToLocalSubscribers(String topic, byte[] payload, Set<String> subscribers, int publishQos) {
         LOG.fine(() -> "[ROUTE][LOCAL] topic=" + topic + ", subscribers=" + subscribers.size());
         for (String subscriber : subscribers) {
             Optional<ClientSession> sessionOptional = sessionRegistry.get(subscriber);
@@ -692,13 +897,28 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             if (!channel.isActive()) {
                 continue;
             }
-
-            channel.writeAndFlush(MqttMessageBuilders.publish()
-                    .topicName(topic)
-                    .retained(false)
-                    .qos(MqttQoS.AT_MOST_ONCE)
-                    .payload(Unpooled.wrappedBuffer(payload))
-                    .build());
+            int outboundQos = publishQos >= MqttQoS.EXACTLY_ONCE.value()
+                ? MqttQoS.EXACTLY_ONCE.value()
+                : (publishQos >= MqttQoS.AT_LEAST_ONCE.value()
+                    ? MqttQoS.AT_LEAST_ONCE.value()
+                    : MqttQoS.AT_MOST_ONCE.value());
+            if (outboundQos == MqttQoS.AT_MOST_ONCE.value()) {
+                channel.writeAndFlush(MqttMessageBuilders.publish()
+                        .topicName(topic)
+                        .retained(false)
+                        .qos(MqttQoS.AT_MOST_ONCE)
+                        .payload(Unpooled.wrappedBuffer(payload))
+                        .build());
+                continue;
+            }
+            int packetId = nextOutboundPacketId(subscriber);
+            if (outboundQos == MqttQoS.AT_LEAST_ONCE.value()) {
+                channel.writeAndFlush(buildQos1PublishMessage(topic, payload, packetId, false));
+                trackInflightQos1(subscriber, packetId, topic, payload);
+                continue;
+            }
+            channel.writeAndFlush(buildQos2PublishMessage(topic, payload, packetId, false));
+            trackInflightQos2(subscriber, packetId, topic, payload);
         }
     }
 
@@ -1069,17 +1289,302 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         });
     }
 
+    private boolean submitRetainedCommand(String topic, byte[] payload, int qos) {
+        if (topic == null || topic.isBlank()) {
+            return false;
+        }
+        byte[] safePayload = payload == null ? new byte[0] : payload;
+        String operation = safePayload.length == 0 ? OP_RETAINED_REMOVE : OP_RETAINED_UPSERT;
+        String value = safePayload.length == 0
+            ? null
+            : qos + "|" + Base64.getEncoder().encodeToString(safePayload);
+        long committedIndex = metadataCommandGateway.submit(new MetadataCommand(
+            RETAINED_NAMESPACE,
+            operation,
+            topic,
+            value,
+            nodeId
+        ));
+        if (committedIndex >= 0) {
+            return true;
+        }
+        LOG.warning(() -> "[CLUSTER] retained metadata submit failed, topic=" + topic + ", operation=" + operation);
+        return false;
+    }
+
     public void shutdown() {
         adminReporter.shutdown();
+        qos1RetryExecutor.shutdown();
         retainedStoreExecutor.shutdown();
         try {
+            if (!qos1RetryExecutor.awaitTermination(3, TimeUnit.SECONDS)) {
+                qos1RetryExecutor.shutdownNow();
+            }
             if (!retainedStoreExecutor.awaitTermination(3, TimeUnit.SECONDS)) {
                 retainedStoreExecutor.shutdownNow();
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            qos1RetryExecutor.shutdownNow();
             retainedStoreExecutor.shutdownNow();
+        } finally {
+            qos1InflightStore.close();
+            qos2InflightStore.close();
         }
+    }
+
+    private int nextOutboundPacketId(String clientId) {
+        AtomicInteger sequence = outboundPacketIdByClient.computeIfAbsent(clientId, ignored -> new AtomicInteger(0));
+        ConcurrentMap<Integer, OutboundInflightMessage> inflight = outboundInflightByClient.get(clientId);
+        for (int i = 0; i < MAX_PACKET_ID; i++) {
+            int next = sequence.updateAndGet(current -> current >= MAX_PACKET_ID ? 1 : current + 1);
+            if (next <= 0) {
+                sequence.set(1);
+                continue;
+            }
+            if (inflight == null || !inflight.containsKey(next)) {
+                return next;
+            }
+        }
+        // 全部 packetId 都在使用（理论极端场景），返回当前值并记录告警。
+        int fallback = sequence.get();
+        LOG.warning(() -> "[INFLIGHT] no free packetId for clientId=" + clientId + ", fallbackPacketId=" + fallback);
+        return fallback > 0 ? fallback : 1;
+    }
+
+    private MqttPublishMessage buildQos1PublishMessage(String topic, byte[] payload, int packetId, boolean dup) {
+        return new MqttPublishMessage(
+            new MqttFixedHeader(MqttMessageType.PUBLISH, dup, MqttQoS.AT_LEAST_ONCE, false, 0),
+            new MqttPublishVariableHeader(topic, packetId, MqttProperties.NO_PROPERTIES),
+            Unpooled.wrappedBuffer(payload)
+        );
+    }
+
+    private MqttPublishMessage buildQos2PublishMessage(String topic, byte[] payload, int packetId, boolean dup) {
+        return new MqttPublishMessage(
+            new MqttFixedHeader(MqttMessageType.PUBLISH, dup, MqttQoS.EXACTLY_ONCE, false, 0),
+            new MqttPublishVariableHeader(topic, packetId, MqttProperties.NO_PROPERTIES),
+            Unpooled.wrappedBuffer(payload)
+        );
+    }
+
+    private MqttMessage buildPubRecMessage(int packetId) {
+        return new MqttMessage(
+            new MqttFixedHeader(MqttMessageType.PUBREC, false, MqttQoS.AT_MOST_ONCE, false, 0),
+            MqttMessageIdVariableHeader.from(packetId)
+        );
+    }
+
+    private MqttMessage buildPubRelMessage(int packetId) {
+        return new MqttMessage(
+            new MqttFixedHeader(MqttMessageType.PUBREL, false, MqttQoS.AT_LEAST_ONCE, false, 0),
+            MqttMessageIdVariableHeader.from(packetId)
+        );
+    }
+
+    private MqttMessage buildPubCompMessage(int packetId) {
+        return new MqttMessage(
+            new MqttFixedHeader(MqttMessageType.PUBCOMP, false, MqttQoS.AT_MOST_ONCE, false, 0),
+            MqttMessageIdVariableHeader.from(packetId)
+        );
+    }
+
+    private Integer extractPacketId(MqttMessage message) {
+        if (message == null) {
+            return null;
+        }
+        if (message.variableHeader() instanceof MqttMessageIdVariableHeader messageIdVariableHeader) {
+            return messageIdVariableHeader.messageId();
+        }
+        return null;
+    }
+
+    private void putOutboundInflight(
+        String clientId,
+        int packetId,
+        OutboundInflightMessage message,
+        ConcurrentMap<Integer, OutboundInflightMessage> inflight
+    ) {
+        if (clientId == null || clientId.isBlank() || packetId <= 0 || message == null || inflight == null) {
+            return;
+        }
+        inflight.put(packetId, message);
+        if (message.qos() == MqttQoS.AT_LEAST_ONCE.value()) {
+            qos1InflightStore.save(clientId, new Qos1InflightMessage(
+                packetId,
+                message.topic(),
+                message.payload() == null ? new byte[0] : message.payload().clone(),
+                message.lastSentAtMs(),
+                Math.max(0, message.retryCount())
+            ));
+            qos2InflightStore.removeOutbound(clientId, packetId);
+            return;
+        }
+        qos2InflightStore.saveOutbound(clientId, new Qos2OutboundInflightMessage(
+            packetId,
+            message.topic(),
+            message.payload() == null ? new byte[0] : message.payload().clone(),
+            message.qos2State() == null ? Qos2State.WAIT_PUBREC.code() : message.qos2State().code(),
+            message.lastSentAtMs()
+        ));
+        qos1InflightStore.remove(clientId, packetId);
+    }
+
+    private void removeOutboundInflight(
+        String clientId,
+        int packetId,
+        ConcurrentMap<Integer, OutboundInflightMessage> inflight
+    ) {
+        if (inflight != null) {
+            inflight.remove(packetId);
+        }
+        qos1InflightStore.remove(clientId, packetId);
+        qos2InflightStore.removeOutbound(clientId, packetId);
+    }
+
+    private void trackInflightQos1(String clientId, int packetId, String topic, byte[] payload) {
+        byte[] copy = payload == null ? new byte[0] : payload.clone();
+        OutboundInflightMessage inflightMessage = OutboundInflightMessage.qos1(topic, copy, System.currentTimeMillis(), 0);
+        ConcurrentMap<Integer, OutboundInflightMessage> inflight = outboundInflightByClient
+            .computeIfAbsent(clientId, ignored -> new ConcurrentHashMap<>());
+        putOutboundInflight(clientId, packetId, inflightMessage, inflight);
+    }
+
+    private void trackInflightQos2(String clientId, int packetId, String topic, byte[] payload) {
+        byte[] copy = payload == null ? new byte[0] : payload.clone();
+        ConcurrentMap<Integer, OutboundInflightMessage> inflight = outboundInflightByClient
+            .computeIfAbsent(clientId, ignored -> new ConcurrentHashMap<>());
+        putOutboundInflight(clientId, packetId, OutboundInflightMessage.qos2WaitPubRec(topic, copy, System.currentTimeMillis()), inflight);
+    }
+
+    private void retryInflightQos1Messages() {
+        long now = System.currentTimeMillis();
+        outboundInflightByClient.forEach((clientId, inflight) -> {
+            ClientSession session = sessionRegistry.get(clientId).orElse(null);
+            if (session == null || session.channel() == null || !session.channel().isActive()) {
+                return;
+            }
+            Channel channel = session.channel();
+            inflight.forEach((packetId, entry) -> {
+                if (entry.qos() != MqttQoS.AT_LEAST_ONCE.value()) {
+                    return;
+                }
+                if (now - entry.lastSentAtMs() < QOS1_RETRY_INTERVAL_MS) {
+                    return;
+                }
+                if (entry.retryCount() >= QOS1_MAX_RETRIES) {
+                    removeOutboundInflight(clientId, packetId, inflight);
+                    return;
+                }
+                channel.writeAndFlush(buildQos1PublishMessage(entry.topic(), entry.payload(), packetId, true));
+                OutboundInflightMessage retried = entry.nextQos1Retry(now);
+                putOutboundInflight(clientId, packetId, retried, inflight);
+            });
+            if (inflight.isEmpty()) {
+                outboundInflightByClient.remove(clientId, inflight);
+            }
+        });
+    }
+
+    private void restoreInflightState(String clientId, boolean sessionPresent) {
+        if (clientId == null || clientId.isBlank()) {
+            return;
+        }
+        if (!sessionPresent) {
+            qos1InflightStore.removeClient(clientId);
+            qos2InflightStore.removeInboundClient(clientId);
+            qos2InflightStore.removeOutboundClient(clientId);
+            outboundPacketIdByClient.remove(clientId);
+            outboundInflightByClient.remove(clientId);
+            inboundQos2ByClient.remove(clientId);
+            return;
+        }
+        restoreInboundQos2State(clientId);
+        restoreOutboundInflightState(clientId);
+    }
+
+    private void restoreOutboundInflightState(String clientId) {
+        ConcurrentMap<Integer, OutboundInflightMessage> inflight = new ConcurrentHashMap<>();
+        int maxPacketId = 0;
+        ClientSession session = sessionRegistry.get(clientId).orElse(null);
+        Channel channel = session == null ? null : session.channel();
+        long now = System.currentTimeMillis();
+        for (Qos1InflightMessage message : qos1InflightStore.listByClient(clientId)) {
+            if (message == null || message.packetId() <= 0 || message.topic() == null || message.topic().isBlank()) {
+                continue;
+            }
+            byte[] payload = message.payload() == null ? new byte[0] : message.payload().clone();
+            OutboundInflightMessage restored = OutboundInflightMessage.qos1(
+                message.topic(), payload, now, Math.max(0, message.retryCount()));
+            putOutboundInflight(clientId, message.packetId(), restored, inflight);
+            maxPacketId = Math.max(maxPacketId, message.packetId());
+            if (channel != null && channel.isActive()) {
+                channel.writeAndFlush(buildQos1PublishMessage(restored.topic(), restored.payload(), message.packetId(), true));
+            }
+        }
+        for (Qos2OutboundInflightMessage message : qos2InflightStore.listOutbound(clientId)) {
+            if (message == null || message.packetId() <= 0 || message.topic() == null || message.topic().isBlank()) {
+                continue;
+            }
+            Qos2State state = Qos2State.fromCode(message.state());
+            byte[] payload = message.payload() == null ? new byte[0] : message.payload().clone();
+            OutboundInflightMessage restored = OutboundInflightMessage.qos2(message.topic(), payload, state, now);
+            putOutboundInflight(clientId, message.packetId(), restored, inflight);
+            maxPacketId = Math.max(maxPacketId, message.packetId());
+            if (channel != null && channel.isActive()) {
+                if (state == Qos2State.WAIT_PUBREC) {
+                    channel.writeAndFlush(buildQos2PublishMessage(restored.topic(), restored.payload(), message.packetId(), true));
+                } else {
+                    channel.writeAndFlush(buildPubRelMessage(message.packetId()));
+                }
+            }
+        }
+        if (inflight.isEmpty()) {
+            outboundPacketIdByClient.remove(clientId);
+            outboundInflightByClient.remove(clientId);
+            return;
+        }
+        outboundInflightByClient.put(clientId, inflight);
+        if (maxPacketId > 0) {
+            int restoredMaxPacketId = maxPacketId;
+            AtomicInteger sequence = outboundPacketIdByClient.computeIfAbsent(clientId, ignored -> new AtomicInteger(0));
+            sequence.updateAndGet(current -> Math.max(current, restoredMaxPacketId));
+        }
+    }
+
+    private void restoreInboundQos2State(String clientId) {
+        ConcurrentMap<Integer, InboundQos2Publish> inbound = new ConcurrentHashMap<>();
+        for (Qos2InboundInflightMessage message : qos2InflightStore.listInbound(clientId)) {
+            if (message == null || message.packetId() <= 0 || message.topic() == null || message.topic().isBlank()) {
+                continue;
+            }
+            inbound.put(message.packetId(), new InboundQos2Publish(
+                message.topic(),
+                message.payload() == null ? new byte[0] : message.payload().clone(),
+                message.retain()
+            ));
+        }
+        if (inbound.isEmpty()) {
+            inboundQos2ByClient.remove(clientId);
+            return;
+        }
+        inboundQos2ByClient.put(clientId, inbound);
+    }
+
+    private boolean hasPersistedSessionState(String clientId) {
+        if (clientId == null || clientId.isBlank()) {
+            return false;
+        }
+        if (!subscriptionRegistry.findSubscriptions(clientId).isEmpty()) {
+            return true;
+        }
+        if (qos1InflightStore.maxPacketId(clientId) > 0) {
+            return true;
+        }
+        if (qos2InflightStore.maxOutboundPacketId(clientId) > 0) {
+            return true;
+        }
+        return !qos2InflightStore.listInbound(clientId).isEmpty();
     }
 
     private String resolveServiceNodeIp(Channel channel) {
@@ -1110,22 +1615,4 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         }
     }
 
-    private record SharedDeliveryTarget(String localClientId, String remoteNodeId) {
-        private static SharedDeliveryTarget local(String localClientId) {
-            return new SharedDeliveryTarget(localClientId, null);
-        }
-
-        private static SharedDeliveryTarget remote(String remoteNodeId) {
-            return new SharedDeliveryTarget(null, remoteNodeId);
-        }
-    }
-
-    /**
-     * 连接建立时缓存的遗嘱消息。
-     *
-     * @author liucaiwen
-     * @date 2026/4/7
-     */
-    private record WillMessage(String topic, byte[] payload, int qos, boolean retain) {
-    }
 }

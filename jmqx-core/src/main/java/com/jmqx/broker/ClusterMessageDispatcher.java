@@ -18,9 +18,10 @@ public interface ClusterMessageDispatcher {
      *
      * @param topic       topic
      * @param payload     payload
+     * @param publishQos  publish qos
      * @param targetPlans target plans
      */
-    void dispatch(String topic, byte[] payload, Map<String, DispatchTarget> targetPlans);
+    void dispatch(String topic, byte[] payload, int publishQos, Map<String, DispatchTarget> targetPlans);
 
     /**
      * Dispatch target.  转发目标

@@ -39,6 +39,10 @@ import com.jmqx.router.global.GlobalSubscriptionRegistry;
 import com.jmqx.session.LocalSessionRegistry;
 import com.jmqx.session.SessionRegistry;
 import com.jmqx.store.RocksDbRetainedMessageStore;
+import com.jmqx.store.RocksDbQos1InflightStore;
+import com.jmqx.store.RocksDbQos2InflightStore;
+import com.jmqx.store.Qos1InflightStore;
+import com.jmqx.store.Qos2InflightStore;
 import com.jmqx.store.RetainedMessageStore;
 import com.jmqx.store.RetainedOverflowStrategy;
 import com.jmqx.store.RetainedStoreProperties;
@@ -89,6 +93,16 @@ public class JmqxApplication {
         AclProperties aclProperties = loadAclProperties(config);
         BridgeProperties bridgeProperties = loadBridgeProperties(config);
         RetainedStoreProperties retainedStoreProperties = loadRetainedStoreProperties(config);
+        String qos1InflightRocksdbPath = getStringProperty(
+                config,
+                "jmqx.qos1.inflight.rocksdb.path",
+                "data/qos1-inflight-rocksdb"
+        );
+        String qos2InflightRocksdbPath = getStringProperty(
+                config,
+                "jmqx.qos2.inflight.rocksdb.path",
+                "data/qos2-inflight-rocksdb"
+        );
         AdminSyncSettings adminSyncSettings = loadAdminSyncSettings(config);
         AdminPanelSettings adminPanelSettings = loadAdminPanelSettings(config);
         int sharedMaxSubscribers = getIntProperty(config, "jmqx.shared.maxSubscribersPerGroup", 1000);
@@ -127,6 +141,8 @@ public class JmqxApplication {
                 aclProperties,
                 bridgeProperties,
                 retainedStoreProperties,
+                qos1InflightRocksdbPath,
+                qos2InflightRocksdbPath,
                 sharedMaxSubscribers,
                 sharedSlowThreshold,
                 clusterRoleProvider,
@@ -140,11 +156,17 @@ public class JmqxApplication {
     }
 
     private static RuntimeComponents startRuntime(StartupContext context) throws InterruptedException {
+        // 0) 提前构建 retained store，供元数据投影器与 Broker 共用同一存储实例。
+        RetainedMessageStore retainedMessageStore = buildRetainedMessageStore(context.retainedStoreProperties());
+        Qos1InflightStore qos1InflightStore = new RocksDbQos1InflightStore(context.qos1InflightRocksdbPath());
+        Qos2InflightStore qos2InflightStore = new RocksDbQos2InflightStore(context.qos2InflightRocksdbPath());
+
         // 1) 构建并启动元数据运行时（CORE 负责写入与复制，REPLICANT 负责追平日志）。
         MetadataRuntime metadataRuntime = buildMetadataRuntime(
                 context.clusterRoleProvider(),
                 context.globalSubscriptionRegistry(),
                 context.sessionRegistry(),
+                retainedMessageStore,
                 context.clusterSettings().coreBindHost(),
                 context.clusterSettings().coreBindPort(),
                 context.clusterSettings().clusterRequestTimeoutMs(),
@@ -173,13 +195,14 @@ public class JmqxApplication {
                 context.clusterSettings().clusterNodeEndpoints()
         );
         // 将“按目标节点分发”映射到 Netty 集群传输层。
-        ClusterMessageDispatcher clusterMessageDispatcher = (topic, payload, targetPlans) -> {
+        ClusterMessageDispatcher clusterMessageDispatcher = (topic, payload, publishQos, targetPlans) -> {
             if (targetPlans == null || targetPlans.isEmpty()) {
                 return;
             }
             targetPlans.forEach((targetNodeId, target) -> clusterMessageTransport.dispatch(
                     topic,
                     payload,
+                    publishQos,
                     targetNodeId,
                     target.includeNormal(),
                     target.sharedGroups()
@@ -191,7 +214,6 @@ public class JmqxApplication {
                 context.sharedMaxSubscribers(),
                 context.sharedSlowThreshold()
         );
-        RetainedMessageStore retainedMessageStore = buildRetainedMessageStore(context.retainedStoreProperties());
         ReloadableAuthProvider authProvider = new ReloadableAuthProvider(AuthProviderFactory.create(context.authProperties()));
         ClientAuthenticator clientAuthenticator = (clientId, username, password) ->
                 authProvider.authenticate(new AuthRequest(clientId, username, password));
@@ -214,6 +236,8 @@ public class JmqxApplication {
                 sharedSubscriptionManager,
                 messageBridge,
                 context.retainedStoreProperties().isRetainedEnabled(),
+                qos1InflightStore,
+                qos2InflightStore,
                 context.globalSubscriptionRegistry(),
                 context.clusterRoleProvider().nodeId(),
                 metadataRuntime.gateway(),
@@ -402,6 +426,8 @@ public class JmqxApplication {
                 + ", rocksdbPath=" + context.retainedStoreProperties().getRocksdbPath()
                 + ", enabled=" + context.retainedStoreProperties().isRetainedEnabled()
                 + ", overflowStrategy=" + context.retainedStoreProperties().getOverflowStrategy());
+        System.out.println("QOS1 inflight rocksdbPath=" + context.qos1InflightRocksdbPath());
+        System.out.println("QOS2 inflight rocksdbPath=" + context.qos2InflightRocksdbPath());
         System.out.println("SHARED maxSubscribersPerGroup=" + context.sharedMaxSubscribers()
                 + ", slowConsumerStrikeThreshold=" + context.sharedSlowThreshold());
         System.out.println("ADMIN-SYNC enabled=" + context.adminSyncSettings().enabled()
@@ -868,6 +894,7 @@ public class JmqxApplication {
             ClusterRoleProvider clusterRoleProvider,
             GlobalSubscriptionRegistry globalSubscriptionRegistry,
             SessionRegistry sessionRegistry,
+            RetainedMessageStore retainedMessageStore,
             String coreBindHost,
             int coreBindPort,
             int clusterRequestTimeoutMs,
@@ -887,12 +914,14 @@ public class JmqxApplication {
     ) {
         JmqxMetadataProjectionHandlers handlers = new JmqxMetadataProjectionHandlers(
                 globalSubscriptionRegistry,
-                sessionRegistry
+                sessionRegistry,
+                retainedMessageStore
         );
         ClusterMetadataCommandApplier commandApplier = new ClusterMetadataCommandApplier(
                 clusterRoleProvider.nodeId(),
                 handlers::applyRouteSubscriptionCommand,
-                handlers::applyClientOnlineCommand
+                handlers::applyClientOnlineCommand,
+                handlers::applyRetainedCommand
         );
         if (clusterRoleProvider.role() == NodeRole.CORE) {
             SofaJraftMetadataCommandGateway raftGateway = new SofaJraftMetadataCommandGateway(
@@ -1294,6 +1323,8 @@ public class JmqxApplication {
             AclProperties aclProperties,
             BridgeProperties bridgeProperties,
             RetainedStoreProperties retainedStoreProperties,
+            String qos1InflightRocksdbPath,
+            String qos2InflightRocksdbPath,
             int sharedMaxSubscribers,
             int sharedSlowThreshold,
             ClusterRoleProvider clusterRoleProvider,
