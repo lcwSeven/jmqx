@@ -1,0 +1,7 @@
+# Shared subscription runtime controls.
+jmqx:
+  shared:
+    # Maximum members in one shared group.
+    maxSubscribersPerGroup: 1000
+    # Slow consumer eviction threshold.
+    slowConsumerStrikeThreshold: 3

@@ -15,7 +15,7 @@
 
 ## 2. jmqx 运行时配置
 
-使用 `jmqx-app/src/main/resources/jmqx-300k.properties` 作为基线，并确保最终生效配置一致。
+使用 `jmqx-app/src/main/resources/jmqx-300k.yaml` 作为基线，并确保最终生效配置一致。
 
 关键配置：
 
@@ -101,4 +101,3 @@ sysctl -w fs.file-max=4000000
 - 重连峰值：常见于内核队列限制或 KeepAlive 抖动。
 - EventLoop 延迟尖峰：常见于日志、bridge、auth 进入热路径。
 - GC 停顿突增：常见于订阅/路由路径对象分配抖动。
-

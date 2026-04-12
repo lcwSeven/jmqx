@@ -1,0 +1,33 @@
+# Broker network endpoints and TLS settings.
+jmqx:
+  broker:
+    # MQTT TCP listener host/port.
+    host: 0.0.0.0
+    port: 1883
+    # Netty thread model. workerThreads=0 means Netty default.
+    bossThreads: 1
+    workerThreads: 0
+    # Read idle timeout in seconds. 0 means disabled.
+    readerIdleSeconds: 120
+    # MQTT over WebSocket.
+    websocket:
+      enabled: true
+      host: 0.0.0.0
+      port: 8083
+      path: /mqtt
+    # MQTT over WebSocket TLS.
+    wss:
+      enabled: false
+      host: 0.0.0.0
+      port: 8084
+      path: /mqtt
+    # MQTT over TLS.
+    mqtts:
+      enabled: false
+      host: 0.0.0.0
+      port: 8883
+    # TLS files shared by MQTTS and WSS.
+    tls:
+      certChainFile: ""
+      privateKeyFile: ""
+      privateKeyPassword: ""

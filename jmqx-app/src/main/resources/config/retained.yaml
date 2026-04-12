@@ -1,0 +1,24 @@
+# Retained message store and QoS inflight persistence paths.
+jmqx:
+  retained:
+    # Enable retained feature globally.
+    enabled: true
+    # RocksDB path for retained messages.
+    rocksdb:
+      path: data/retained-rocksdb
+    # Retained in-memory cache limits.
+    maxEntries: 100000
+    maxBytes: 268435456
+    maxPayloadBytes: 1048576
+    # Overflow policy: evict_lru or reject_new.
+    overflowStrategy: evict_lru
+  # QoS1 outbound inflight persistence.
+  qos1:
+    inflight:
+      rocksdb:
+        path: data/qos1-inflight-rocksdb
+  # QoS2 inbound/outbound inflight persistence.
+  qos2:
+    inflight:
+      rocksdb:
+        path: data/qos2-inflight-rocksdb

@@ -1,0 +1,39 @@
+# Outbound message bridge settings.
+jmqx:
+  bridge:
+    # Enable or disable bridge pipeline globally.
+    enabled: false
+    # Enabled targets: kafka, rocketmq, mysql.
+    types: kafka,rocketmq,mysql
+    # Source MQTT topic filters. Empty means all non-dashboard topics.
+    topicFilters: ""
+    # Async bridge worker pipeline.
+    async:
+      enabled: true
+      queueCapacity: 10000
+      workerCount: 1
+    # Kafka sink.
+    kafka:
+      bootstrapServers: 127.0.0.1:9092
+      topic: jmqx-messages
+      sourceTopicFilters: ""
+      acks: "1"
+      clientId: jmqx-bridge
+      compressionType: none
+    # RocketMQ sink.
+    rocketmq:
+      nameServer: 127.0.0.1:9876
+      producerGroup: jmqx-bridge-group
+      topic: JMQX_MESSAGES
+      sourceTopicFilters: ""
+      syncSend: false
+      timeoutMs: 3000
+    # MySQL sink.
+    mysql:
+      driver: ""
+      url: jdbc:mysql://127.0.0.1:3306/jmqx
+      user: root
+      password: ""
+      table: jmqx_bridge_message
+      sourceTopicFilters: ""
+      autoCreateTable: true

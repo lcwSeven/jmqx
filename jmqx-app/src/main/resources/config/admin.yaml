@@ -1,0 +1,25 @@
+# Admin sync and embedded admin panel settings.
+jmqx:
+  admin:
+    # Enable broker -> admin data sync.
+    enabled: false
+    url: http://127.0.0.1:18080
+    clusterId: default
+    # Optional fixed node ip for reporting. Empty means auto-detect.
+    nodeIp: ""
+    # HTTP client timeout to admin backend.
+    http:
+      connectTimeoutMs: 1500
+      requestTimeoutMs: 3000
+    # Periodic metric and dashboard publish cadence.
+    metrics:
+      intervalMs: 5000
+    dashboard:
+      publishIntervalMs: 2000
+    # Embedded panel server (in jmqx-app process).
+    panel:
+      enabled: true
+      host: 0.0.0.0
+      port: 18081
+      basePath: /admin
+      backendUrl: http://127.0.0.1:18080

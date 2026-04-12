@@ -1,0 +1,79 @@
+# 30w connection benchmark profile for single-node jmqx.
+# Use this as an override template in pressure test environments.
+
+jmqx:
+  broker:
+    host: 0.0.0.0
+    port: 1883
+    mqtts:
+      enabled: false
+    websocket:
+      enabled: false
+    wss:
+      enabled: false
+    bossThreads: 1
+    workerThreads: 0
+    readerIdleSeconds: 180
+
+  retained:
+    enabled: false
+  qos1:
+    inflight:
+      rocksdb:
+        path: data/qos1-inflight-rocksdb
+  qos2:
+    inflight:
+      rocksdb:
+        path: data/qos2-inflight-rocksdb
+
+  shared:
+    maxSubscribersPerGroup: 1000
+    slowConsumerStrikeThreshold: 3
+
+  cluster:
+    role: core
+    coreEndpoints: 127.0.0.1:7800
+    core:
+      bindHost: 0.0.0.0
+      port: 7800
+    netty:
+      requestTimeoutMs: 3000
+      reconnectBackoffMs: 1000
+      ackBatchSize: 64
+      ackFlushIntervalMs: 200
+      replicantMaxInFlightEvents: 2048
+      replicantPushBatchSize: 256
+    nodeDownCleanupDelayMs: 15000
+    message:
+      bindHost: 0.0.0.0
+      port: 7900
+    nodeEndpoints: node-1=127.0.0.1:7900
+    replay:
+      maxEvents: 200000
+    raft:
+      groupId: jmqx-metadata
+      serverId: 127.0.0.1:17800
+      initialConf: 127.0.0.1:17800
+      dataPath: data/raft-metadata
+      electionTimeoutMs: 1000
+      snapshotIntervalSecs: 30
+
+  bridge:
+    enabled: false
+    topicFilters: ""
+    kafka:
+      sourceTopicFilters: ""
+    rocketmq:
+      sourceTopicFilters: ""
+    mysql:
+      sourceTopicFilters: ""
+
+  auth:
+    type: allow_all
+    chain: ""
+    cacheMillis: 0
+
+  acl:
+    type: allow_all
+    defaultAllow: true
+    cacheMillis: 0

@@ -1,10 +1,22 @@
 # JMQX 配置项完整参考
 
-本文档以 `jmqx-app/src/main/resources/jmqx.properties` 为准，按功能域分组说明配置项。
+本文档以 `jmqx-app/src/main/resources/config/*.yaml` 为默认配置基线，按功能域分组说明配置项。  
+`jmqx-app/src/main/resources/jmqx.yaml` 作为覆盖层，优先级高于模块默认配置。
 
 ## 1. 配置优先级
 
-`JVM -D` > `jmqx.properties` > 代码默认值
+`JVM -D` > `jmqx.yaml`（覆盖层） > `config/*.yaml`（模块默认） > 代码默认值
+
+默认模块文件：
+
+- `config/broker.yaml`
+- `config/security-auth.yaml`
+- `config/security-acl.yaml`
+- `config/retained.yaml`
+- `config/shared.yaml`
+- `config/cluster.yaml`
+- `config/admin.yaml`
+- `config/bridge.yaml`
 
 ## 2. Broker 网络层
 
@@ -187,7 +199,7 @@ File：
 |---|---|---|
 | `jmqx.bridge.enabled` | `false` | 是否启用桥接 |
 | `jmqx.bridge.types` | `kafka,rocketmq,mysql` | 目标类型列表 |
-| `jmqx.bridge.async` | `true` | 是否异步 |
+| `jmqx.bridge.async.enabled` | `true` | 是否异步（兼容旧键：`jmqx.bridge.async`） |
 | `jmqx.bridge.async.queueCapacity` | `10000` | 异步队列容量 |
 | `jmqx.bridge.async.workerCount` | `1` | 异步 worker 数 |
 

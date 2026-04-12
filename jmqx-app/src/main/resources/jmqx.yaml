@@ -1,0 +1,19 @@
+# JMQX override layer (YAML)
+# This file is loaded after module configs in /config/*.yaml.
+# Keep only environment-specific overrides here.
+
+# Example:
+# jmqx:
+#   node:
+#     id: node-dev-1
+#   cluster:
+#     role: core
+#     coreEndpoints: 127.0.0.1:7800
+#   broker:
+#     port: 1883
+#     websocket:
+#       port: 8083
+#   auth:
+#     type: allow_all
+#   acl:
+#     type: allow_all

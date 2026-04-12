@@ -48,6 +48,7 @@ import com.jmqx.store.RetainedOverflowStrategy;
 import com.jmqx.store.RetainedStoreProperties;
 import com.jmqx.transport.ConnectionMetrics;
 import com.jmqx.transport.NettyMqttEndpointServer;
+import org.yaml.snakeyaml.Yaml;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -72,6 +73,36 @@ import java.util.concurrent.TimeUnit;
  * @date 2026/4/2
  */
 public class JmqxApplication {
+    /**
+     * YAML 默认配置加载顺序（先模块默认，再根文件覆盖）。
+     */
+    private static final List<String> DEFAULT_YAML_CONFIG_RESOURCES = List.of(
+            "config/broker.yaml",
+            "config/security-auth.yaml",
+            "config/security-acl.yaml",
+            "config/retained.yaml",
+            "config/shared.yaml",
+            "config/cluster.yaml",
+            "config/admin.yaml",
+            "config/bridge.yaml",
+            "jmqx.yaml"
+    );
+
+    /**
+     * 旧版 properties 兼容加载顺序（后加载用于覆盖）。
+     */
+    private static final List<String> LEGACY_PROPERTIES_CONFIG_RESOURCES = List.of(
+            "config/broker.properties",
+            "config/security-auth.properties",
+            "config/security-acl.properties",
+            "config/retained.properties",
+            "config/shared.properties",
+            "config/cluster.properties",
+            "config/admin.properties",
+            "config/bridge.properties",
+            "jmqx.properties"
+    );
+
     public static void main(String[] args) throws InterruptedException {
         // 加载配置文件与 JVM 覆盖参数。
         Properties config = loadConfigProperties();
@@ -466,13 +497,77 @@ public class JmqxApplication {
 
     private static Properties loadConfigProperties() {
         Properties properties = new Properties();
-        try (InputStream in = JmqxApplication.class.getClassLoader().getResourceAsStream("jmqx.properties")) {
-            if (in != null) {
-                properties.load(in);
+        for (String resource : DEFAULT_YAML_CONFIG_RESOURCES) {
+            try (InputStream in = JmqxApplication.class.getClassLoader().getResourceAsStream(resource)) {
+                if (in == null) {
+                    continue;
+                }
+                loadYamlIntoProperties(in, properties);
+            } catch (IOException ignored) {
             }
-        } catch (IOException ignored) {
+        }
+        for (String resource : LEGACY_PROPERTIES_CONFIG_RESOURCES) {
+            try (InputStream in = JmqxApplication.class.getClassLoader().getResourceAsStream(resource)) {
+                if (in == null) {
+                    continue;
+                }
+                properties.load(in);
+            } catch (IOException ignored) {
+            }
         }
         return properties;
+    }
+
+    /**
+     * 把 YAML 结构拍平为点分键，写入 Properties。
+     */
+    @SuppressWarnings("unchecked")
+    private static void loadYamlIntoProperties(InputStream in, Properties properties) {
+        if (in == null || properties == null) {
+            return;
+        }
+        Object root = new Yaml().load(in);
+        if (!(root instanceof Map<?, ?> rootMap)) {
+            return;
+        }
+        flattenYamlMap("", (Map<Object, Object>) rootMap, properties);
+    }
+
+    /**
+     * 递归拍平 YAML map：a.b.c = value。
+     */
+    private static void flattenYamlMap(String prefix, Map<Object, Object> map, Properties properties) {
+        if (map == null || properties == null) {
+            return;
+        }
+        for (Map.Entry<Object, Object> entry : map.entrySet()) {
+            if (entry.getKey() == null) {
+                continue;
+            }
+            String key = entry.getKey().toString().trim();
+            if (key.isEmpty()) {
+                continue;
+            }
+            String fullKey = prefix == null || prefix.isBlank() ? key : (prefix + "." + key);
+            Object value = entry.getValue();
+            if (value instanceof Map<?, ?> nestedMap) {
+                @SuppressWarnings("unchecked")
+                Map<Object, Object> casted = (Map<Object, Object>) nestedMap;
+                flattenYamlMap(fullKey, casted, properties);
+                continue;
+            }
+            if (value instanceof List<?> listValue) {
+                List<String> flattened = new ArrayList<>();
+                for (Object item : listValue) {
+                    if (item != null) {
+                        flattened.add(item.toString());
+                    }
+                }
+                properties.setProperty(fullKey, String.join(",", flattened));
+                continue;
+            }
+            properties.setProperty(fullKey, value == null ? "" : value.toString());
+        }
     }
 
     private static BrokerProperties loadBrokerProperties(Properties config) {
@@ -616,7 +711,12 @@ public class JmqxApplication {
         properties.setEnabled(getBooleanProperty(config, "jmqx.bridge.enabled", properties.isEnabled()));
         properties.setTypes(getStringProperty(config, "jmqx.bridge.types", properties.getTypes()));
         properties.setTopicFilters(getStringProperty(config, "jmqx.bridge.topicFilters", properties.getTopicFilters()));
-        properties.setAsync(getBooleanProperty(config, "jmqx.bridge.async", properties.isAsync()));
+        properties.setAsync(getBooleanProperty(
+                config,
+                "jmqx.bridge.async.enabled",
+                "jmqx.bridge.async",
+                properties.isAsync()
+        ));
         properties.setAsyncQueueCapacity(getIntProperty(
                 config,
                 "jmqx.bridge.async.queueCapacity",
@@ -1232,6 +1332,40 @@ public class JmqxApplication {
 
     private static boolean getBooleanProperty(Properties config, String key, boolean defaultValue) {
         String raw = getStringProperty(config, key, Boolean.toString(defaultValue));
+        if ("true".equalsIgnoreCase(raw) || "1".equals(raw) || "yes".equalsIgnoreCase(raw)) {
+            return true;
+        }
+        if ("false".equalsIgnoreCase(raw) || "0".equals(raw) || "no".equalsIgnoreCase(raw)) {
+            return false;
+        }
+        return defaultValue;
+    }
+
+    /**
+     * 兼容历史配置键的布尔读取。
+     * 当新键缺失时回退到 legacyKey。
+     */
+    private static boolean getBooleanProperty(Properties config, String key, String legacyKey, boolean defaultValue) {
+        String system = System.getProperty(key);
+        if (system == null || system.isBlank()) {
+            system = System.getProperty(legacyKey);
+        }
+        if (system != null && !system.isBlank()) {
+            if ("true".equalsIgnoreCase(system) || "1".equals(system) || "yes".equalsIgnoreCase(system)) {
+                return true;
+            }
+            if ("false".equalsIgnoreCase(system) || "0".equals(system) || "no".equalsIgnoreCase(system)) {
+                return false;
+            }
+            return defaultValue;
+        }
+        String raw = config.getProperty(key);
+        if (raw == null || raw.isBlank()) {
+            raw = config.getProperty(legacyKey);
+        }
+        if (raw == null || raw.isBlank()) {
+            return defaultValue;
+        }
         if ("true".equalsIgnoreCase(raw) || "1".equals(raw) || "yes".equalsIgnoreCase(raw)) {
             return true;
         }

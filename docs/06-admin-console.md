@@ -12,7 +12,7 @@ JMQX 管理页面是 `jmqx-app` 的内嵌控制台，目标是提供：
 
 ## 2. 启动与访问
 
-默认配置（`jmqx.properties`）：
+默认配置（`jmqx.yaml`）：
 
 - `jmqx.admin.panel.enabled=true`
 - `jmqx.admin.panel.host=0.0.0.0`

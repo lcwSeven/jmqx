@@ -73,7 +73,7 @@ mvn -pl jmqx-app -am exec:java
 
 - `http://127.0.0.1:18081/admin/`
 
-默认配置（见 `jmqx-app/src/main/resources/jmqx.properties`）：
+默认配置（见 `jmqx-app/src/main/resources/jmqx.yaml`）：
 
 - `jmqx.admin.panel.enabled=true`
 - `jmqx.admin.panel.host=0.0.0.0`
@@ -116,12 +116,12 @@ mvn -pl jmqx-bench -am exec:java -Dexec.args="--host=127.0.0.1 --port=1883 --cli
 
 配置优先级：
 
-`JVM -D` > `jmqx.properties` > 代码默认值
+`JVM -D` > `jmqx.yaml`（覆盖层） > `config/*.yaml`（模块默认） > 代码默认值
 
 主配置文件：
 
-- `jmqx-app/src/main/resources/jmqx.properties`
-- `jmqx-app/src/main/resources/jmqx-300k.properties`
+- `jmqx-app/src/main/resources/jmqx.yaml`
+- `jmqx-app/src/main/resources/jmqx-300k.yaml`
 
 网络监听常用参数：
 

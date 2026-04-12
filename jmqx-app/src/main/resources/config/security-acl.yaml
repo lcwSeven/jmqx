@@ -1,0 +1,24 @@
+# ACL authorization plugin settings.
+jmqx:
+  acl:
+    # Primary ACL mode. Typical values: allow_all/http/redis/file.
+    type: allow_all
+    # Default behavior when no ACL rule/plugin match is found.
+    defaultAllow: false
+    # ACL cache ttl in milliseconds.
+    cacheMillis: 60000
+    # HTTP ACL backend.
+    http:
+      url: http://127.0.0.1:8080/acl/check
+      timeoutMs: 2000
+    # Redis ACL backend.
+    redis:
+      host: 127.0.0.1
+      port: 6379
+      password: ""
+      db: 0
+      keyPrefix: jmqx:acl
+      timeoutMs: 2000
+    # File ACL backend.
+    file:
+      path: acl-rules.txt

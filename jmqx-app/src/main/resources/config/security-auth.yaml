@@ -1,0 +1,31 @@
+# Client AUTH plugin chain and backend data source settings.
+jmqx:
+  auth:
+    # Primary auth mode. Typical values: allow_all/http/file/redis/db.
+    type: allow_all
+    # Ordered auth chain. Empty means use type only.
+    chain: ""
+    # Positive/negative auth cache ttl in milliseconds.
+    cacheMillis: 60000
+    # HTTP auth backend.
+    http:
+      url: http://127.0.0.1:8080/auth/check
+      timeoutMs: 2000
+    # File auth backend.
+    file:
+      path: auth-users.txt
+    # Redis auth backend.
+    redis:
+      host: 127.0.0.1
+      port: 6379
+      password: ""
+      db: 0
+      keyPrefix: jmqx:auth
+      timeoutMs: 2000
+    # JDBC auth backend.
+    db:
+      driver: ""
+      url: jdbc:mysql://127.0.0.1:3306/jmqx
+      user: root
+      password: ""
+      query: "SELECT password FROM mqtt_user WHERE username = ?"
