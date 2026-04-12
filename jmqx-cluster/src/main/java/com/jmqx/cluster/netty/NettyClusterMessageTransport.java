@@ -28,7 +28,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.BiConsumer;
 import java.util.logging.Logger;
 
 /**
@@ -42,7 +41,7 @@ public class NettyClusterMessageTransport implements MetadataReplicator {
     private static final Logger LOG = Logger.getLogger(NettyClusterMessageTransport.class.getName());
     private static final short MAGIC = (short) 0x4A4D;
     private static final byte VERSION = 2;
-
+    // 本地节点 ID
     private final String localNodeId;
     private final String bindHost;
     private final int bindPort;
@@ -56,6 +55,13 @@ public class NettyClusterMessageTransport implements MetadataReplicator {
     private NioEventLoopGroup serverWorkerGroup;
     private Channel serverChannel;
 
+    /**
+     * @param localNodeId      当前节点 ID，用于避免消息回环回发到自己
+     * @param bindHost         集群消息服务监听地址
+     * @param bindPort         集群消息服务监听端口
+     * @param requestTimeoutMs 发送到目标节点时的连接超时
+     * @param nodeEndpoints    节点路由表，格式：nodeId -> host:port
+     */
     public NettyClusterMessageTransport(
         String localNodeId,
         String bindHost,
@@ -70,49 +76,39 @@ public class NettyClusterMessageTransport implements MetadataReplicator {
         this.nodeEndpointMap = parseNodeEndpoints(nodeEndpoints);
     }
 
+    /**
+     * 设置集群消息消费者。
+     * 该回调在接收端解码成功后执行，最终由 Broker 进行本地消息分发。
+     */
     public void setMessageConsumer(ClusterMessageConsumer messageConsumer) {
         this.messageConsumer = messageConsumer == null ? (topic, payload, includeNormal, sharedGroups) -> {
         } : messageConsumer;
     }
 
-    public void setMessageConsumer(BiConsumer<String, byte[]> messageConsumer) {
-        if (messageConsumer == null) {
-            this.messageConsumer = (topic, payload, includeNormal, sharedGroups) -> {
-            };
-            return;
-        }
-        this.messageConsumer = (topic, payload, includeNormal, sharedGroups) -> messageConsumer.accept(topic, payload);
-    }
-
-    public void dispatch(String topic, byte[] payload, Set<String> targetNodeIds) {
-        dispatch(topic, payload, targetNodeIds, true, null);
-    }
-
-    public void dispatch(String topic, byte[] payload, Set<String> targetNodeIds, boolean includeNormal, Set<String> sharedGroups) {
-        if (!running.get() || topic == null || topic.isBlank() || payload == null || targetNodeIds == null || targetNodeIds.isEmpty()) {
-            return;
-        }
-        for (String targetNodeId : targetNodeIds) {
-            if (targetNodeId == null || targetNodeId.isBlank() || targetNodeId.equals(localNodeId)) {
-                continue;
-            }
-            dispatch(topic, payload, targetNodeId, includeNormal, sharedGroups);
-        }
-    }
-
+    /**
+     * 向单个目标节点投递跨节点消息。
+     *
+     * includeNormal / sharedGroups 用于表达“本次远端投递需要覆盖的订阅目标类型”：
+     * 1. includeNormal=true：投递远端普通订阅
+     * 2. sharedGroups 非空：仅投递指定共享组
+     */
     public void dispatch(String topic, byte[] payload, String targetNodeId, boolean includeNormal, Set<String> sharedGroups) {
         if (!running.get() || topic == null || topic.isBlank() || payload == null || targetNodeId == null || targetNodeId.isBlank()) {
             return;
         }
+        // 本地节点不投递
         if (targetNodeId.equals(localNodeId)) {
             return;
         }
+        // 从集群节点中获取目标节点地址
         ClusterEndpoint endpoint = nodeEndpointMap.get(targetNodeId);
         if (endpoint == null) {
             LOG.fine(() -> "[CLUSTER][MSG] missing endpoint for nodeId=" + targetNodeId);
             return;
         }
+        // 将消息包装成自定义协议
         byte[] frame = encode(new ClusterPublishFrame(localNodeId, topic, payload, includeNormal, normalizeSharedGroups(sharedGroups)));
+        // 投递
         sendOnce(endpoint, frame);
     }
 
@@ -121,6 +117,7 @@ public class NettyClusterMessageTransport implements MetadataReplicator {
         if (!running.compareAndSet(false, true)) {
             return;
         }
+        // 启动接收端：一个 boss 负责 accept，worker 负责读写与编解码。
         serverBossGroup = new NioEventLoopGroup(1);
         serverWorkerGroup = new NioEventLoopGroup();
         try {
@@ -132,8 +129,10 @@ public class NettyClusterMessageTransport implements MetadataReplicator {
                 .childHandler(new ChannelInitializer<SocketChannel>() {
                     @Override
                     protected void initChannel(SocketChannel ch) {
+                        // 协议帧格式：4 字节长度 + 业务帧；先拆包，再做业务解码。
                         ch.pipeline().addLast(new LengthFieldBasedFrameDecoder(16 * 1024 * 1024, 0, 4, 0, 4));
                         ch.pipeline().addLast(new ClusterFrameDecoder());
+                        // 发送方向：先加长度头，再写业务帧。
                         ch.pipeline().addLast(new LengthFieldPrepender(4));
                         ch.pipeline().addLast(new ClusterFrameEncoder());
                         ch.pipeline().addLast(new ClusterServerHandler());
@@ -153,6 +152,7 @@ public class NettyClusterMessageTransport implements MetadataReplicator {
         if (!running.compareAndSet(true, false)) {
             return;
         }
+        // 停机顺序：先关监听通道，再关 worker，再关 boss，避免出现新连接进入。
         if (serverChannel != null) {
             serverChannel.close().syncUninterruptibly();
             serverChannel = null;
@@ -169,6 +169,8 @@ public class NettyClusterMessageTransport implements MetadataReplicator {
     }
 
     private void sendOnce(ClusterEndpoint endpoint, byte[] frame) {
+        // 当前实现是“短连接单次发送”模型：每次 dispatch 临时建连、发送、关闭。
+        // 优点：实现简单；缺点：高频跨节点场景下连接开销较大，后续可演进连接池。
         NioEventLoopGroup clientGroup = new NioEventLoopGroup(1);
         try {
             Bootstrap bootstrap = new Bootstrap();
@@ -192,6 +194,9 @@ public class NettyClusterMessageTransport implements MetadataReplicator {
         }
     }
 
+    /**
+     * 解析静态节点路由表（nodeId -> host:port）。
+     */
     private static Map<String, ClusterEndpoint> parseNodeEndpoints(Map<String, String> nodeEndpoints) {
         if (nodeEndpoints == null || nodeEndpoints.isEmpty()) {
             return Collections.emptyMap();
@@ -209,6 +214,10 @@ public class NettyClusterMessageTransport implements MetadataReplicator {
         return result;
     }
 
+    /**
+     * 协议编码：
+     * magic(2) + version(1) + sourceNodeId + topic + payload + includeNormal + sharedGroups
+     */
     private static byte[] encode(ClusterPublishFrame frame) {
         try {
             ByteArrayOutputStream out = new ByteArrayOutputStream(256);
@@ -236,6 +245,10 @@ public class NettyClusterMessageTransport implements MetadataReplicator {
         }
     }
 
+    /**
+     * 协议解码，同时兼容历史 V1 帧：
+     * V1 不包含 includeNormal/sharedGroups，默认等价 includeNormal=true。
+     */
     private static ClusterPublishFrame decode(byte[] payload) {
         try {
             DataInputStream input = new DataInputStream(new ByteArrayInputStream(payload));
@@ -273,6 +286,11 @@ public class NettyClusterMessageTransport implements MetadataReplicator {
         }
     }
 
+    /**
+     * 共享组集合归一化：
+     * 1. 过滤空值
+     * 2. 按字典序排序，保证编码结果稳定（便于排查与测试）
+     */
     private static Set<String> normalizeSharedGroups(Set<String> sharedGroups) {
         if (sharedGroups == null) {
             return null;
@@ -329,6 +347,7 @@ public class NettyClusterMessageTransport implements MetadataReplicator {
             if (msg == null || msg.topic() == null || msg.topic().isBlank() || msg.payload() == null) {
                 return;
             }
+            // 将解码后的路由目标约束透传给上层 Broker，交由本地路由器做最终派发。
             messageConsumer.accept(msg.topic(), msg.payload(), msg.includeNormal(), msg.sharedGroups());
         }
 

@@ -3,7 +3,6 @@ package com.jmqx.bridge;
 import org.apache.rocketmq.client.producer.DefaultMQProducer;
 import org.apache.rocketmq.common.message.Message;
 
-import java.nio.charset.StandardCharsets;
 import java.util.logging.Logger;
 
 /**
@@ -34,20 +33,20 @@ public class RocketMqMessageBridge implements MessageBridge {
     @Override
     public void publish(BridgeMessage message) {
         try {
-            Message mqMessage = new Message(topic, toTag(message.getTopic()), message.getPayload());
-            mqMessage.putUserProperty("mqttTopic", nullToEmpty(message.getTopic()));
-            mqMessage.putUserProperty("clientId", nullToEmpty(message.getClientId()));
-            mqMessage.putUserProperty("qos", Integer.toString(message.getQos()));
-            mqMessage.putUserProperty("retain", Boolean.toString(message.isRetain()));
-            mqMessage.putUserProperty("publishedAt", Long.toString(message.getPublishedAt()));
-            mqMessage.setKeys(nullToEmpty(message.getClientId()) + ":" + nullToEmpty(message.getTopic()));
+            Message mqMessage = new Message(topic, toTag(message.topic()), message.payload());
+            mqMessage.putUserProperty("mqttTopic", nullToEmpty(message.topic()));
+            mqMessage.putUserProperty("clientId", nullToEmpty(message.clientId()));
+            mqMessage.putUserProperty("qos", Integer.toString(message.qos()));
+            mqMessage.putUserProperty("retain", Boolean.toString(message.retain()));
+            mqMessage.putUserProperty("publishedAt", Long.toString(message.publishedAt()));
+            mqMessage.setKeys(nullToEmpty(message.clientId()) + ":" + nullToEmpty(message.topic()));
             if (syncSend) {
                 producer.send(mqMessage, timeoutMs);
                 return;
             }
             producer.sendOneway(mqMessage);
         } catch (Exception e) {
-            LOG.warning("[BRIDGE][ROCKETMQ] send failed topic=" + message.getTopic() + ", error=" + e.getMessage());
+            LOG.warning("[BRIDGE][ROCKETMQ] send failed topic=" + message.topic() + ", error=" + e.getMessage());
         }
     }
 

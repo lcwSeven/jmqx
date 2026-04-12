@@ -72,7 +72,7 @@ public class AsyncMessageBridge implements MessageBridge {
         boolean published = disruptor.getRingBuffer()
             .tryPublishEvent((event, sequence, value) -> event.message = value, message);
         if (!published) {
-            LOG.warning("[BRIDGE] async queue is full, drop message topic=" + message.getTopic());
+            LOG.warning("[BRIDGE] async queue is full, drop message topic=" + message.topic());
         }
     }
 

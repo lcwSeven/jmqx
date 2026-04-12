@@ -7,6 +7,7 @@ import java.util.List;
  * @date 2026/4/2
  */
 public interface RetainedMessageStore {
+
     void saveOrRemove(RetainedMessage message);
 
     List<RetainedMessage> findByTopicFilter(String topicFilter);

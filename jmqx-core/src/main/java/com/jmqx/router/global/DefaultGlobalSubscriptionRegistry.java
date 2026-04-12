@@ -14,7 +14,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
  * In-memory global subscription registry.
- *
+ * <p>
  * Design:
  * 1. Normal subscriptions are indexed by topic trie: topicFilter -> node set.
  * 2. Shared subscriptions are indexed by (group, topicFilter): group -> trie(topicFilter -> node set).
@@ -51,24 +51,6 @@ public class DefaultGlobalSubscriptionRegistry implements GlobalSubscriptionRegi
         }
     }
 
-    @Override
-    public void applyBatch(List<GlobalSubscriptionEvent> events) {
-        if (events == null || events.isEmpty()) {
-            return;
-        }
-        lock.writeLock().lock();
-        try {
-            for (GlobalSubscriptionEvent event : events) {
-                if (event == null || event.getLogIndex() <= appliedLogIndex.get()) {
-                    continue;
-                }
-                applyEventInternal(event);
-                appliedLogIndex.set(event.getLogIndex());
-            }
-        } finally {
-            lock.writeLock().unlock();
-        }
-    }
 
     @Override
     public void clear() {
@@ -104,47 +86,6 @@ public class DefaultGlobalSubscriptionRegistry implements GlobalSubscriptionRegi
         }
     }
 
-    @Override
-    public List<GlobalSubscriptionEvent> buildNodeDownCleanupEvents(String nodeId, long startLogIndexExclusive) {
-        if (nodeId == null || nodeId.isBlank()) {
-            return Collections.emptyList();
-        }
-        lock.readLock().lock();
-        try {
-            Set<String> topicKeys = nodeToTopicKeys.get(nodeId);
-            if (topicKeys == null || topicKeys.isEmpty()) {
-                return Collections.emptyList();
-            }
-
-            List<GlobalSubscriptionEvent> events = new ArrayList<>(topicKeys.size());
-            long next = Math.max(startLogIndexExclusive, appliedLogIndex.get());
-            for (String topicKey : topicKeys) {
-                TopicKey key = TopicKey.parse(topicKey);
-                if (key == null) {
-                    continue;
-                }
-                next++;
-                events.add(GlobalSubscriptionEvent.unregister(next, nodeId, key.topicFilter, key.sharedGroup));
-            }
-            return events;
-        } finally {
-            lock.readLock().unlock();
-        }
-    }
-
-    @Override
-    public Set<String> getNodeTopicKeys(String nodeId) {
-        lock.readLock().lock();
-        try {
-            Set<String> keys = nodeToTopicKeys.get(nodeId);
-            if (keys == null) {
-                return Collections.emptySet();
-            }
-            return Set.copyOf(keys);
-        } finally {
-            lock.readLock().unlock();
-        }
-    }
 
     @Override
     public Map<String, Set<String>> snapshotNodeToTopicKeys() {
@@ -183,8 +124,8 @@ public class DefaultGlobalSubscriptionRegistry implements GlobalSubscriptionRegi
 
         if (topicKey.isShared()) {
             TopicTrie<Set<String>> trie = sharedGroupToTopicToNodes.computeIfAbsent(
-                topicKey.sharedGroup,
-                ignored -> new TopicTrie<>()
+                    topicKey.sharedGroup,
+                    ignored -> new TopicTrie<>()
             );
             trie.computeIfAbsent(topicKey.topicFilter, ConcurrentHashMap::newKeySet).add(nodeId);
             return;

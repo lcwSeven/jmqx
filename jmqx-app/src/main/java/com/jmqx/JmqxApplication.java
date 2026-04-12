@@ -16,6 +16,7 @@ import com.jmqx.broker.MqttBrokerMessageHandler;
 import com.jmqx.bridge.BridgeProperties;
 import com.jmqx.bridge.MessageBridge;
 import com.jmqx.bridge.MessageBridgeFactory;
+import com.jmqx.cluster.ClusterMetadataCommandApplier;
 import com.jmqx.cluster.ClusterRoleProvider;
 import com.jmqx.cluster.MetadataCommand;
 import com.jmqx.cluster.MetadataCommandGateway;
@@ -34,9 +35,8 @@ import com.jmqx.router.LocalSubscriptionRegistry;
 import com.jmqx.router.SharedSubscriptionManager;
 import com.jmqx.router.SubscriptionRegistry;
 import com.jmqx.router.global.DefaultGlobalSubscriptionRegistry;
-import com.jmqx.router.global.GlobalSubscriptionEvent;
 import com.jmqx.router.global.GlobalSubscriptionRegistry;
-import com.jmqx.session.InMemorySessionRegistry;
+import com.jmqx.session.LocalSessionRegistry;
 import com.jmqx.session.SessionRegistry;
 import com.jmqx.store.RocksDbRetainedMessageStore;
 import com.jmqx.store.RetainedMessageStore;
@@ -97,7 +97,7 @@ public class JmqxApplication {
         NodeRole nodeRole = NodeRole.from(getStringProperty(config, "jmqx.cluster.role", "core"), NodeRole.CORE);
         Set<String> coreEndpoints = getStringSetProperty(config, "jmqx.cluster.coreEndpoints");
         ClusterRoleProvider clusterRoleProvider = new StaticClusterRoleProvider(nodeRole, nodeId, coreEndpoints);
-        SessionRegistry sessionRegistry = new InMemorySessionRegistry();
+        SessionRegistry sessionRegistry = new LocalSessionRegistry();
         SubscriptionRegistry subscriptionRegistry = new LocalSubscriptionRegistry();
         GlobalSubscriptionRegistry globalSubscriptionRegistry = new DefaultGlobalSubscriptionRegistry();
         ClusterSettings clusterSettings = new ClusterSettings(
@@ -140,9 +140,11 @@ public class JmqxApplication {
     }
 
     private static RuntimeComponents startRuntime(StartupContext context) throws InterruptedException {
+        // 1) 构建并启动元数据运行时（CORE 负责写入与复制，REPLICANT 负责追平日志）。
         MetadataRuntime metadataRuntime = buildMetadataRuntime(
                 context.clusterRoleProvider(),
                 context.globalSubscriptionRegistry(),
+                context.sessionRegistry(),
                 context.clusterSettings().coreBindHost(),
                 context.clusterSettings().coreBindPort(),
                 context.clusterSettings().clusterRequestTimeoutMs(),
@@ -162,6 +164,7 @@ public class JmqxApplication {
         );
         metadataRuntime.replicator().start();
 
+        // 2) 初始化集群消息传输层，用于跨节点转发数据面 PUBLISH。
         NettyClusterMessageTransport clusterMessageTransport = new NettyClusterMessageTransport(
                 context.clusterRoleProvider().nodeId(),
                 context.clusterSettings().clusterMessageBindHost(),
@@ -169,19 +172,21 @@ public class JmqxApplication {
                 context.clusterSettings().clusterRequestTimeoutMs(),
                 context.clusterSettings().clusterNodeEndpoints()
         );
+        // 将“按目标节点分发”映射到 Netty 集群传输层。
         ClusterMessageDispatcher clusterMessageDispatcher = (topic, payload, targetPlans) -> {
             if (targetPlans == null || targetPlans.isEmpty()) {
                 return;
             }
             targetPlans.forEach((targetNodeId, target) -> clusterMessageTransport.dispatch(
-                topic,
-                payload,
-                targetNodeId,
-                target.includeNormal(),
-                target.sharedGroups()
+                    topic,
+                    payload,
+                    targetNodeId,
+                    target.includeNormal(),
+                    target.sharedGroups()
             ));
         };
 
+        // 3) 组装 Broker 依赖：共享订阅、保留消息、AUTH/ACL、桥接、连接指标、管理上报。
         SharedSubscriptionManager sharedSubscriptionManager = new SharedSubscriptionManager(
                 context.sharedMaxSubscribers(),
                 context.sharedSlowThreshold()
@@ -199,6 +204,7 @@ public class JmqxApplication {
                 connectionMetrics
         );
 
+        // 4) 构建 MQTT 核心处理器，统一处理 CONNECT/SUBSCRIBE/PUBLISH 等协议流转。
         MqttBrokerMessageHandler brokerMessageHandler = new MqttBrokerMessageHandler(
                 context.sessionRegistry(),
                 context.subscriptionRegistry(),
@@ -213,13 +219,16 @@ public class JmqxApplication {
                 metadataRuntime.gateway(),
                 clusterMessageDispatcher,
                 adminReporter,
-                context.adminSyncSettings().clusterId()
+                context.adminSyncSettings().clusterId(),
+                context.bridgeProperties().getTopicFilters()
         );
+        // 绑定集群入站消息回调：收到跨节点消息后交给 Broker 路由。
         clusterMessageTransport.setMessageConsumer(
-            (topic, payload, includeNormal, sharedGroups) ->
-                brokerMessageHandler.onClusterPublish(topic, payload, includeNormal, sharedGroups)
+                brokerMessageHandler::onClusterPublish
         );
         clusterMessageTransport.start();
+
+        // 5) 启动 Dashboard 定时发布任务，输出节点与连接统计。
         ScheduledExecutorService dashboardPublisher = startDashboardPublisher(
                 brokerMessageHandler,
                 context.clusterRoleProvider().nodeId(),
@@ -229,6 +238,8 @@ public class JmqxApplication {
                 connectionMetrics,
                 context.adminSyncSettings().dashboardPublishIntervalMs()
         );
+
+        // 6) 启动管理面并注入运行时热更新回调（安全配置与集群配置）。
         AdminPanelServer adminPanelServer = startAdminPanelServer(
                 context.adminPanelSettings(),
                 context.adminSyncSettings().clusterId(),
@@ -253,7 +264,10 @@ public class JmqxApplication {
                 )
         );
 
+        // 7) 启动 MQTT/MQTTS/WS/WSS 监听端点。
         EndpointServers endpointServers = startEndpointServers(context.brokerProperties(), brokerMessageHandler, connectionMetrics);
+
+        // 8) 聚合运行组件，交由 shutdown hook 做统一释放。
         return new RuntimeComponents(
                 context,
                 metadataRuntime,
@@ -380,7 +394,8 @@ public class JmqxApplication {
         System.out.println("AUTH plugin: " + context.authProperties().getType());
         System.out.println("ACL plugin: " + context.aclProperties().getType());
         System.out.println("BRIDGE enabled=" + context.bridgeProperties().isEnabled()
-                + ", types=" + context.bridgeProperties().getTypes());
+                + ", types=" + context.bridgeProperties().getTypes()
+                + ", topicFilters=" + context.bridgeProperties().getTopicFilters());
         System.out.println("RETAINED maxEntries=" + context.retainedStoreProperties().getMaxEntries()
                 + ", maxBytes=" + context.retainedStoreProperties().getMaxBytes()
                 + ", maxPayloadBytes=" + context.retainedStoreProperties().getMaxPayloadBytes()
@@ -574,6 +589,7 @@ public class JmqxApplication {
         BridgeProperties properties = new BridgeProperties();
         properties.setEnabled(getBooleanProperty(config, "jmqx.bridge.enabled", properties.isEnabled()));
         properties.setTypes(getStringProperty(config, "jmqx.bridge.types", properties.getTypes()));
+        properties.setTopicFilters(getStringProperty(config, "jmqx.bridge.topicFilters", properties.getTopicFilters()));
         properties.setAsync(getBooleanProperty(config, "jmqx.bridge.async", properties.isAsync()));
         properties.setAsyncQueueCapacity(getIntProperty(
                 config,
@@ -595,6 +611,11 @@ public class JmqxApplication {
                 config,
                 "jmqx.bridge.kafka.topic",
                 properties.getKafkaTopic()
+        ));
+        properties.setKafkaSourceTopicFilters(getStringProperty(
+                config,
+                "jmqx.bridge.kafka.sourceTopicFilters",
+                properties.getKafkaSourceTopicFilters()
         ));
         properties.setKafkaAcks(getStringProperty(
                 config,
@@ -626,6 +647,11 @@ public class JmqxApplication {
                 config,
                 "jmqx.bridge.rocketmq.topic",
                 properties.getRocketmqTopic()
+        ));
+        properties.setRocketmqSourceTopicFilters(getStringProperty(
+                config,
+                "jmqx.bridge.rocketmq.sourceTopicFilters",
+                properties.getRocketmqSourceTopicFilters()
         ));
         properties.setRocketmqSyncSend(getBooleanProperty(
                 config,
@@ -662,6 +688,11 @@ public class JmqxApplication {
                 config,
                 "jmqx.bridge.mysql.table",
                 properties.getMysqlTable()
+        ));
+        properties.setMysqlSourceTopicFilters(getStringProperty(
+                config,
+                "jmqx.bridge.mysql.sourceTopicFilters",
+                properties.getMysqlSourceTopicFilters()
         ));
         properties.setMysqlAutoCreateTable(getBooleanProperty(
                 config,
@@ -836,6 +867,7 @@ public class JmqxApplication {
     private static MetadataRuntime buildMetadataRuntime(
             ClusterRoleProvider clusterRoleProvider,
             GlobalSubscriptionRegistry globalSubscriptionRegistry,
+            SessionRegistry sessionRegistry,
             String coreBindHost,
             int coreBindPort,
             int clusterRequestTimeoutMs,
@@ -853,6 +885,15 @@ public class JmqxApplication {
             int clusterReplicantPushBatchSize,
             int clusterNodeDownCleanupDelayMs
     ) {
+        JmqxMetadataProjectionHandlers handlers = new JmqxMetadataProjectionHandlers(
+                globalSubscriptionRegistry,
+                sessionRegistry
+        );
+        ClusterMetadataCommandApplier commandApplier = new ClusterMetadataCommandApplier(
+                clusterRoleProvider.nodeId(),
+                handlers::applyRouteSubscriptionCommand,
+                handlers::applyClientOnlineCommand
+        );
         if (clusterRoleProvider.role() == NodeRole.CORE) {
             SofaJraftMetadataCommandGateway raftGateway = new SofaJraftMetadataCommandGateway(
                     raftGroupId,
@@ -863,11 +904,7 @@ public class JmqxApplication {
                     raftSnapshotIntervalSecs,
                     clusterRequestTimeoutMs
             );
-            raftGateway.registerApplier((logIndex, command) -> applyRouteSubscriptionCommand(
-                    globalSubscriptionRegistry,
-                    command,
-                    logIndex
-            ));
+            raftGateway.registerApplier(commandApplier::apply);
             NettyMetadataCoreServer coreServer = new NettyMetadataCoreServer(
                     coreBindHost,
                     coreBindPort,
@@ -896,7 +933,7 @@ public class JmqxApplication {
                 clusterReconnectBackoffMs,
                 clusterAckBatchSize,
                 clusterAckFlushIntervalMs,
-                (logIndex, command) -> applyRouteSubscriptionCommand(globalSubscriptionRegistry, command, logIndex),
+                commandApplier::apply,
                 globalSubscriptionRegistry::clear
         );
         return new MetadataRuntime(gateway, replicator);
@@ -942,35 +979,6 @@ public class JmqxApplication {
             }
         });
         return new MetadataSnapshot(globalSubscriptionRegistry.appliedLogIndex(), commands);
-    }
-
-    private static void applyRouteSubscriptionCommand(
-            GlobalSubscriptionRegistry globalSubscriptionRegistry,
-            MetadataCommand command,
-            long logIndex
-    ) {
-        if (command == null || globalSubscriptionRegistry == null) {
-            return;
-        }
-        if (!"route.subscription".equals(command.namespace())) {
-            return;
-        }
-        String topicFilter = command.key();
-        if (topicFilter == null || topicFilter.isBlank()) {
-            return;
-        }
-        String sourceNode = command.sourceNodeId();
-        if (sourceNode == null || sourceNode.isBlank()) {
-            return;
-        }
-        String sharedGroup = (command.value() == null || command.value().isBlank()) ? null : command.value();
-        if ("register".equals(command.operation())) {
-            globalSubscriptionRegistry.apply(GlobalSubscriptionEvent.register(logIndex, sourceNode, topicFilter, sharedGroup));
-            return;
-        }
-        if ("unregister".equals(command.operation())) {
-            globalSubscriptionRegistry.apply(GlobalSubscriptionEvent.unregister(logIndex, sourceNode, topicFilter, sharedGroup));
-        }
     }
 
     private static EmbeddedAdminStateStore.SecurityConfig buildInitialSecurityConfig(

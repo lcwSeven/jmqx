@@ -46,18 +46,30 @@ import java.util.logging.Logger;
 public class SofaJraftMetadataCommandGateway implements MetadataCommandGateway, MetadataReplicator {
     private static final Logger LOG = Logger.getLogger(SofaJraftMetadataCommandGateway.class.getName());
 
+    /** Raft group 标识。 */
     private final String groupId;
+    /** 当前节点 serverId（ip:port）。 */
     private final String serverId;
+    /** 初始集群配置（多个 ip:port）。 */
     private final String initialConf;
+    /** Raft 数据目录根路径。 */
     private final String dataPath;
+    /** 选举超时时间（毫秒）。 */
     private final int electionTimeoutMs;
+    /** 快照间隔（秒）。 */
     private final int snapshotIntervalSecs;
+    /** 提交等待超时（毫秒）。 */
     private final int submitTimeoutMs;
+    /** 日志应用回调列表（读模型投影器）。 */
     private final List<MetadataLogApplier> appliers = new CopyOnWriteArrayList<>();
+    /** 最近已应用日志索引。 */
     private final AtomicLong lastAppliedLogIndex = new AtomicLong(0L);
+    /** 组件启动状态。 */
     private final AtomicBoolean started = new AtomicBoolean(false);
 
+    /** JRaft 组服务实例。 */
     private RaftGroupService raftGroupService;
+    /** JRaft 节点句柄。 */
     private Node node;
 
     public SofaJraftMetadataCommandGateway(
@@ -87,14 +99,17 @@ public class SofaJraftMetadataCommandGateway implements MetadataCommandGateway, 
 
     @Override
     public void start() {
+        // 仅允许启动一次，避免重复初始化底层 Raft 资源。
         if (!started.compareAndSet(false, true)) {
             return;
         }
         try {
+            // 准备 Raft 日志、元数据、快照目录。
             ensureRaftDataDirs();
             PeerId peerId = JRaftUtils.getPeerId(serverId);
             Configuration conf = JRaftUtils.getConfiguration(initialConf);
             NodeOptions options = new NodeOptions();
+            // 注册状态机：所有提交日志最终都会在这里顺序回放。
             options.setFsm(new MetadataFsm(appliers, lastAppliedLogIndex));
             options.setInitialConf(conf);
             options.setElectionTimeoutMs(electionTimeoutMs);
@@ -114,9 +129,11 @@ public class SofaJraftMetadataCommandGateway implements MetadataCommandGateway, 
 
     @Override
     public void stop() {
+        // 停机只执行一次，避免并发停机导致状态错乱。
         if (!started.compareAndSet(true, false)) {
             return;
         }
+        // 先关 Node，再关 GroupService，遵循 JRaft 资源释放顺序。
         if (node != null) {
             node.shutdown();
             node = null;
@@ -130,21 +147,22 @@ public class SofaJraftMetadataCommandGateway implements MetadataCommandGateway, 
 
     @Override
     public long submit(MetadataCommand command) {
+        // 非法命令或节点未就绪时直接失败。
         if (command == null || !started.get() || node == null) {
             return -1L;
         }
         CompletableFuture<Long> future = new CompletableFuture<>();
         try {
+            // 将业务命令编码为二进制后提交给 Raft 日志。
             Task task = new Task();
             task.setData(ByteBuffer.wrap(CommandCodec.encode(command)));
+            // done 回调在日志提交完成后触发，用于回填提交结果。
             task.setDone((Closure) status -> handleClosure(status, future));
             node.apply(task);
+            // 阻塞等待提交结果，超时则返回失败。
             return future.get(submitTimeoutMs, TimeUnit.MILLISECONDS);
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
-            return -1L;
-        } catch (ExecutionException | TimeoutException exception) {
-            LOG.warning("[CLUSTER][CORE][RAFT] submit failed, error=" + exception.getMessage());
             return -1L;
         } catch (Exception exception) {
             LOG.warning("[CLUSTER][CORE][RAFT] submit failed, error=" + exception.getMessage());
@@ -171,6 +189,7 @@ public class SofaJraftMetadataCommandGateway implements MetadataCommandGateway, 
     }
 
     private void handleClosure(Status status, CompletableFuture<Long> future) {
+        // 提交成功时返回当前已应用索引，作为提交确认位置。
         if (status == null || status.isOk()) {
             future.complete(lastAppliedLogIndex.get());
             return;
@@ -208,10 +227,12 @@ public class SofaJraftMetadataCommandGateway implements MetadataCommandGateway, 
 
         @Override
         public void onApply(com.alipay.sofa.jraft.Iterator iterator) {
+            // 按日志顺序逐条应用，保证元数据投影的顺序一致性。
             while (iterator.hasNext()) {
                 MetadataCommand command = CommandCodec.decode(iterator.getData());
                 long logIndex = iterator.getIndex();
                 if (command != null) {
+                    // 把命令广播给所有读模型投影器（全局路由表、会话去重等）。
                     for (MetadataLogApplier applier : appliers) {
                         try {
                             applier.apply(logIndex, command);
@@ -223,6 +244,7 @@ public class SofaJraftMetadataCommandGateway implements MetadataCommandGateway, 
                 }
                 Closure done = iterator.done();
                 if (done != null) {
+                    // 通知 JRaft 该日志已完成状态机应用。
                     done.run(Status.OK());
                 }
                 iterator.next();

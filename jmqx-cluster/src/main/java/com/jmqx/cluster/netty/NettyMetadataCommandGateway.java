@@ -20,7 +20,10 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Logger;
@@ -34,15 +37,35 @@ import java.util.logging.Logger;
  */
 public class NettyMetadataCommandGateway implements MetadataCommandGateway {
     private static final Logger LOG = Logger.getLogger(NettyMetadataCommandGateway.class.getName());
+    private static final long DEFAULT_PREFERRED_LEADER_TTL_MS = 15_000L;
+    private static final int DEFAULT_PREFERRED_LEADER_MAX_FAILURES = 3;
 
     private final List<ClusterEndpoint> endpoints;
     private final int requestTimeoutMs;
+    private final long preferredLeaderTtlMs;
+    private final int preferredLeaderMaxFailures;
+    private final NioEventLoopGroup ioGroup;
+    private final ConcurrentMap<ClusterEndpoint, EndpointClient> endpointClients = new ConcurrentHashMap<>();
     private final AtomicLong requestId = new AtomicLong(1L);
     private final AtomicReference<String> preferredLeader = new AtomicReference<>();
+    private final AtomicLong preferredLeaderUpdatedAt = new AtomicLong(0L);
+    private final AtomicInteger preferredLeaderFailureCount = new AtomicInteger(0);
 
     public NettyMetadataCommandGateway(Collection<String> endpoints, int requestTimeoutMs) {
+        this(endpoints, requestTimeoutMs, DEFAULT_PREFERRED_LEADER_TTL_MS, DEFAULT_PREFERRED_LEADER_MAX_FAILURES);
+    }
+
+    public NettyMetadataCommandGateway(
+        Collection<String> endpoints,
+        int requestTimeoutMs,
+        long preferredLeaderTtlMs,
+        int preferredLeaderMaxFailures
+    ) {
         this.endpoints = parseEndpoints(endpoints);
         this.requestTimeoutMs = Math.max(300, requestTimeoutMs);
+        this.preferredLeaderTtlMs = Math.max(1000L, preferredLeaderTtlMs);
+        this.preferredLeaderMaxFailures = Math.max(1, preferredLeaderMaxFailures);
+        this.ioGroup = new NioEventLoopGroup(1);
     }
 
     @Override
@@ -50,7 +73,7 @@ public class NettyMetadataCommandGateway implements MetadataCommandGateway {
         if (command == null || endpoints.isEmpty()) {
             return -1L;
         }
-        String leaderHint = preferredLeader.get();
+        String leaderHint = getPreferredLeaderIfValid();
         List<ClusterEndpoint> candidates = buildCandidates(leaderHint);
         for (ClusterEndpoint endpoint : candidates) {
             if (endpoint == null) {
@@ -58,25 +81,28 @@ public class NettyMetadataCommandGateway implements MetadataCommandGateway {
             }
             SubmitResponse response = submitToEndpoint(endpoint, command);
             if (response == null) {
+                markFailureIfPreferred(endpoint);
                 continue;
             }
             if (response.success()) {
-                preferredLeader.set(endpoint.host() + ":" + endpoint.port());
+                markPreferredLeader(endpoint.host() + ":" + endpoint.port());
                 return response.logIndex();
             }
             if (response.leaderEndpoint() != null && !response.leaderEndpoint().isBlank()) {
                 leaderHint = response.leaderEndpoint();
-                preferredLeader.set(leaderHint);
+                markPreferredLeader(leaderHint);
                 ClusterEndpoint leaderEndpoint = ClusterEndpoint.parse(leaderHint);
                 if (leaderEndpoint != null && !endpoint.equals(leaderEndpoint)) {
                     SubmitResponse redirected = submitToEndpoint(leaderEndpoint, command);
                     if (redirected != null && redirected.success()) {
-                        preferredLeader.set(leaderHint);
+                        markPreferredLeader(leaderHint);
                         return redirected.logIndex();
                     }
+                    markFailureIfPreferred(leaderEndpoint);
                 }
                 continue;
             }
+            markFailureIfPreferred(endpoint);
         }
         return -1L;
     }
@@ -97,49 +123,70 @@ public class NettyMetadataCommandGateway implements MetadataCommandGateway {
     }
 
     private SubmitResponse submitToEndpoint(ClusterEndpoint endpoint, MetadataCommand command) {
-        NioEventLoopGroup group = new NioEventLoopGroup(1);
-        SubmitResponseHandler handler = new SubmitResponseHandler();
         try {
-            Bootstrap bootstrap = new Bootstrap();
-            bootstrap.group(group)
-                .channel(NioSocketChannel.class)
-                .handler(new ChannelInitializer<SocketChannel>() {
-                    @Override
-                    protected void initChannel(SocketChannel ch) {
-                        ch.pipeline().addLast(new LengthFieldBasedFrameDecoder(16 * 1024 * 1024, 0, 4, 0, 4));
-                        ch.pipeline().addLast(MetadataWireCodec.decoder());
-                        ch.pipeline().addLast(new LengthFieldPrepender(4));
-                        ch.pipeline().addLast(MetadataWireCodec.encoder());
-                        ch.pipeline().addLast(handler);
-                    }
-                });
-            Channel channel = bootstrap.connect(endpoint.host(), endpoint.port()).syncUninterruptibly().channel();
+            EndpointClient client = endpointClients.computeIfAbsent(endpoint, this::newEndpointClient);
             long currentRequestId = requestId.getAndIncrement();
-            channel.writeAndFlush(new MetadataWireMessage(
-                MetadataMessageType.SUBMIT_REQUEST,
-                currentRequestId,
-                command,
-                0L,
-                0L,
-                null,
-                true,
-                null,
-                null
-            )).syncUninterruptibly();
-            boolean completed = handler.await(requestTimeoutMs);
-            channel.close().syncUninterruptibly();
-            if (!completed) {
-                LOG.warning("[CLUSTER][REPLICANT][NETTY] submit timeout endpoint=" + endpoint);
-                return null;
-            }
-            return handler.response();
+            return client.submit(command, currentRequestId, requestTimeoutMs);
         } catch (Exception exception) {
             LOG.warning("[CLUSTER][REPLICANT][NETTY] submit failed endpoint=" + endpoint
-                + ", error=" + exception.getMessage());
+                    + ", error=" + exception.getMessage());
             return null;
-        } finally {
-            group.shutdownGracefully().syncUninterruptibly();
         }
+    }
+
+    private EndpointClient newEndpointClient(ClusterEndpoint endpoint) {
+        return new EndpointClient(endpoint);
+    }
+
+    private String getPreferredLeaderIfValid() {
+        String leader = preferredLeader.get();
+        if (leader == null || leader.isBlank()) {
+            return null;
+        }
+        long updatedAt = preferredLeaderUpdatedAt.get();
+        if (updatedAt <= 0L) {
+            clearPreferredLeader();
+            return null;
+        }
+        long age = System.currentTimeMillis() - updatedAt;
+        if (age > preferredLeaderTtlMs) {
+            clearPreferredLeader();
+            return null;
+        }
+        return leader;
+    }
+
+    private void markPreferredLeader(String endpoint) {
+        if (endpoint == null || endpoint.isBlank()) {
+            return;
+        }
+        preferredLeader.set(endpoint);
+        preferredLeaderUpdatedAt.set(System.currentTimeMillis());
+        preferredLeaderFailureCount.set(0);
+    }
+
+    private void markFailureIfPreferred(ClusterEndpoint endpoint) {
+        if (endpoint == null) {
+            return;
+        }
+        String current = preferredLeader.get();
+        if (current == null || current.isBlank()) {
+            return;
+        }
+        String currentEndpoint = endpoint.host() + ":" + endpoint.port();
+        if (!currentEndpoint.equals(current)) {
+            return;
+        }
+        int failures = preferredLeaderFailureCount.incrementAndGet();
+        if (failures >= preferredLeaderMaxFailures) {
+            clearPreferredLeader();
+        }
+    }
+
+    private void clearPreferredLeader() {
+        preferredLeader.set(null);
+        preferredLeaderUpdatedAt.set(0L);
+        preferredLeaderFailureCount.set(0);
     }
 
     private static List<ClusterEndpoint> parseEndpoints(Collection<String> values) {
@@ -156,31 +203,127 @@ public class NettyMetadataCommandGateway implements MetadataCommandGateway {
         return result;
     }
 
+    private final class EndpointClient {
+        private final ClusterEndpoint endpoint;
+        private final SubmitResponseHandler handler = new SubmitResponseHandler();
+        private final Bootstrap clientBootstrap;
+        private volatile Channel channel;
+
+        private EndpointClient(ClusterEndpoint endpoint) {
+            this.endpoint = endpoint;
+            this.clientBootstrap = new Bootstrap()
+                .group(ioGroup)
+                .channel(NioSocketChannel.class)
+                .handler(new ChannelInitializer<SocketChannel>() {
+                    @Override
+                    protected void initChannel(SocketChannel ch) {
+                        ch.pipeline().addLast(new LengthFieldBasedFrameDecoder(16 * 1024 * 1024, 0, 4, 0, 4));
+                        ch.pipeline().addLast(MetadataWireCodec.decoder());
+                        ch.pipeline().addLast(new LengthFieldPrepender(4));
+                        ch.pipeline().addLast(MetadataWireCodec.encoder());
+                        ch.pipeline().addLast(handler);
+                    }
+                });
+        }
+
+        private synchronized SubmitResponse submit(MetadataCommand command, long currentRequestId, int timeoutMs) {
+            Channel ch = ensureChannel();
+            if (ch == null || !ch.isActive()) {
+                return null;
+            }
+            handler.prepare(currentRequestId);
+            ch.writeAndFlush(new MetadataWireMessage(
+                MetadataMessageType.SUBMIT_REQUEST,
+                currentRequestId,
+                command,
+                0L,
+                0L,
+                null,
+                true,
+                null,
+                null
+            )).syncUninterruptibly();
+            boolean completed;
+            try {
+                completed = handler.await(timeoutMs);
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                closeChannel();
+                return null;
+            }
+            if (!completed) {
+                LOG.warning("[CLUSTER][REPLICANT][NETTY] submit timeout endpoint=" + endpoint);
+                closeChannel();
+                return null;
+            }
+            SubmitResponse response = handler.response();
+            if (response == null) {
+                closeChannel();
+            }
+            return response;
+        }
+
+        private Channel ensureChannel() {
+            Channel current = channel;
+            if (current != null && current.isActive()) {
+                return current;
+            }
+            try {
+                Channel connected = clientBootstrap.connect(endpoint.host(), endpoint.port()).syncUninterruptibly().channel();
+                this.channel = connected;
+                return connected;
+            } catch (Exception exception) {
+                LOG.warning("[CLUSTER][REPLICANT][NETTY] connect failed endpoint=" + endpoint
+                    + ", error=" + exception.getMessage());
+                this.channel = null;
+                return null;
+            }
+        }
+
+        private synchronized void closeChannel() {
+            Channel ch = this.channel;
+            this.channel = null;
+            if (ch != null) {
+                ch.close().syncUninterruptibly();
+            }
+        }
+    }
+
     private static final class SubmitResponseHandler extends SimpleChannelInboundHandler<MetadataWireMessage> {
-        private final CountDownLatch latch = new CountDownLatch(1);
         private volatile SubmitResponse response;
+        private volatile long expectedRequestId = -1L;
+        private volatile CountDownLatch currentLatch = new CountDownLatch(1);
+
+        private synchronized void prepare(long requestId) {
+            this.expectedRequestId = requestId;
+            this.response = null;
+            this.currentLatch = new CountDownLatch(1);
+        }
 
         @Override
         protected void channelRead0(ChannelHandlerContext ctx, MetadataWireMessage message) {
             if (message.type() != MetadataMessageType.SUBMIT_RESPONSE) {
                 return;
             }
+            if (message.requestId() != expectedRequestId) {
+                return;
+            }
             response = new SubmitResponse(
-                message.success(),
-                message.logIndex(),
-                message.leaderEndpoint()
+                    message.success(),
+                    message.logIndex(),
+                    message.leaderEndpoint()
             );
-            latch.countDown();
+            currentLatch.countDown();
         }
 
         @Override
         public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-            latch.countDown();
+            currentLatch.countDown();
             ctx.close();
         }
 
         private boolean await(int timeoutMs) throws InterruptedException {
-            return latch.await(timeoutMs, TimeUnit.MILLISECONDS);
+            return currentLatch.await(timeoutMs, TimeUnit.MILLISECONDS);
         }
 
         private SubmitResponse response() {
@@ -188,6 +331,8 @@ public class NettyMetadataCommandGateway implements MetadataCommandGateway {
         }
     }
 
-    private record SubmitResponse(boolean success, long logIndex, String leaderEndpoint) {
+    private record SubmitResponse(boolean success,
+                                  long logIndex,
+                                  String leaderEndpoint) {
     }
 }

@@ -47,15 +47,15 @@ public class MysqlMessageBridge implements MessageBridge {
     public void publish(BridgeMessage message) {
         try (Connection connection = DriverManager.getConnection(url, user, password);
              PreparedStatement statement = connection.prepareStatement(insertSql)) {
-            statement.setString(1, message.getClientId());
-            statement.setString(2, message.getTopic());
-            statement.setBytes(3, message.getPayload());
-            statement.setInt(4, message.getQos());
-            statement.setBoolean(5, message.isRetain());
-            statement.setLong(6, message.getPublishedAt());
+            statement.setString(1, message.clientId());
+            statement.setString(2, message.topic());
+            statement.setBytes(3, message.payload());
+            statement.setInt(4, message.qos());
+            statement.setBoolean(5, message.retain());
+            statement.setLong(6, message.publishedAt());
             statement.executeUpdate();
         } catch (SQLException e) {
-            LOG.warning("[BRIDGE][MYSQL] insert failed topic=" + message.getTopic() + ", error=" + e.getMessage());
+            LOG.warning("[BRIDGE][MYSQL] insert failed topic=" + message.topic() + ", error=" + e.getMessage());
         }
     }
 

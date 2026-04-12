@@ -163,7 +163,7 @@ public class NettyMetadataCoreServer implements MetadataReplicator, MetadataLogA
         lastAppliedLogIndex.updateAndGet(current -> Math.max(current, logIndex));
         eventHistory.put(logIndex, command);
         trimHistoryIfNeeded();
-        replicantSessions.forEach((nodeId, session) -> trySendAvailable(nodeId, session));
+        replicantSessions.forEach(this::trySendAvailable);
     }
 
     private void onSubmit(ChannelHandlerContext ctx, MetadataWireMessage request) {
@@ -321,8 +321,7 @@ public class NettyMetadataCoreServer implements MetadataReplicator, MetadataLogA
             null
         ));
         int commandCount = snapshot.commands().size();
-        long snapshotStart = commandCount == 0 ? snapshotBase : Math.max(1L, snapshotBase - commandCount + 1L);
-        long current = snapshotStart;
+        long current = commandCount == 0 ? snapshotBase : Math.max(1L, snapshotBase - commandCount + 1L);
         for (MetadataCommand command : snapshot.commands()) {
             ctx.write(new MetadataWireMessage(
                 MetadataMessageType.EVENT,

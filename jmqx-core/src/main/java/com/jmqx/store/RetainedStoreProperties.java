@@ -17,6 +17,7 @@ public class RetainedStoreProperties {
     private long maxBytes = 2 * 1024 * 1024;
     // 最大保留消息负载字节数 默认 1M
     private int maxPayloadBytes = 1024 * 1024;
+    // 溢出策略 默认 EVICT_LRU
     private RetainedOverflowStrategy overflowStrategy = RetainedOverflowStrategy.EVICT_LRU;
 
     public String getRocksdbPath() {

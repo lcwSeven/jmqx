@@ -1,5 +1,7 @@
 package com.jmqx.cluster.netty;
 
+import java.util.Objects;
+
 /**
  * 集群节点地址模型。
  *
@@ -7,6 +9,22 @@ package com.jmqx.cluster.netty;
  * @date 2026/4/9
  */
 public record ClusterEndpoint(String host, int port) {
+    @Override
+    public boolean equals(Object other) {
+        if (this == other) {
+            return true;
+        }
+        if (!(other instanceof ClusterEndpoint that)) {
+            return false;
+        }
+        return port == that.port && Objects.equals(host, that.host);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(host, port);
+    }
+
     public static ClusterEndpoint parse(String raw) {
         if (raw == null || raw.isBlank()) {
             return null;

@@ -7,6 +7,7 @@ package com.jmqx.bridge;
 public class BridgeProperties {
     private boolean enabled = false;
     private String types = "";
+    private String topicFilters = "";
 
     private boolean async = true;
     private int asyncQueueCapacity = 10000;
@@ -14,6 +15,7 @@ public class BridgeProperties {
 
     private String kafkaBootstrapServers = "127.0.0.1:9092";
     private String kafkaTopic = "jmqx-messages";
+    private String kafkaSourceTopicFilters = "";
     private String kafkaAcks = "1";
     private String kafkaClientId = "jmqx-bridge";
     private String kafkaCompressionType = "none";
@@ -21,6 +23,7 @@ public class BridgeProperties {
     private String rocketmqNameServer = "127.0.0.1:9876";
     private String rocketmqProducerGroup = "jmqx-bridge-group";
     private String rocketmqTopic = "JMQX_MESSAGES";
+    private String rocketmqSourceTopicFilters = "";
     private boolean rocketmqSyncSend = false;
     private int rocketmqTimeoutMs = 3000;
 
@@ -29,6 +32,7 @@ public class BridgeProperties {
     private String mysqlUser = "root";
     private String mysqlPassword = "";
     private String mysqlTable = "jmqx_bridge_message";
+    private String mysqlSourceTopicFilters = "";
     private boolean mysqlAutoCreateTable = true;
 
     public boolean isEnabled() {
@@ -45,6 +49,14 @@ public class BridgeProperties {
 
     public void setTypes(String types) {
         this.types = types;
+    }
+
+    public String getTopicFilters() {
+        return topicFilters;
+    }
+
+    public void setTopicFilters(String topicFilters) {
+        this.topicFilters = topicFilters;
     }
 
     public boolean isAsync() {
@@ -85,6 +97,14 @@ public class BridgeProperties {
 
     public void setKafkaTopic(String kafkaTopic) {
         this.kafkaTopic = kafkaTopic;
+    }
+
+    public String getKafkaSourceTopicFilters() {
+        return kafkaSourceTopicFilters;
+    }
+
+    public void setKafkaSourceTopicFilters(String kafkaSourceTopicFilters) {
+        this.kafkaSourceTopicFilters = kafkaSourceTopicFilters;
     }
 
     public String getKafkaAcks() {
@@ -133,6 +153,14 @@ public class BridgeProperties {
 
     public void setRocketmqTopic(String rocketmqTopic) {
         this.rocketmqTopic = rocketmqTopic;
+    }
+
+    public String getRocketmqSourceTopicFilters() {
+        return rocketmqSourceTopicFilters;
+    }
+
+    public void setRocketmqSourceTopicFilters(String rocketmqSourceTopicFilters) {
+        this.rocketmqSourceTopicFilters = rocketmqSourceTopicFilters;
     }
 
     public boolean isRocketmqSyncSend() {
@@ -189,6 +217,14 @@ public class BridgeProperties {
 
     public void setMysqlTable(String mysqlTable) {
         this.mysqlTable = mysqlTable;
+    }
+
+    public String getMysqlSourceTopicFilters() {
+        return mysqlSourceTopicFilters;
+    }
+
+    public void setMysqlSourceTopicFilters(String mysqlSourceTopicFilters) {
+        this.mysqlSourceTopicFilters = mysqlSourceTopicFilters;
     }
 
     public boolean isMysqlAutoCreateTable() {

@@ -13,11 +13,18 @@ import java.util.Set;
  */
 @FunctionalInterface
 public interface ClusterMessageDispatcher {
-    ClusterMessageDispatcher NOOP = (topic, payload, targetPlans) -> {
-    };
-
+    /**
+     * Dispatch the payload to remote nodes.
+     *
+     * @param topic       topic
+     * @param payload     payload
+     * @param targetPlans target plans
+     */
     void dispatch(String topic, byte[] payload, Map<String, DispatchTarget> targetPlans);
 
+    /**
+     * Dispatch target.  转发目标
+     */
     record DispatchTarget(boolean includeNormal, Set<String> sharedGroups) {
         public DispatchTarget {
             sharedGroups = sharedGroups == null ? Collections.emptySet() : Collections.unmodifiableSet(new LinkedHashSet<>(sharedGroups));

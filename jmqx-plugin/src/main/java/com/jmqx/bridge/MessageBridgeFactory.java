@@ -55,9 +55,9 @@ public final class MessageBridgeFactory {
 
     private static MessageBridge createSingle(String type, BridgeProperties properties) {
         return switch (type) {
-            case "kafka" -> new KafkaMessageBridge(properties);
-            case "rocketmq" -> new RocketMqMessageBridge(properties);
-            case "mysql" -> new MysqlMessageBridge(properties);
+            case "kafka" -> wrapWithTopicFilter(new KafkaMessageBridge(properties), properties.getKafkaSourceTopicFilters());
+            case "rocketmq" -> wrapWithTopicFilter(new RocketMqMessageBridge(properties), properties.getRocketmqSourceTopicFilters());
+            case "mysql" -> wrapWithTopicFilter(new MysqlMessageBridge(properties), properties.getMysqlSourceTopicFilters());
             default -> {
                 LOG.warning("[BRIDGE] unsupported type: " + type);
                 yield null;
@@ -78,5 +78,88 @@ public final class MessageBridgeFactory {
             types.add(part.trim().toLowerCase(Locale.ROOT));
         }
         return types;
+    }
+
+    private static MessageBridge wrapWithTopicFilter(MessageBridge delegate, String rawFilters) {
+        List<String> filters = parseRawFilters(rawFilters);
+        if (filters.isEmpty()) {
+            return delegate;
+        }
+        return new FilteredMessageBridge(delegate, filters);
+    }
+
+    /**
+     * 仅在消息主题命中过滤器时才转发给下游桥接器。
+     */
+    private static final class FilteredMessageBridge implements MessageBridge {
+        private final MessageBridge delegate;
+        private final List<String> filters;
+
+        private FilteredMessageBridge(MessageBridge delegate, List<String> filters) {
+            this.delegate = delegate;
+            this.filters = List.copyOf(filters);
+        }
+
+        @Override
+        public void publish(BridgeMessage message) {
+            if (message == null || message.topic() == null || message.topic().isBlank()) {
+                return;
+            }
+            for (String filter : filters) {
+                if (matchesTopicFilter(filter, message.topic())) {
+                    delegate.publish(message);
+                    return;
+                }
+            }
+        }
+
+        @Override
+        public void close() {
+            delegate.close();
+        }
+    }
+
+    private static boolean matchesTopicFilter(String filter, String topic) {
+        if (filter == null || filter.isBlank() || topic == null || topic.isBlank()) {
+            return false;
+        }
+        String[] filterLevels = filter.split("/", -1);
+        String[] topicLevels = topic.split("/", -1);
+        int fi = 0;
+        int ti = 0;
+        while (fi < filterLevels.length && ti < topicLevels.length) {
+            String level = filterLevels[fi];
+            if ("#".equals(level)) {
+                return fi == filterLevels.length - 1;
+            }
+            if ("+".equals(level) || level.equals(topicLevels[ti])) {
+                fi++;
+                ti++;
+                continue;
+            }
+            return false;
+        }
+        if (fi == filterLevels.length && ti == topicLevels.length) {
+            return true;
+        }
+        return fi == filterLevels.length - 1 && "#".equals(filterLevels[fi]);
+    }
+
+    private static List<String> parseRawFilters(String raw) {
+        List<String> filters = new ArrayList<>();
+        if (raw == null || raw.isBlank()) {
+            return filters;
+        }
+        String[] parts = raw.split(",");
+        for (String part : parts) {
+            if (part == null) {
+                continue;
+            }
+            String filter = part.trim();
+            if (!filter.isBlank()) {
+                filters.add(filter);
+            }
+        }
+        return filters;
     }
 }

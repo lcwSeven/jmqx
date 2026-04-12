@@ -13,24 +13,12 @@ import java.util.Set;
  * @date 2026/4/7
  */
 public interface GlobalSubscriptionRegistry {
+
     void apply(GlobalSubscriptionEvent event);
 
     void clear();
 
-    default void applyBatch(List<GlobalSubscriptionEvent> events) {
-        if (events == null) {
-            return;
-        }
-        for (GlobalSubscriptionEvent event : events) {
-            apply(event);
-        }
-    }
-
     GlobalSubscriptionMatch match(String topic);
-
-    List<GlobalSubscriptionEvent> buildNodeDownCleanupEvents(String nodeId, long startLogIndexExclusive);
-
-    Set<String> getNodeTopicKeys(String nodeId);
 
     Map<String, Set<String>> snapshotNodeToTopicKeys();
 

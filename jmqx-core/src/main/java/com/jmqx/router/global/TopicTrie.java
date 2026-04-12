@@ -12,6 +12,7 @@ import java.util.function.Supplier;
  * @date 2026/4/7
  */
 public class TopicTrie<V> {
+
     private final GenericTopicTrieNode<V> root = new GenericTopicTrieNode<>();
 
     public V computeIfAbsent(String topicFilter, Supplier<V> supplier) {

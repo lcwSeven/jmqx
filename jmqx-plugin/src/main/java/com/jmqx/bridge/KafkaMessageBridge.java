@@ -32,15 +32,15 @@ public class KafkaMessageBridge implements MessageBridge {
 
     @Override
     public void publish(BridgeMessage message) {
-        ProducerRecord<String, byte[]> record = new ProducerRecord<>(topic, message.getTopic(), message.getPayload());
-        record.headers().add(new RecordHeader("mqtt-topic", toBytes(message.getTopic())));
-        record.headers().add(new RecordHeader("mqtt-client-id", toBytes(message.getClientId())));
-        record.headers().add(new RecordHeader("mqtt-qos", toBytes(Integer.toString(message.getQos()))));
-        record.headers().add(new RecordHeader("mqtt-retain", toBytes(Boolean.toString(message.isRetain()))));
-        record.headers().add(new RecordHeader("mqtt-published-at", toBytes(Long.toString(message.getPublishedAt()))));
+        ProducerRecord<String, byte[]> record = new ProducerRecord<>(topic, message.topic(), message.payload());
+        record.headers().add(new RecordHeader("mqtt-topic", toBytes(message.topic())));
+        record.headers().add(new RecordHeader("mqtt-client-id", toBytes(message.clientId())));
+        record.headers().add(new RecordHeader("mqtt-qos", toBytes(Integer.toString(message.qos()))));
+        record.headers().add(new RecordHeader("mqtt-retain", toBytes(Boolean.toString(message.retain()))));
+        record.headers().add(new RecordHeader("mqtt-published-at", toBytes(Long.toString(message.publishedAt()))));
         producer.send(record, (metadata, exception) -> {
             if (exception != null) {
-                LOG.warning("[BRIDGE][KAFKA] send failed topic=" + message.getTopic() + ", error=" + exception.getMessage());
+                LOG.warning("[BRIDGE][KAFKA] send failed topic=" + message.topic() + ", error=" + exception.getMessage());
             }
         });
     }

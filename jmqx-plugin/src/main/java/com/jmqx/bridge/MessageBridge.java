@@ -10,9 +10,6 @@ public interface MessageBridge extends AutoCloseable {
         public void publish(BridgeMessage message) {
         }
 
-        @Override
-        public void close() {
-        }
     };
 
     void publish(BridgeMessage message);

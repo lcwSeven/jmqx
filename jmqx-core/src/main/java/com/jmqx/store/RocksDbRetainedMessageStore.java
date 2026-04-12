@@ -71,17 +71,17 @@ public class RocksDbRetainedMessageStore implements RetainedMessageStore {
             return;
         }
         // 判断 topic 是否为空
-        if (message == null || message.getTopic() == null || message.getTopic().isBlank()) {
+        if (message == null || message.topic() == null || message.topic().isBlank()) {
             return;
         }
 
-        String topic = message.getTopic();
+        String topic = message.topic();
         byte[] topicKey = topic.getBytes(StandardCharsets.UTF_8);
         updateCount.incrementAndGet();
 
         try {
             byte[] old = db.get(topicKey);
-            if (message.getPayload().length == 0) {
+            if (message.payload().length == 0) {
                 if (old != null) {
                     db.delete(topicKey);
                     persistedEntries.decrementAndGet();
@@ -92,19 +92,19 @@ public class RocksDbRetainedMessageStore implements RetainedMessageStore {
             }
 
             int maxPayloadBytes = Math.max(properties.getMaxPayloadBytes(), 1);
-            if (message.getPayload().length > maxPayloadBytes) {
+            if (message.payload().length > maxPayloadBytes) {
                 rejectedTooLargeCount.incrementAndGet();
                 LOG.warning("[RETAINED][ROCKSDB] reject too large topic=" + topic
-                    + ", payloadBytes=" + message.getPayload().length
+                    + ", payloadBytes=" + message.payload().length
                     + ", maxPayloadBytes=" + maxPayloadBytes);
                 return;
             }
 
             RetainedMessage stored = new RetainedMessage(
                 topic,
-                message.getPayload().clone(),
-                message.getQos(),
-                message.isRetain()
+                message.payload().clone(),
+                message.qos(),
+                message.retain()
             );
             byte[] encoded = encode(stored);
             db.put(topicKey, encoded);
@@ -203,7 +203,7 @@ public class RocksDbRetainedMessageStore implements RetainedMessageStore {
 
     private void putToCache(RetainedMessage message) {
         synchronized (cache) {
-            RetainedMessage existing = cache.remove(message.getTopic());
+            RetainedMessage existing = cache.remove(message.topic());
             if (existing != null) {
                 cacheBytes -= estimateCacheSize(existing);
             }
@@ -212,7 +212,7 @@ public class RocksDbRetainedMessageStore implements RetainedMessageStore {
                 rejectedCapacityCount.incrementAndGet();
                 return;
             }
-            cache.put(message.getTopic(), message);
+            cache.put(message.topic(), message);
             cacheBytes += incoming;
         }
     }
@@ -259,11 +259,11 @@ public class RocksDbRetainedMessageStore implements RetainedMessageStore {
     }
 
     private static byte[] encode(RetainedMessage message) {
-        byte[] payload = message.getPayload();
+        byte[] payload = message.payload();
         ByteBuffer buffer = ByteBuffer.allocate(1 + 4 + 1 + 4 + payload.length);
         buffer.put((byte) 1); // version
-        buffer.putInt(message.getQos());
-        buffer.put((byte) (message.isRetain() ? 1 : 0));
+        buffer.putInt(message.qos());
+        buffer.put((byte) (message.retain() ? 1 : 0));
         buffer.putInt(payload.length);
         buffer.put(payload);
         return buffer.array();
@@ -288,8 +288,8 @@ public class RocksDbRetainedMessageStore implements RetainedMessageStore {
     }
 
     private static long estimateCacheSize(RetainedMessage message) {
-        long topicBytes = message.getTopic().getBytes(StandardCharsets.UTF_8).length;
-        return topicBytes + message.getPayload().length + ESTIMATED_RECORD_OVERHEAD;
+        long topicBytes = message.topic().getBytes(StandardCharsets.UTF_8).length;
+        return topicBytes + message.payload().length + ESTIMATED_RECORD_OVERHEAD;
     }
 
     private static long estimatePersistedSize(String topic, byte[] encodedValue) {

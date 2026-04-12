@@ -8,6 +8,7 @@ import java.util.Optional;
  * @date 2026/4/2
  */
 public interface SessionRegistry {
+
     void register(ClientSession session);
 
     Optional<ClientSession> get(String clientId);

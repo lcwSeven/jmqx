@@ -9,7 +9,9 @@ import java.util.Locale;
  * @date 2026/4/7
  */
 public enum RetainedOverflowStrategy {
+    // 移除最不常用的
     EVICT_LRU,
+    // 拒绝新消息
     REJECT_NEW;
 
     public static RetainedOverflowStrategy parse(String raw, RetainedOverflowStrategy defaultValue) {

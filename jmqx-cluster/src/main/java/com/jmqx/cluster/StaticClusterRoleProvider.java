@@ -11,31 +11,15 @@ import java.util.Set;
  * @author liucaiwen
  * @date 2026/4/9
  */
-public class StaticClusterRoleProvider implements ClusterRoleProvider {
-    private final NodeRole role;
-    private final String nodeId;
-    private final Set<String> coreEndpoints;
+public record StaticClusterRoleProvider(NodeRole role,
+                                        String nodeId,
+                                        Set<String> coreEndpoints) implements ClusterRoleProvider {
 
     public StaticClusterRoleProvider(NodeRole role, String nodeId, Set<String> coreEndpoints) {
         this.role = role == null ? NodeRole.REPLICANT : role;
         this.nodeId = (nodeId == null || nodeId.isBlank()) ? "node-1" : nodeId;
         this.coreEndpoints = coreEndpoints == null
-            ? Collections.emptySet()
-            : Collections.unmodifiableSet(new LinkedHashSet<>(coreEndpoints));
-    }
-
-    @Override
-    public NodeRole role() {
-        return role;
-    }
-
-    @Override
-    public String nodeId() {
-        return nodeId;
-    }
-
-    @Override
-    public Set<String> coreEndpoints() {
-        return coreEndpoints;
+                ? Collections.emptySet()
+                : Collections.unmodifiableSet(new LinkedHashSet<>(coreEndpoints));
     }
 }

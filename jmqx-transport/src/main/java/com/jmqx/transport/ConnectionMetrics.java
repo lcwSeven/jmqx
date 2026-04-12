@@ -8,8 +8,11 @@ import java.util.concurrent.atomic.AtomicLong;
  * @date 2026/4/5
  */
 public class ConnectionMetrics {
+    // 连接数
     private final AtomicInteger activeConnections = new AtomicInteger();
+    // 流入量
     private final AtomicLong inboundBytes = new AtomicLong();
+    // 流出量
     private final AtomicLong outboundBytes = new AtomicLong();
 
     public void onConnected() {

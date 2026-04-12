@@ -10,6 +10,7 @@ import java.util.Set;
  * @date 2026/4/9
  */
 public interface ClusterRoleProvider {
+
     NodeRole role();
 
     String nodeId();
