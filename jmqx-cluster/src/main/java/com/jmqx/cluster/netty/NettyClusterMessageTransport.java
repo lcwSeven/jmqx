@@ -24,6 +24,8 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Logger;
 
@@ -60,6 +62,14 @@ public class NettyClusterMessageTransport implements MetadataReplicator {
     private NioEventLoopGroup clientGroup;
     private Bootstrap clientBootstrap;
     private Channel serverChannel;
+    /**
+     * 复用到目标节点的长连接，避免每次发送都重复 connect/close。
+     */
+    private final ConcurrentMap<ClusterEndpoint, Channel> outboundChannels = new ConcurrentHashMap<>();
+    /**
+     * 端点级连接中的 Future，避免并发发送时对同一端点重复发起 connect。
+     */
+    private final ConcurrentMap<ClusterEndpoint, ChannelFuture> outboundConnectFutures = new ConcurrentHashMap<>();
 
     /**
      * @param localNodeId      当前节点 ID，用于避免消息回环回发到自己
@@ -165,6 +175,8 @@ public class NettyClusterMessageTransport implements MetadataReplicator {
             clientBootstrap.group(clientGroup)
                     .channel(NioSocketChannel.class)
                     .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, requestTimeoutMs)
+                    .option(ChannelOption.TCP_NODELAY, true)
+                    .option(ChannelOption.SO_KEEPALIVE, true)
                     .handler(new ChannelInitializer<SocketChannel>() {
                         @Override
                         protected void initChannel(SocketChannel ch) {
@@ -198,6 +210,13 @@ public class NettyClusterMessageTransport implements MetadataReplicator {
             serverBossGroup.shutdownGracefully().syncUninterruptibly();
             serverBossGroup = null;
         }
+        outboundConnectFutures.clear();
+        outboundChannels.forEach((endpoint, channel) -> {
+            if (channel != null) {
+                channel.close();
+            }
+        });
+        outboundChannels.clear();
         if (clientGroup != null) {
             clientGroup.shutdownGracefully().syncUninterruptibly();
             clientGroup = null;
@@ -207,28 +226,56 @@ public class NettyClusterMessageTransport implements MetadataReplicator {
     }
 
     private void sendOnce(ClusterEndpoint endpoint, byte[] frame) {
-        // 复用发送端 EventLoop 和 Bootstrap，降低高频跨节点发送开销。
-        Bootstrap bootstrap = clientBootstrap;
-        if (bootstrap == null || clientGroup == null) {
+        // 端点级长连接复用，优先走已建立连接发送。
+        Channel cached = outboundChannels.get(endpoint);
+        if (cached != null && cached.isActive()) {
+            writeToChannel(endpoint, cached, frame);
             return;
         }
-        ChannelFuture connectFuture = bootstrap.connect(endpoint.host(), endpoint.port());
+        // 同一端点复用连接中的 Future，避免并发下重复 connect。
+        ChannelFuture connectFuture = outboundConnectFutures.compute(endpoint, (key, previousFuture) -> {
+            if (previousFuture != null && !previousFuture.isDone()) {
+                return previousFuture;
+            }
+            Bootstrap bootstrap = clientBootstrap;
+            if (bootstrap == null || clientGroup == null || !running.get()) {
+                return null;
+            }
+            return bootstrap.connect(endpoint.host(), endpoint.port());
+        });
+        if (connectFuture == null) {
+            return;
+        }
         connectFuture.addListener((ChannelFutureListener) future -> {
             if (!future.isSuccess()) {
                 Throwable cause = future.cause();
                 String error = cause == null ? "unknown" : cause.getMessage();
                 LOG.fine(() -> "[CLUSTER][MSG] connect failed endpoint=" + endpoint + ", error=" + error);
+                outboundConnectFutures.remove(endpoint, connectFuture);
                 return;
             }
             Channel channel = future.channel();
-            channel.writeAndFlush(frame).addListener((ChannelFutureListener) writeFuture -> {
-                if (!writeFuture.isSuccess()) {
-                    Throwable cause = writeFuture.cause();
-                    String error = cause == null ? "unknown" : cause.getMessage();
-                    LOG.fine(() -> "[CLUSTER][MSG] send failed endpoint=" + endpoint + ", error=" + error);
-                }
-                channel.close();
-            });
+            outboundChannels.put(endpoint, channel);
+            outboundConnectFutures.remove(endpoint, connectFuture);
+            channel.closeFuture().addListener(closeFuture -> outboundChannels.remove(endpoint, channel));
+            writeToChannel(endpoint, channel, frame);
+        });
+    }
+
+    private void writeToChannel(ClusterEndpoint endpoint, Channel channel, byte[] frame) {
+        if (channel == null || !channel.isActive()) {
+            outboundChannels.remove(endpoint, channel);
+            return;
+        }
+        channel.writeAndFlush(frame).addListener((ChannelFutureListener) writeFuture -> {
+            if (writeFuture.isSuccess()) {
+                return;
+            }
+            Throwable cause = writeFuture.cause();
+            String error = cause == null ? "unknown" : cause.getMessage();
+            LOG.fine(() -> "[CLUSTER][MSG] send failed endpoint=" + endpoint + ", error=" + error);
+            outboundChannels.remove(endpoint, channel);
+            channel.close();
         });
     }
 
