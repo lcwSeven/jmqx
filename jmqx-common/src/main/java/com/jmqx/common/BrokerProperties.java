@@ -13,6 +13,7 @@ public class BrokerProperties {
     private int bossThreads = 1;
     private int workerThreads = 0;
     private int readerIdleSeconds = 120;
+    private int maxQos = 2;
     private boolean websocketEnabled = true;
     private String websocketHost = "0.0.0.0";
     private int websocketPort = 8083;
@@ -98,6 +99,14 @@ public class BrokerProperties {
 
     public void setReaderIdleSeconds(int readerIdleSeconds) {
         this.readerIdleSeconds = readerIdleSeconds;
+    }
+
+    public int getMaxQos() {
+        return maxQos;
+    }
+
+    public void setMaxQos(int maxQos) {
+        this.maxQos = maxQos;
     }
 
     public boolean isWebsocketEnabled() {

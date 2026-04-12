@@ -9,6 +9,8 @@ jmqx:
     workerThreads: 0
     # Read idle timeout in seconds. 0 means disabled.
     readerIdleSeconds: 120
+    # Maximum QoS supported by broker (0/1/2).
+    maxQos: 2
     # MQTT over WebSocket.
     websocket:
       enabled: true

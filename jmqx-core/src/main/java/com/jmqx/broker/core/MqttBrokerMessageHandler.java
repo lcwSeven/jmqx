@@ -116,6 +116,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     private final AdminReporter adminReporter;
     private final String dashboardClusterId;
     private final List<String> bridgeTopicFilters;
+    private final int maxAllowedQos;
     private final ConcurrentMap<String, AtomicLong> sharedGroupNodeRoundRobin = new ConcurrentHashMap<>();
     private final RetainedCommandReplicator retainedCommandReplicator;
     private final BrokerRateLimiter rateLimiter;
@@ -140,6 +141,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             AdminReporter adminReporter,
             String dashboardClusterId,
             String bridgeTopicFilters,
+            int maxAllowedQos,
             BrokerRateLimitConfig rateLimitConfig) {
         this.sessionRegistry = sessionRegistry;
         this.subscriptionRegistry = subscriptionRegistry;
@@ -161,6 +163,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             ? "default"
             : dashboardClusterId.trim();
         this.bridgeTopicFilters = parseBridgeTopicFilters(bridgeTopicFilters);
+        this.maxAllowedQos = normalizeMaxQos(maxAllowedQos);
         this.rateLimiter = new BrokerRateLimiter(rateLimitConfig);
         this.retainedCommandReplicator = new RetainedCommandReplicator(this.metadataCommandGateway, this.nodeId, LOG);
         this.qos1RetryExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
@@ -458,6 +461,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
                 continue;
             }
             int qos = Math.min(subscription.qualityOfService().value(), 2);
+            final int effectiveQos = capByMaxQos(normalizeQos(qos));
             SharedSubscription.Parsed shared = SharedSubscription.parse(topicFilter);
             if (shared != null && !sharedSubscriptionManager.register(shared.group(), clientId)) {
                 grantedQos.add(MqttQoS.FAILURE.value());
@@ -466,15 +470,16 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
                 continue;
             }
             // 先更新本地订阅，再在首次订阅时同步全局路由。
-            boolean firstLocal = subscriptionRegistry.subscribeAndCheckFirst(clientId, topicFilter, qos);
+            boolean firstLocal = subscriptionRegistry.subscribeAndCheckFirst(clientId, topicFilter, effectiveQos);
             if (firstLocal) {
                 applyGlobalRegisterAfterLocal(topicFilter);
             }
-            grantedQos.add(qos);
+            grantedQos.add(effectiveQos);
             if (retainedEnabled) {
                 replayRetained(ctx.channel(), normalizedFilter);
             }
-            LOG.info(() -> "[SUBSCRIBE] clientId=" + clientId + ", topicFilter=" + topicFilter + ", qos=" + qos);
+            LOG.info(() -> "[SUBSCRIBE] clientId=" + clientId + ", topicFilter=" + topicFilter
+                    + ", qos=" + qos + ", effectiveQos=" + effectiveQos);
         }
 
         MqttMessageBuilders.SubAckBuilder subAckBuilder = MqttMessageBuilders.subAck()
@@ -513,7 +518,8 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     private void handlePublish(ChannelHandlerContext ctx, MqttPublishMessage message) {
         String topic = message.variableHeader().topicName();
         byte[] payload = ByteBufUtil.getBytes(message.payload());
-        int qos = message.fixedHeader().qosLevel().value();
+        int qos = normalizeQos(message.fixedHeader().qosLevel().value());
+        int effectiveQos = capByMaxQos(qos);
         int packetId = message.variableHeader().packetId();
         String clientId = currentClientId(ctx.channel());
         if (qos > 0 && packetId <= 0) {
@@ -535,9 +541,10 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             return;
         }
 
-        processApplicationPublish(clientId, topic, payload, qos, message.fixedHeader().isRetain());
+        processApplicationPublish(clientId, topic, payload, effectiveQos, message.fixedHeader().isRetain());
         LOG.fine(() -> "[PUBLISH] clientId=" + clientId + ", topic=" + topic
-                + ", qos=" + qos + ", retain=" + message.fixedHeader().isRetain() + ", bytes=" + payload.length);
+                + ", qos=" + qos + ", effectiveQos=" + effectiveQos
+                + ", retain=" + message.fixedHeader().isRetain() + ", bytes=" + payload.length);
 
         if (qos == 1) {
             ctx.writeAndFlush(MqttMessageBuilders.pubAck().packetId(packetId).build());
@@ -625,7 +632,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
                 clientId,
                 publish.topic(),
                 publish.payload(),
-                MqttQoS.EXACTLY_ONCE.value(),
+                capByMaxQos(MqttQoS.EXACTLY_ONCE.value()),
                 publish.retain()
             );
         }
@@ -653,7 +660,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         if (payload == null) {
             payload = new byte[0];
         }
-        int qos = Math.max(connectMessage.variableHeader().willQos(), 0);
+        int qos = capByMaxQos(normalizeQos(connectMessage.variableHeader().willQos()));
         boolean retain = connectMessage.variableHeader().isWillRetain();
         return new WillMessage(topic, payload.clone(), qos, retain);
     }
@@ -773,6 +780,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
                 ? MqttQoS.EXACTLY_ONCE.value()
                 : MqttQoS.AT_LEAST_ONCE.value())
             : MqttQoS.AT_MOST_ONCE.value();
+        normalizedQos = capByMaxQos(normalizedQos);
         // 路由到本地订阅客户端
         routeLocalOnly(topic, payload, includeNormal, sharedGroups, normalizedQos);
     }
@@ -821,6 +829,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
                 : (publishQos >= MqttQoS.AT_LEAST_ONCE.value()
                     ? MqttQoS.AT_LEAST_ONCE.value()
                     : MqttQoS.AT_MOST_ONCE.value());
+            outboundQos = capByMaxQos(outboundQos);
             if (outboundQos == MqttQoS.AT_MOST_ONCE.value()) {
                 channel.writeAndFlush(MqttMessageBuilders.publish()
                         .topicName(topic)
@@ -1228,6 +1237,24 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             return true;
         }
         return false;
+    }
+
+    private static int normalizeQos(int qos) {
+        if (qos <= MqttQoS.AT_MOST_ONCE.value()) {
+            return MqttQoS.AT_MOST_ONCE.value();
+        }
+        if (qos >= MqttQoS.EXACTLY_ONCE.value()) {
+            return MqttQoS.EXACTLY_ONCE.value();
+        }
+        return qos;
+    }
+
+    private static int normalizeMaxQos(int qos) {
+        return normalizeQos(qos);
+    }
+
+    private int capByMaxQos(int qos) {
+        return Math.min(normalizeQos(qos), maxAllowedQos);
     }
 
     private void handleRateLimitedPublish(

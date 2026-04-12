@@ -14,6 +14,7 @@ jmqx:
     bossThreads: 1
     workerThreads: 0
     readerIdleSeconds: 180
+    maxQos: 2
     rateLimit:
       clientId:
         enabled: false

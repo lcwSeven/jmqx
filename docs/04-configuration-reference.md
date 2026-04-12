@@ -30,6 +30,7 @@
 | `jmqx.broker.bossThreads` | `1` | Netty boss 线程数 |
 | `jmqx.broker.workerThreads` | `0` | Netty worker 线程数（0 表示 Netty 默认） |
 | `jmqx.broker.readerIdleSeconds` | `120` | 读空闲超时（秒，0 表示关闭） |
+| `jmqx.broker.maxQos` | `2` | Broker 最大 QoS（`0/1/2`） |
 | `jmqx.broker.websocket.enabled` | `true` | 是否启用 WS |
 | `jmqx.broker.websocket.host` | `0.0.0.0` | WS 监听地址 |
 | `jmqx.broker.websocket.port` | `8083` | WS 监听端口 |
