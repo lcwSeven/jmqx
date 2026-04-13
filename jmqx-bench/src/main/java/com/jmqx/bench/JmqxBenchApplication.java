@@ -1,5 +1,7 @@
 package com.jmqx.bench;
 
+import com.jmqx.common.logging.Loggers;
+import com.jmqx.common.logging.LoggingBootstrap;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
@@ -35,8 +37,7 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.logging.Level;
-import java.util.logging.Logger;
+import org.slf4j.Logger;
 
 /**
  * jmqx benchmark entry.
@@ -45,7 +46,7 @@ import java.util.logging.Logger;
  * @date 2026/4/9
  */
 public class JmqxBenchApplication {
-    private static final Logger LOG = Logger.getLogger(JmqxBenchApplication.class.getName());
+    private static final Logger LOG = Loggers.getLogger(JmqxBenchApplication.class);
     private static final AttributeKey<String> CLIENT_ID = AttributeKey.valueOf("jmqx.bench.clientId");
     private static final int MAX_MQTT_MESSAGE_SIZE = 256 * 1024;
 
@@ -71,6 +72,7 @@ public class JmqxBenchApplication {
     }
 
     public static void main(String[] args) throws InterruptedException {
+        LoggingBootstrap.initialize();
         BenchConfig config = BenchConfig.parse(args);
         if (config.help) {
             BenchConfig.printHelp();
@@ -84,14 +86,15 @@ public class JmqxBenchApplication {
     }
 
     private void start() {
-        LOG.info(() -> "JMQX-BENCH start host=" + config.host
-            + ", port=" + config.port
-            + ", clients=" + config.clientCount
-            + ", connectRatePerSec=" + config.connectRatePerSecond
-            + ", subscribe=" + config.subscribe
-            + ", publishRatePerSec=" + config.publishRatePerSecond
-            + ", payloadBytes=" + config.payloadBytes
-            + ", qos=" + config.qos);
+        LOG.info("JMQX-BENCH start host={}, port={}, clients={}, connectRatePerSec={}, subscribe={}, publishRatePerSec={}, payloadBytes={}, qos={}",
+            config.host,
+            config.port,
+            config.clientCount,
+            config.connectRatePerSecond,
+            config.subscribe,
+            config.publishRatePerSecond,
+            config.payloadBytes,
+            config.qos);
 
         bootstrap = new Bootstrap()
             .group(ioGroup)
@@ -135,7 +138,7 @@ public class JmqxBenchApplication {
                 metrics.connectFail.incrementAndGet();
                 Throwable cause = connectFuture.cause();
                 if (cause != null) {
-                    LOG.fine(() -> "[CONNECT-FAIL] clientId=" + clientId + ", error=" + cause.getMessage());
+                    LOG.debug("[CONNECT-FAIL] clientId={}, error={}", clientId, cause.getMessage());
                 }
                 return;
             }
@@ -203,15 +206,16 @@ public class JmqxBenchApplication {
         long recvPublish = metrics.recvPublish.get();
         long error = metrics.errorCount.get();
 
-        LOG.info(() -> "[STATS] online=" + online
-            + ", connectAttempt=" + connectAttempt
-            + ", connectSuccess=" + connectSuccess
-            + ", connectFail=" + connectFail
-            + ", subAck=" + subscribeAck
-            + ", publishSuccess=" + publishSuccess
-            + ", publishFail=" + publishFail
-            + ", recvPublish=" + recvPublish
-            + ", error=" + error);
+        LOG.info("[STATS] online={}, connectAttempt={}, connectSuccess={}, connectFail={}, subAck={}, publishSuccess={}, publishFail={}, recvPublish={}, error={}",
+            online,
+            connectAttempt,
+            connectSuccess,
+            connectFail,
+            subscribeAck,
+            publishSuccess,
+            publishFail,
+            recvPublish,
+            error);
     }
 
     private void shutdown() {
@@ -292,7 +296,7 @@ public class JmqxBenchApplication {
         public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
             metrics.errorCount.incrementAndGet();
             if (cause != null) {
-                LOG.log(Level.FINE, "[BENCH-ERROR] " + cause.getMessage(), cause);
+                LOG.debug("[BENCH-ERROR] {}", cause.getMessage(), cause);
             }
             ctx.close();
         }
@@ -301,8 +305,7 @@ public class JmqxBenchApplication {
             String clientId = ctx.channel().attr(CLIENT_ID).get();
             if (connAckMessage.variableHeader().connectReturnCode() != MqttConnectReturnCode.CONNECTION_ACCEPTED) {
                 metrics.connectFail.incrementAndGet();
-                LOG.fine(() -> "[CONNACK] rejected clientId=" + clientId
-                    + ", code=" + connAckMessage.variableHeader().connectReturnCode());
+                LOG.debug("[CONNACK] rejected clientId={}, code={}", clientId, connAckMessage.variableHeader().connectReturnCode());
                 ctx.close();
                 return;
             }

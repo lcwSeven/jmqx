@@ -37,6 +37,8 @@ import com.jmqx.cluster.netty.NettyMetadataCommandGateway;
 import com.jmqx.cluster.netty.NettyMetadataCoreServer;
 import com.jmqx.cluster.netty.NettyMetadataReplicantSyncClient;
 import com.jmqx.common.BrokerProperties;
+import com.jmqx.common.logging.Loggers;
+import com.jmqx.common.logging.LoggingBootstrap;
 import com.jmqx.config.ClusterSettings;
 import com.jmqx.config.JmqxConfig;
 import com.jmqx.config.JmqxConfigMappers;
@@ -77,6 +79,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.TimeUnit;
+import org.slf4j.Logger;
 
 /**
  * 应用启动装配入口，负责把 broker 和插件组装起来。
@@ -85,7 +88,10 @@ import java.util.concurrent.TimeUnit;
  * @date 2026/4/2
  */
 public class JmqxApplication {
+    private static final Logger LOG = Loggers.getLogger(JmqxApplication.class);
+
     public static void main(String[] args) throws InterruptedException {
+        LoggingBootstrap.initialize();
         // 加载配置文件与 JVM 覆盖参数。
         JmqxConfig config = JmqxConfig.loadDefault();
         // 构建启动上下文，避免 main 方法堆积过多局部变量。
@@ -558,89 +564,99 @@ public class JmqxApplication {
         BrokerProperties brokerProperties = context.brokerProperties();
         ClusterRoleProvider clusterRoleProvider = context.clusterRoleProvider();
         ClusterSettings clusterSettings = context.clusterSettings();
-        System.out.println("JMQX started on " + brokerProperties.getHost() + ":" + brokerProperties.getPort());
+        LOG.info("JMQX started on {}:{}", brokerProperties.getHost(), brokerProperties.getPort());
         if (brokerProperties.isMqttsEnabled()) {
             String mqttsHost = toDisplayHost(brokerProperties.getMqttsHost());
-            System.out.println("JMQX mqtts: mqtts://" + mqttsHost + ":" + brokerProperties.getMqttsPort());
+            LOG.info("JMQX mqtts: mqtts://{}:{}", mqttsHost, brokerProperties.getMqttsPort());
         }
         if (brokerProperties.isWebsocketEnabled()) {
             String wsHost = toDisplayHost(brokerProperties.getWebsocketHost());
             String wsPath = normalizeWebsocketPath(brokerProperties.getWebsocketPath());
-            System.out.println("JMQX websocket: ws://" + wsHost + ":" + brokerProperties.getWebsocketPort() + wsPath);
+            LOG.info("JMQX websocket: ws://{}:{}{}", wsHost, brokerProperties.getWebsocketPort(), wsPath);
         }
         if (brokerProperties.isWssEnabled()) {
             String wssHost = toDisplayHost(brokerProperties.getWssHost());
             String wssPath = normalizeWebsocketPath(brokerProperties.getWssPath());
-            System.out.println("JMQX wss: wss://" + wssHost + ":" + brokerProperties.getWssPort() + wssPath);
+            LOG.info("JMQX wss: wss://{}:{}{}", wssHost, brokerProperties.getWssPort(), wssPath);
         }
-        System.out.println("AUTH chain: " + context.authProperties().getChain());
-        System.out.println("ACL plugin: " + context.aclProperties().getType());
-        System.out.println("BRIDGE enabled=" + context.bridgeProperties().isEnabled()
-                + ", types=" + context.bridgeProperties().getTypes()
-                + ", topicFilters=" + context.bridgeProperties().getTopicFilters());
-        System.out.println("RATE_LIMIT clientIdEnabled=" + brokerProperties.isRateLimitClientIdEnabled()
-                + ", clientIdPerSecond=" + brokerProperties.getRateLimitClientIdPerSecond()
-                + ", ipEnabled=" + brokerProperties.isRateLimitIpEnabled()
-                + ", ipPerSecond=" + brokerProperties.getRateLimitIpPerSecond()
-                + ", connectEnabled=" + brokerProperties.isRateLimitConnectEnabled()
-                + ", connectGlobalPerSecond=" + brokerProperties.getRateLimitConnectGlobalPerSecond()
-                + ", connectIpPerSecond=" + brokerProperties.getRateLimitConnectIpPerSecond()
-                + ", cleanupIntervalSeconds=" + brokerProperties.getRateLimitCleanupIntervalSeconds()
-                + ", idleSeconds=" + brokerProperties.getRateLimitIdleSeconds());
-        System.out.println("BROKER maxWillPayloadBytes=" + brokerProperties.getMaxWillPayloadBytes()
-                + ", maxSubscriptionsPerClient=" + brokerProperties.getMaxSubscriptionsPerClient());
-        System.out.println("RETAINED maxEntries=" + context.retainedStoreProperties().getMaxEntries()
-                + ", maxBytes=" + context.retainedStoreProperties().getMaxBytes()
-                + ", maxPayloadBytes=" + context.retainedStoreProperties().getMaxPayloadBytes()
-                + ", rocksdbPath=" + context.retainedStoreProperties().getRocksdbPath()
-                + ", enabled=" + context.retainedStoreProperties().isRetainedEnabled()
-                + ", overflowStrategy=" + context.retainedStoreProperties().getOverflowStrategy());
-        System.out.println("QOS1 inflight rocksdbPath=" + context.qos1InflightRocksdbPath());
-        System.out.println("QOS2 inflight rocksdbPath=" + context.qos2InflightRocksdbPath());
-        System.out.println("WILL persist enabled=" + context.willPersistEnabled()
-                + ", rocksdbPath=" + context.willRocksdbPath());
-        System.out.println("SHARED maxSubscribersPerGroup=" + context.sharedMaxSubscribers()
-                + ", slowConsumerStrikeThreshold=" + context.sharedSlowThreshold());
-        System.out.println("CLUSTER-DISPATCH asyncEnabled=" + context.clusterDispatchAsyncSettings().enabled()
-                + ", queueCapacity=" + context.clusterDispatchAsyncSettings().queueCapacity()
-                + ", workerCount=" + context.clusterDispatchAsyncSettings().workerCount()
-                + ", enqueueTimeoutMs=" + context.clusterDispatchAsyncSettings().enqueueTimeoutMs());
-        System.out.println("STORE-ASYNC enabled=" + context.storageAsyncSettings().enabled()
-                + ", queueCapacity=" + context.storageAsyncSettings().queueCapacity()
-                + ", workerCount=" + context.storageAsyncSettings().workerCount()
-                + ", enqueueTimeoutMs=" + context.storageAsyncSettings().enqueueTimeoutMs());
-        System.out.println("ADMIN-SYNC enabled=" + context.adminSyncSettings().enabled()
-                + ", url=" + context.adminSyncSettings().url()
-                + ", clusterId=" + context.adminSyncSettings().clusterId()
-                + ", nodeIp=" + context.adminSyncSettings().nodeIp()
-                + ", metricsIntervalMs=" + context.adminSyncSettings().metricsIntervalMs()
-                + ", dashboardPublishIntervalMs=" + context.adminSyncSettings().dashboardPublishIntervalMs());
-        System.out.println("ADMIN-PANEL enabled=" + context.adminPanelSettings().enabled()
-                + ", host=" + context.adminPanelSettings().host()
-                + ", port=" + context.adminPanelSettings().port()
-                + ", path=" + context.adminPanelSettings().basePath()
-                + ", backendUrl=" + context.adminPanelSettings().backendUrl());
-        System.out.println("CLUSTER role=" + clusterRoleProvider.role()
-                + ", nodeId=" + clusterRoleProvider.nodeId()
-                + ", transport=netty"
-                + ", coreEndpoints=" + clusterRoleProvider.coreEndpoints()
-                + ", coreBindHost=" + clusterSettings.coreBindHost()
-                + ", coreBindPort=" + clusterSettings.coreBindPort()
-                + ", nettyRequestTimeoutMs=" + clusterSettings.clusterRequestTimeoutMs()
-                + ", reconnectBackoffMs=" + clusterSettings.clusterReconnectBackoffMs()
-                + ", ackBatchSize=" + clusterSettings.clusterAckBatchSize()
-                + ", ackFlushIntervalMs=" + clusterSettings.clusterAckFlushIntervalMs()
-                + ", replicantMaxInFlightEvents=" + clusterSettings.clusterReplicantMaxInFlightEvents()
-                + ", replicantPushBatchSize=" + clusterSettings.clusterReplicantPushBatchSize()
-                + ", nodeDownCleanupDelayMs=" + clusterSettings.clusterNodeDownCleanupDelayMs()
-                + ", messageBindHost=" + clusterSettings.clusterMessageBindHost()
-                + ", messageBindPort=" + clusterSettings.clusterMessageBindPort()
-                + ", nodeEndpoints=" + clusterSettings.clusterNodeEndpoints()
-                + ", replayMaxEvents=" + clusterSettings.clusterReplayMaxEvents()
-                + ", raftGroupId=" + clusterSettings.raftGroupId()
-                + ", raftServerId=" + clusterSettings.raftServerId()
-                + ", raftInitialConf=" + clusterSettings.raftInitialConf()
-                + ", raftDataPath=" + clusterSettings.raftDataPath());
+        LOG.info("AUTH chain: {}", context.authProperties().getChain());
+        LOG.info("ACL plugin: {}", context.aclProperties().getType());
+        LOG.info("BRIDGE enabled={}, types={}, topicFilters={}",
+                context.bridgeProperties().isEnabled(),
+                context.bridgeProperties().getTypes(),
+                context.bridgeProperties().getTopicFilters());
+        LOG.info("RATE_LIMIT clientIdEnabled={}, clientIdPerSecond={}, ipEnabled={}, ipPerSecond={}, connectEnabled={}, connectGlobalPerSecond={}, connectIpPerSecond={}, cleanupIntervalSeconds={}, idleSeconds={}",
+                brokerProperties.isRateLimitClientIdEnabled(),
+                brokerProperties.getRateLimitClientIdPerSecond(),
+                brokerProperties.isRateLimitIpEnabled(),
+                brokerProperties.getRateLimitIpPerSecond(),
+                brokerProperties.isRateLimitConnectEnabled(),
+                brokerProperties.getRateLimitConnectGlobalPerSecond(),
+                brokerProperties.getRateLimitConnectIpPerSecond(),
+                brokerProperties.getRateLimitCleanupIntervalSeconds(),
+                brokerProperties.getRateLimitIdleSeconds());
+        LOG.info("BROKER maxWillPayloadBytes={}, maxSubscriptionsPerClient={}",
+                brokerProperties.getMaxWillPayloadBytes(),
+                brokerProperties.getMaxSubscriptionsPerClient());
+        LOG.info("RETAINED maxEntries={}, maxBytes={}, maxPayloadBytes={}, rocksdbPath={}, enabled={}, overflowStrategy={}",
+                context.retainedStoreProperties().getMaxEntries(),
+                context.retainedStoreProperties().getMaxBytes(),
+                context.retainedStoreProperties().getMaxPayloadBytes(),
+                context.retainedStoreProperties().getRocksdbPath(),
+                context.retainedStoreProperties().isRetainedEnabled(),
+                context.retainedStoreProperties().getOverflowStrategy());
+        LOG.info("QOS1 inflight rocksdbPath={}", context.qos1InflightRocksdbPath());
+        LOG.info("QOS2 inflight rocksdbPath={}", context.qos2InflightRocksdbPath());
+        LOG.info("WILL persist enabled={}, rocksdbPath={}",
+                context.willPersistEnabled(),
+                context.willRocksdbPath());
+        LOG.info("SHARED maxSubscribersPerGroup={}, slowConsumerStrikeThreshold={}",
+                context.sharedMaxSubscribers(),
+                context.sharedSlowThreshold());
+        LOG.info("CLUSTER-DISPATCH asyncEnabled={}, queueCapacity={}, workerCount={}, enqueueTimeoutMs={}",
+                context.clusterDispatchAsyncSettings().enabled(),
+                context.clusterDispatchAsyncSettings().queueCapacity(),
+                context.clusterDispatchAsyncSettings().workerCount(),
+                context.clusterDispatchAsyncSettings().enqueueTimeoutMs());
+        LOG.info("STORE-ASYNC enabled={}, queueCapacity={}, workerCount={}, enqueueTimeoutMs={}",
+                context.storageAsyncSettings().enabled(),
+                context.storageAsyncSettings().queueCapacity(),
+                context.storageAsyncSettings().workerCount(),
+                context.storageAsyncSettings().enqueueTimeoutMs());
+        LOG.info("ADMIN-SYNC enabled={}, url={}, clusterId={}, nodeIp={}, metricsIntervalMs={}, dashboardPublishIntervalMs={}",
+                context.adminSyncSettings().enabled(),
+                context.adminSyncSettings().url(),
+                context.adminSyncSettings().clusterId(),
+                context.adminSyncSettings().nodeIp(),
+                context.adminSyncSettings().metricsIntervalMs(),
+                context.adminSyncSettings().dashboardPublishIntervalMs());
+        LOG.info("ADMIN-PANEL enabled={}, host={}, port={}, path={}, backendUrl={}",
+                context.adminPanelSettings().enabled(),
+                context.adminPanelSettings().host(),
+                context.adminPanelSettings().port(),
+                context.adminPanelSettings().basePath(),
+                context.adminPanelSettings().backendUrl());
+        LOG.info("CLUSTER role={}, nodeId={}, transport=netty, coreEndpoints={}, coreBindHost={}, coreBindPort={}, nettyRequestTimeoutMs={}, reconnectBackoffMs={}, ackBatchSize={}, ackFlushIntervalMs={}, replicantMaxInFlightEvents={}, replicantPushBatchSize={}, nodeDownCleanupDelayMs={}, messageBindHost={}, messageBindPort={}, nodeEndpoints={}, replayMaxEvents={}, raftGroupId={}, raftServerId={}, raftInitialConf={}, raftDataPath={}",
+                clusterRoleProvider.role(),
+                clusterRoleProvider.nodeId(),
+                clusterRoleProvider.coreEndpoints(),
+                clusterSettings.coreBindHost(),
+                clusterSettings.coreBindPort(),
+                clusterSettings.clusterRequestTimeoutMs(),
+                clusterSettings.clusterReconnectBackoffMs(),
+                clusterSettings.clusterAckBatchSize(),
+                clusterSettings.clusterAckFlushIntervalMs(),
+                clusterSettings.clusterReplicantMaxInFlightEvents(),
+                clusterSettings.clusterReplicantPushBatchSize(),
+                clusterSettings.clusterNodeDownCleanupDelayMs(),
+                clusterSettings.clusterMessageBindHost(),
+                clusterSettings.clusterMessageBindPort(),
+                clusterSettings.clusterNodeEndpoints(),
+                clusterSettings.clusterReplayMaxEvents(),
+                clusterSettings.raftGroupId(),
+                clusterSettings.raftServerId(),
+                clusterSettings.raftInitialConf(),
+                clusterSettings.raftDataPath());
     }
 
     private static RetainedMessageStore buildRetainedMessageStore(RetainedStoreProperties properties) {
