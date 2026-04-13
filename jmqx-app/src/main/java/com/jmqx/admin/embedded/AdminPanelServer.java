@@ -1,5 +1,6 @@
 package com.jmqx.admin.embedded;
 
+import com.jmqx.common.logging.ClientTraceManager;
 import com.jmqx.router.SubscriptionRegistry;
 import com.jmqx.session.ClientSession;
 import com.jmqx.session.SessionRegistry;
@@ -25,7 +26,6 @@ import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
-import java.time.Instant;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -65,8 +65,12 @@ public class AdminPanelServer {
     private final ConnectionMetrics connectionMetrics;
     private final AdminStateRepository stateStore;
     private final BuiltInDatabaseUserService builtInDatabaseUserService;
+    private final ClientTraceManager clientTraceManager = ClientTraceManager.getInstance();
     private final SecurityConfigUpdater securityConfigUpdater;
     private final ClusterConfigUpdater clusterConfigUpdater;
+    private final ClientKickUpdater clientKickUpdater;
+    private final BlacklistUpdater blacklistUpdater;
+    private final ClientTraceUpdater clientTraceUpdater;
     private final BuiltInDatabaseUsersUpdater builtInDatabaseUsersUpdater;
     private final OkHttpClient httpClient;
     private HttpServer server;
@@ -88,6 +92,9 @@ public class AdminPanelServer {
                             EmbeddedAdminStateStore.ClusterConfig initialClusterConfig,
                             SecurityConfigUpdater securityConfigUpdater,
                             ClusterConfigUpdater clusterConfigUpdater,
+                            ClientKickUpdater clientKickUpdater,
+                            BlacklistUpdater blacklistUpdater,
+                            ClientTraceUpdater clientTraceUpdater,
                             BuiltInDatabaseUsersUpdater builtInDatabaseUsersUpdater,
                             BuiltInDatabaseUserService builtInDatabaseUserService) {
         this.host = (host == null || host.isBlank()) ? "0.0.0.0" : host.trim();
@@ -122,6 +129,12 @@ public class AdminPanelServer {
         } : securityConfigUpdater;
         this.clusterConfigUpdater = clusterConfigUpdater == null ? (clusterId, config) -> {
         } : clusterConfigUpdater;
+        this.clientKickUpdater = clientKickUpdater == null ? (clusterId, clientId) -> {
+        } : clientKickUpdater;
+        this.blacklistUpdater = blacklistUpdater == null ? new BlacklistUpdater() {
+        } : blacklistUpdater;
+        this.clientTraceUpdater = clientTraceUpdater == null ? new ClientTraceUpdater() {
+        } : clientTraceUpdater;
         this.builtInDatabaseUsersUpdater = builtInDatabaseUsersUpdater == null ? new BuiltInDatabaseUsersUpdater() {
             @Override
             public void upsert(String clusterId, EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig config, String userId, String password, boolean superuser) {
@@ -297,6 +310,24 @@ public class AdminPanelServer {
             writeJson(exchange, 200, "{\"ok\":true}");
             return;
         }
+        if ("/api/v1/internal/clients".equals(path) && "POST".equals(method)) {
+            EmbeddedAdminStateStore.ClientSnapshot clientSnapshot = parseClientSnapshot(body);
+            stateStore.upsertClientSnapshot(clusterId, clientSnapshot);
+            writeJson(exchange, 200, "{\"ok\":true}");
+            return;
+        }
+        if (path.startsWith("/api/v1/internal/clients/") && path.endsWith("/subscriptions") && "POST".equals(method)) {
+            String clientId = decode(path.substring("/api/v1/internal/clients/".length(), path.length() - "/subscriptions".length()));
+            stateStore.replaceClientSubscriptions(clusterId, clientId, extractStringList(body, "topics"));
+            writeJson(exchange, 200, "{\"ok\":true}");
+            return;
+        }
+        if (path.startsWith("/api/v1/internal/clients/") && "DELETE".equals(method)) {
+            String clientId = decode(path.substring("/api/v1/internal/clients/".length()));
+            stateStore.removeClientSnapshot(clusterId, clientId);
+            writeJson(exchange, 200, "{\"ok\":true}");
+            return;
+        }
         if ("/api/v1/cluster/config".equals(path) && "GET".equals(method)) {
             writeJson(exchange, 200, toClusterConfigJson(stateStore.getClusterConfig(clusterId)));
             return;
@@ -327,6 +358,92 @@ public class AdminPanelServer {
         }
         if ("/api/v1/security/config".equals(path) && "GET".equals(method)) {
             writeJson(exchange, 200, toSecurityConfigJson(stateStore.getSecurityConfig(clusterId)));
+            return;
+        }
+        if ("/api/v1/blacklist".equals(path) && "GET".equals(method)) {
+            writeJson(exchange, 200, buildBlacklistJson(clusterId));
+            return;
+        }
+        if ("/api/v1/client-traces".equals(path) && "GET".equals(method)) {
+            writeJson(exchange, 200, buildClientTraceTasksJson(clusterId));
+            return;
+        }
+        if ("/api/v1/client-traces".equals(path) && "POST".equals(method)) {
+            ClientTraceManager.ClientTraceTask task = parseClientTraceTask(body, resolveAdminSource(exchange, adminPrincipal));
+            String validationError = validateClientTraceTask(task);
+            if (validationError != null) {
+                writeJson(exchange, 400, "{\"error\":\"" + escape(validationError) + "\"}");
+                return;
+            }
+            clientTraceUpdater.upsert(clusterId, task);
+            stateStore.upsertClientTraceTask(clusterId, task);
+            clientTraceManager.upsert(task);
+            appendAuditLog(
+                    clusterId,
+                    "logging.client-trace.upserted",
+                    resolveAdminSource(exchange, adminPrincipal),
+                    "{}",
+                    toClientTraceTaskJson(task)
+            );
+            writeJson(exchange, 200, buildClientTraceTasksJson(clusterId));
+            return;
+        }
+        if (path.startsWith("/api/v1/client-traces/") && "DELETE".equals(method)) {
+            String taskId = decode(path.substring("/api/v1/client-traces/".length()));
+            if (taskId == null || taskId.isBlank()) {
+                writeJson(exchange, 400, "{\"error\":\"taskId is required\"}");
+                return;
+            }
+            clientTraceUpdater.delete(clusterId, taskId);
+            stateStore.removeClientTraceTask(clusterId, taskId);
+            clientTraceManager.remove(taskId);
+            appendAuditLog(
+                    clusterId,
+                    "logging.client-trace.deleted",
+                    resolveAdminSource(exchange, adminPrincipal),
+                    "{\"taskId\":\"" + escape(taskId) + "\"}",
+                    "{}"
+            );
+            writeJson(exchange, 200, buildClientTraceTasksJson(clusterId));
+            return;
+        }
+        if ("/api/v1/blacklist".equals(path) && "POST".equals(method)) {
+            EmbeddedAdminStateStore.BlacklistEntry entry = parseBlacklistEntry(body, resolveAdminSource(exchange, adminPrincipal));
+            if (entry == null || entry.value().isBlank()) {
+                writeJson(exchange, 400, "{\"error\":\"invalid blacklist entry\"}");
+                return;
+            }
+            blacklistUpdater.upsert(clusterId, entry);
+            stateStore.upsertBlacklistEntry(clusterId, entry);
+            appendAuditLog(
+                    clusterId,
+                    "security.blacklist.upserted",
+                    resolveAdminSource(exchange, adminPrincipal),
+                    "{}",
+                    toBlacklistEntryJson(entry)
+            );
+            writeJson(exchange, 200, buildBlacklistJson(clusterId));
+            return;
+        }
+        if (path.startsWith("/api/v1/blacklist/") && "DELETE".equals(method)) {
+            String suffix = decode(path.substring("/api/v1/blacklist/".length()));
+            int split = suffix.indexOf('/');
+            if (split <= 0) {
+                writeJson(exchange, 400, "{\"error\":\"invalid blacklist path\"}");
+                return;
+            }
+            String type = suffix.substring(0, split);
+            String value = suffix.substring(split + 1);
+            blacklistUpdater.delete(clusterId, type, value);
+            stateStore.removeBlacklistEntry(clusterId, type, value);
+            appendAuditLog(
+                    clusterId,
+                    "security.blacklist.deleted",
+                    resolveAdminSource(exchange, adminPrincipal),
+                    "{\"type\":\"" + escape(type) + "\",\"value\":\"" + escape(value) + "\"}",
+                    "{}"
+            );
+            writeJson(exchange, 200, buildBlacklistJson(clusterId));
             return;
         }
         if ("/api/v1/auth/built-in/users".equals(path) && "GET".equals(method)) {
@@ -403,9 +520,26 @@ public class AdminPanelServer {
             writeJson(exchange, 200, buildClientsJson(query));
             return;
         }
+        if (path.startsWith("/api/v1/clients/") && path.endsWith("/kick") && "POST".equals(method)) {
+            String clientId = decode(path.substring("/api/v1/clients/".length(), path.length() - "/kick".length()));
+            if (clientId == null || clientId.isBlank()) {
+                writeJson(exchange, 400, "{\"error\":\"clientId is required\"}");
+                return;
+            }
+            clientKickUpdater.apply(clusterId, clientId);
+            appendAuditLog(
+                    clusterId,
+                    "client.kicked",
+                    resolveAdminSource(exchange, adminPrincipal),
+                    "{}",
+                    "{\"clientId\":\"" + escape(clientId) + "\"}"
+            );
+            writeJson(exchange, 200, "{\"success\":true}");
+            return;
+        }
         if (path.startsWith("/api/v1/clients/") && "GET".equals(method)) {
             String clientId = decode(path.substring("/api/v1/clients/".length()));
-            String detailJson = buildClientDetailJson(clientId);
+            String detailJson = buildClientDetailJson(clusterId, clientId);
             if (detailJson == null) {
                 writeJson(exchange, 404, "{\"error\":\"client not found\"}");
             } else {
@@ -540,7 +674,7 @@ public class AdminPanelServer {
     }
 
     private void upsertLocalNodeSnapshot(String clusterId) {
-        int connections = connectionMetrics == null ? 0 : connectionMetrics.getActiveConnections();
+        int connections = sessionRegistry == null ? 0 : sessionRegistry.list().size();
         long inbound = connectionMetrics == null ? 0 : connectionMetrics.getInboundBytes();
         long outbound = connectionMetrics == null ? 0 : connectionMetrics.getOutboundBytes();
         EmbeddedAdminStateStore.NodeMetrics localMetrics = new EmbeddedAdminStateStore.NodeMetrics(
@@ -556,28 +690,30 @@ public class AdminPanelServer {
     }
 
     private String buildClientsJson(Map<String, String> query) {
+        String clusterId = normalize(query.get("clusterId"), defaultClusterId);
         String clientIdFilter = normalize(query.get("clientId"), "");
         String userNameFilter = normalize(query.get("userName"), "");
         int pageNo = parseInt(query.get("pageNo"), 1);
         int pageSize = Math.min(Math.max(parseInt(query.get("pageSize"), 20), 1), 200);
-        List<ClientSession> sessions = sessionRegistry == null ? List.of() : sessionRegistry.list();
-        List<ClientSession> filtered = new ArrayList<>();
-        for (ClientSession session : sessions) {
-            if (session == null) {
+        upsertLocalClientSnapshots(clusterId);
+        List<EmbeddedAdminStateStore.ClientSnapshot> snapshots = stateStore.listClientSnapshots(clusterId);
+        List<EmbeddedAdminStateStore.ClientSnapshot> filtered = new ArrayList<>();
+        for (EmbeddedAdminStateStore.ClientSnapshot snapshot : snapshots) {
+            if (snapshot == null) {
                 continue;
             }
-            if (!containsIgnoreCase(session.clientId(), clientIdFilter)) {
+            if (!containsIgnoreCase(snapshot.clientId(), clientIdFilter)) {
                 continue;
             }
-            if (!containsIgnoreCase(session.username(), userNameFilter)) {
+            if (!containsIgnoreCase(snapshot.username(), userNameFilter)) {
                 continue;
             }
-            filtered.add(session);
+            filtered.add(snapshot);
         }
-        filtered.sort(Comparator.comparing(ClientSession::connectedAt).reversed());
+        filtered.sort(Comparator.comparing(EmbeddedAdminStateStore.ClientSnapshot::connectedAt).reversed());
         int from = Math.max((pageNo - 1) * pageSize, 0);
         int to = Math.min(from + pageSize, filtered.size());
-        List<ClientSession> page = from >= filtered.size() ? List.of() : filtered.subList(from, to);
+        List<EmbeddedAdminStateStore.ClientSnapshot> page = from >= filtered.size() ? List.of() : filtered.subList(from, to);
 
         StringBuilder records = new StringBuilder();
         for (int i = 0; i < page.size(); i++) {
@@ -594,17 +730,16 @@ public class AdminPanelServer {
                 + "}";
     }
 
-    private String buildClientDetailJson(String clientId) {
-        if (sessionRegistry == null || clientId == null || clientId.isBlank()) {
+    private String buildClientDetailJson(String clusterId, String clientId) {
+        if (clientId == null || clientId.isBlank()) {
             return null;
         }
-        ClientSession session = sessionRegistry.get(clientId).orElse(null);
-        if (session == null) {
+        upsertLocalClientSnapshots(clusterId);
+        EmbeddedAdminStateStore.ClientSnapshot snapshot = stateStore.getClientSnapshot(clusterId, clientId);
+        if (snapshot == null) {
             return null;
         }
-        Set<String> topics = subscriptionRegistry == null
-                ? Set.of()
-                : new LinkedHashSet<>(subscriptionRegistry.findSubscriptions(clientId).keySet());
+        Set<String> topics = new LinkedHashSet<>(snapshot.subscribedTopics());
         StringBuilder topicsJson = new StringBuilder();
         int i = 0;
         for (String topic : topics) {
@@ -614,12 +749,58 @@ public class AdminPanelServer {
             topicsJson.append("\"").append(escape(topic)).append("\"");
         }
         return "{"
-                + "\"session\":" + toClientRowJson(session) + ","
+                + "\"session\":" + toClientRowJson(snapshot) + ","
                 + "\"subscribedTopics\":[" + topicsJson + "]"
                 + "}";
     }
 
-    private String toClientRowJson(ClientSession session) {
+    private void upsertLocalClientSnapshots(String clusterId) {
+        if (sessionRegistry == null) {
+            return;
+        }
+        Set<String> activeClientIds = new LinkedHashSet<>();
+        for (ClientSession session : sessionRegistry.list()) {
+            if (session == null) {
+                continue;
+            }
+            activeClientIds.add(session.clientId());
+            Set<String> topics = subscriptionRegistry == null
+                    ? Set.of()
+                    : new LinkedHashSet<>(subscriptionRegistry.findSubscriptions(session.clientId()).keySet());
+            stateStore.upsertClientSnapshot(clusterId, new EmbeddedAdminStateStore.ClientSnapshot(
+                    session.clientId(),
+                    nodeId,
+                    resolveClientIp(session),
+                    session.keepAliveSeconds(),
+                    session.connectionType(),
+                    session.username(),
+                    session.connectedAt() == null ? 0L : session.connectedAt().toEpochMilli(),
+                    new ArrayList<>(topics)
+            ));
+        }
+        for (EmbeddedAdminStateStore.ClientSnapshot snapshot : stateStore.listClientSnapshots(clusterId)) {
+            if (snapshot == null || !nodeId.equals(snapshot.nodeId())) {
+                continue;
+            }
+            if (!activeClientIds.contains(snapshot.clientId())) {
+                stateStore.removeClientSnapshot(clusterId, snapshot.clientId());
+            }
+        }
+    }
+
+    private String toClientRowJson(EmbeddedAdminStateStore.ClientSnapshot snapshot) {
+        return "{"
+                + "\"clientId\":\"" + escape(snapshot == null ? "" : snapshot.clientId()) + "\","
+                + "\"nodeId\":\"" + escape(snapshot == null ? "" : snapshot.nodeId()) + "\","
+                + "\"clientIp\":\"" + escape(snapshot == null ? "" : snapshot.clientIp()) + "\","
+                + "\"keepAliveSeconds\":" + (snapshot == null ? 0 : snapshot.keepAliveSeconds()) + ","
+                + "\"connectionType\":\"" + escape(snapshot == null ? "" : snapshot.connectionType()) + "\","
+                + "\"username\":\"" + escape(snapshot == null ? "" : snapshot.username()) + "\","
+                + "\"connectedAt\":" + (snapshot == null ? 0L : snapshot.connectedAt())
+                + "}";
+    }
+
+    private static String resolveClientIp(ClientSession session) {
         String clientIp = "unknown";
         if (session != null && session.channel() != null && session.channel().remoteAddress() instanceof InetSocketAddress address) {
             if (address.getAddress() != null) {
@@ -628,16 +809,7 @@ public class AdminPanelServer {
                 clientIp = address.getHostString();
             }
         }
-        long connectedAt = session == null || session.connectedAt() == null ? Instant.now().toEpochMilli() : session.connectedAt().toEpochMilli();
-        return "{"
-                + "\"clientId\":\"" + escape(session == null ? "" : session.clientId()) + "\","
-                + "\"nodeId\":\"" + escape(nodeId) + "\","
-                + "\"clientIp\":\"" + escape(clientIp) + "\","
-                + "\"keepAliveSeconds\":" + (session == null ? 0 : session.keepAliveSeconds()) + ","
-                + "\"connectionType\":\"" + escape(session == null ? "" : session.connectionType()) + "\","
-                + "\"username\":\"" + escape(session == null ? "" : session.username()) + "\","
-                + "\"connectedAt\":" + connectedAt
-                + "}";
+        return clientIp;
     }
 
     private static String toClustersJson(List<EmbeddedAdminStateStore.ClusterSummary> clusters) {
@@ -798,6 +970,30 @@ public class AdminPanelServer {
         return builder.toString();
     }
 
+    private static String toBlacklistEntryJson(EmbeddedAdminStateStore.BlacklistEntry entry) {
+        return "{"
+                + "\"type\":\"" + escape(entry.type()) + "\","
+                + "\"value\":\"" + escape(entry.value()) + "\","
+                + "\"createdAt\":" + entry.createdAt() + ","
+                + "\"source\":\"" + escape(entry.source()) + "\""
+                + "}";
+    }
+
+    private String toClientTraceTaskJson(ClientTraceManager.ClientTraceTask task) {
+        long now = System.currentTimeMillis();
+        return "{"
+                + "\"id\":\"" + escape(task.id()) + "\","
+                + "\"clientId\":\"" + escape(task.clientId()) + "\","
+                + "\"startAt\":" + task.startAt() + ","
+                + "\"endAt\":" + task.endAt() + ","
+                + "\"createdAt\":" + task.createdAt() + ","
+                + "\"createdBy\":\"" + escape(task.createdBy()) + "\","
+                + "\"filePath\":\"" + escape(task.filePath()) + "\","
+                + "\"status\":\"" + escape(task.statusAt(now)) + "\","
+                + "\"durationMinutes\":" + Math.max(1L, task.durationMillis() / 60_000L)
+                + "}";
+    }
+
     private static String toAdminSessionJson(AdminPrincipal principal) {
         if (principal == null) {
             return "{\"authenticated\":false}";
@@ -847,6 +1043,32 @@ public class AdminPanelServer {
                 + "\"saltPosition\":\"" + escape(config.saltPosition()) + "\","
                 + "\"records\":" + builder
                 + "}";
+    }
+
+    private String buildBlacklistJson(String clusterId) {
+        List<EmbeddedAdminStateStore.BlacklistEntry> entries = stateStore.listBlacklistEntries(clusterId);
+        StringBuilder builder = new StringBuilder("[");
+        for (int i = 0; i < entries.size(); i++) {
+            if (i > 0) {
+                builder.append(",");
+            }
+            builder.append(toBlacklistEntryJson(entries.get(i)));
+        }
+        builder.append("]");
+        return "{\"records\":" + builder + "}";
+    }
+
+    private String buildClientTraceTasksJson(String clusterId) {
+        List<ClientTraceManager.ClientTraceTask> tasks = stateStore.listClientTraceTasks(clusterId);
+        StringBuilder builder = new StringBuilder("[");
+        for (int i = 0; i < tasks.size(); i++) {
+            if (i > 0) {
+                builder.append(",");
+            }
+            builder.append(toClientTraceTaskJson(tasks.get(i)));
+        }
+        builder.append("]");
+        return "{\"records\":" + builder + "}";
     }
 
     private static String toStringArray(List<String> values) {
@@ -935,6 +1157,65 @@ public class AdminPanelServer {
                 connections,
                 reportTime
         );
+    }
+
+    private EmbeddedAdminStateStore.ClientSnapshot parseClientSnapshot(String body) {
+        return new EmbeddedAdminStateStore.ClientSnapshot(
+                normalize(extractString(body, "clientId"), ""),
+                normalize(extractString(body, "nodeId"), "unknown"),
+                normalize(extractString(body, "clientIp"), "unknown"),
+                Math.max(0, extractInt(body, "keepAliveSeconds", 0)),
+                normalize(extractString(body, "connectionType"), ""),
+                normalize(extractString(body, "username"), ""),
+                Math.max(0L, extractLong(body, "connectedAt", System.currentTimeMillis())),
+                List.of()
+        );
+    }
+
+    private EmbeddedAdminStateStore.BlacklistEntry parseBlacklistEntry(String body, String source) {
+        String type = normalize(extractString(body, "type"), "clientId");
+        String value = normalize(extractString(body, "value"), "");
+        if (value.isBlank()) {
+            return null;
+        }
+        return new EmbeddedAdminStateStore.BlacklistEntry(type, value, System.currentTimeMillis(), source);
+    }
+
+    private ClientTraceManager.ClientTraceTask parseClientTraceTask(String body, String source) {
+        String clientId = normalize(extractString(body, "clientId"), "");
+        long startAt = extractLong(body, "startAt", 0L);
+        int durationMinutes = extractInt(body, "durationMinutes", 0);
+        String taskId = ClientTraceManager.newTaskId();
+        long createdAt = System.currentTimeMillis();
+        long endAt = startAt + Math.max(0L, durationMinutes) * 60_000L;
+        String filePath = clientTraceManager.generateFilePath(clientId, startAt, taskId);
+        return new ClientTraceManager.ClientTraceTask(
+                taskId,
+                clientId,
+                startAt,
+                endAt,
+                createdAt,
+                source,
+                filePath
+        ).normalize();
+    }
+
+    private static String validateClientTraceTask(ClientTraceManager.ClientTraceTask task) {
+        if (task == null || task.clientId() == null || task.clientId().isBlank()) {
+            return "clientId 不能为空";
+        }
+        long now = System.currentTimeMillis();
+        if (task.startAt() <= now) {
+            return "追踪开始时间必须是未来时间";
+        }
+        long durationMillis = task.durationMillis();
+        if (durationMillis <= 0L) {
+            return "追踪时长至少为 1 分钟";
+        }
+        if (durationMillis > ClientTraceManager.MAX_DURATION_MILLIS) {
+            return "追踪时长不能超过 30 分钟";
+        }
+        return null;
     }
 
     private static Map<String, String> parseQuery(String raw) {
@@ -1379,6 +1660,27 @@ public class AdminPanelServer {
     @FunctionalInterface
     public interface ClusterConfigUpdater {
         void apply(String clusterId, EmbeddedAdminStateStore.ClusterConfig config);
+    }
+
+    @FunctionalInterface
+    public interface ClientKickUpdater {
+        void apply(String clusterId, String clientId);
+    }
+
+    public interface BlacklistUpdater {
+        default void upsert(String clusterId, EmbeddedAdminStateStore.BlacklistEntry entry) {
+        }
+
+        default void delete(String clusterId, String type, String value) {
+        }
+    }
+
+    public interface ClientTraceUpdater {
+        default void upsert(String clusterId, ClientTraceManager.ClientTraceTask task) {
+        }
+
+        default void delete(String clusterId, String taskId) {
+        }
     }
 
     public interface BuiltInDatabaseUsersUpdater {

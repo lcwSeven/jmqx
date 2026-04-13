@@ -21,12 +21,13 @@ export const clientsPageTemplate = `
       <thead>
       <tr>
         <th>客户端 ID</th>
+        <th>用户名</th>
         <th>节点</th>
         <th>IP</th>
         <th>Keepalive</th>
         <th>连接方式</th>
-        <th>用户名</th>
         <th>上线时间</th>
+        <th>操作</th>
       </tr>
       </thead>
       <tbody>
@@ -38,6 +39,14 @@ export const clientsPageTemplate = `
         <td>{{ c.connectionType }}</td>
         <td>{{ c.username || '-' }}</td>
         <td>{{ formatDateTime(c.connectedAt) }}</td>
+        <td>
+          <div class="table-actions">
+            <el-button type="primary" link @click.stop="openClientTraceForClient(c.clientId)">日志追踪</el-button>
+            <el-button type="warning" link @click.stop="kickClient(c.clientId)">踢下线</el-button>
+            <el-button type="danger" link @click.stop="blockClientByClientId(c.clientId)">拉黑 clientId</el-button>
+            <el-button v-if="c.clientIp && c.clientIp !== 'unknown'" type="danger" link @click.stop="blockClientByIp(c.clientIp, c.clientId)">拉黑 IP</el-button>
+          </div>
+        </td>
       </tr>
       </tbody>
     </table>
@@ -53,15 +62,19 @@ export const clientsPageTemplate = `
     </div>
     <div class="toolbar">
       <button class="btn secondary" @click="selectedClient=null">返回列表</button>
+      <button class="btn" @click="openClientTraceForClient(selectedClient.session.clientId)">日志追踪</button>
+      <button class="btn warning" @click="kickClient(selectedClient.session.clientId)">踢下线</button>
+      <button class="btn danger" @click="blockClientByClientId(selectedClient.session.clientId)">拉黑 clientId</button>
+      <button class="btn danger" v-if="selectedClient.session.clientIp && selectedClient.session.clientIp !== 'unknown'" @click="blockClientByIp(selectedClient.session.clientIp, selectedClient.session.clientId)">拉黑 IP</button>
     </div>
     <table class="data-table detail-table">
       <tbody>
       <tr><th>客户端 ID</th><td>{{ selectedClient.session.clientId }}</td></tr>
+      <tr><th>用户名</th><td>{{ selectedClient.session.username || '-' }}</td></tr>
       <tr><th>节点</th><td>{{ selectedClient.session.nodeId }}</td></tr>
       <tr><th>IP</th><td>{{ selectedClient.session.clientIp }}</td></tr>
       <tr><th>Keepalive</th><td>{{ selectedClient.session.keepAliveSeconds }}</td></tr>
       <tr><th>连接方式</th><td>{{ selectedClient.session.connectionType }}</td></tr>
-      <tr><th>用户名</th><td>{{ selectedClient.session.username || '-' }}</td></tr>
       <tr><th>上线时间</th><td>{{ formatDateTime(selectedClient.session.connectedAt) }}</td></tr>
       </tbody>
     </table>

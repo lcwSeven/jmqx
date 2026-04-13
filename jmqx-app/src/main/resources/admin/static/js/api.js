@@ -125,6 +125,48 @@ export function fetchClientDetail(clusterId, clientId) {
     return request(API_BASE + "/clients/" + encodeURIComponent(clientId) + "?clusterId=" + encodeURIComponent(clusterId));
 }
 
+export function kickClient(clusterId, clientId) {
+    return request(API_BASE + "/clients/" + encodeURIComponent(clientId) + "/kick?clusterId=" + encodeURIComponent(clusterId), {
+        method: "POST",
+        body: "{}"
+    });
+}
+
+export function fetchBlacklistEntries(clusterId) {
+    return request(API_BASE + "/blacklist?clusterId=" + encodeURIComponent(clusterId));
+}
+
+export function createBlacklistEntry(clusterId, payload) {
+    return request(API_BASE + "/blacklist?clusterId=" + encodeURIComponent(clusterId), {
+        method: "POST",
+        body: JSON.stringify(payload)
+    });
+}
+
+export function deleteBlacklistEntry(clusterId, type, value) {
+    return request(
+        API_BASE + "/blacklist/" + encodeURIComponent(type) + "/" + encodeURIComponent(value) + "?clusterId=" + encodeURIComponent(clusterId),
+        { method: "DELETE" }
+    );
+}
+
+export function fetchClientTraces(clusterId) {
+    return request(API_BASE + "/client-traces?clusterId=" + encodeURIComponent(clusterId));
+}
+
+export function createClientTrace(clusterId, payload) {
+    return request(API_BASE + "/client-traces?clusterId=" + encodeURIComponent(clusterId), {
+        method: "POST",
+        body: JSON.stringify(payload)
+    });
+}
+
+export function deleteClientTrace(clusterId, taskId) {
+    return request(API_BASE + "/client-traces/" + encodeURIComponent(taskId) + "?clusterId=" + encodeURIComponent(clusterId), {
+        method: "DELETE"
+    });
+}
+
 export function fetchSecurityConfig(clusterId) {
     return request(API_BASE + "/security/config?clusterId=" + encodeURIComponent(clusterId));
 }

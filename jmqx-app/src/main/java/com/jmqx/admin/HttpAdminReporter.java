@@ -1,6 +1,7 @@
 package com.jmqx.admin;
 
 import com.jmqx.admin.embedded.AdminAuthRuntime;
+import com.jmqx.session.SessionRegistry;
 import com.jmqx.transport.ConnectionMetrics;
 import okhttp3.Dispatcher;
 import okhttp3.MediaType;
@@ -40,6 +41,7 @@ public class HttpAdminReporter implements AdminReporter {
     private final String nodeId;
     private final String nodeIp;
     private final ConnectionMetrics connectionMetrics;
+    private final SessionRegistry sessionRegistry;
     private final long metricsIntervalMs;
     private final OkHttpClient httpClient;
     private final ExecutorService requestExecutor;
@@ -50,6 +52,7 @@ public class HttpAdminReporter implements AdminReporter {
                              AdminAuthRuntime adminAuthRuntime,
                              String nodeId,
                              String nodeIp,
+                             SessionRegistry sessionRegistry,
                              ConnectionMetrics connectionMetrics,
                              long connectTimeoutMs,
                              long requestTimeoutMs,
@@ -59,6 +62,7 @@ public class HttpAdminReporter implements AdminReporter {
         this.adminAuthRuntime = Objects.requireNonNull(adminAuthRuntime, "adminAuthRuntime");
         this.nodeId = normalize(nodeId, "node-1");
         this.nodeIp = normalize(nodeIp, "unknown");
+        this.sessionRegistry = sessionRegistry;
         this.connectionMetrics = Objects.requireNonNull(connectionMetrics, "connectionMetrics");
         this.metricsIntervalMs = Math.max(metricsIntervalMs, 1000);
         long effectiveRequestTimeoutMs = Math.max(requestTimeoutMs, 500);
@@ -162,7 +166,7 @@ public class HttpAdminReporter implements AdminReporter {
                     nodeIp,
                     connectionMetrics.getInboundBytes(),
                     connectionMetrics.getOutboundBytes(),
-                    connectionMetrics.getActiveConnections(),
+                    sessionRegistry == null ? 0 : sessionRegistry.list().size(),
                     System.currentTimeMillis()
             );
         } catch (Exception exception) {

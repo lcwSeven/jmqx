@@ -1,5 +1,6 @@
 package com.jmqx.admin.embedded;
 
+import com.jmqx.common.logging.ClientTraceManager;
 import org.rocksdb.Options;
 import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
@@ -36,6 +37,8 @@ public class RocksDbAdminStateStore implements AdminStateRepository {
     private static final byte[] CLUSTER_CONFIG_PREFIX = "cluster-config:".getBytes(StandardCharsets.UTF_8);
     private static final byte[] SECURITY_CONFIG_PREFIX = "security-config:".getBytes(StandardCharsets.UTF_8);
     private static final byte[] NODE_METRICS_PREFIX = "node-metrics:".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] BLACKLIST_PREFIX = "blacklist:".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] CLIENT_TRACE_PREFIX = "client-trace:".getBytes(StandardCharsets.UTF_8);
     private static final byte[] AUDIT_LOG_PREFIX = "audit-log:".getBytes(StandardCharsets.UTF_8);
     private static final byte[] ADMIN_AUTH_CONFIG_KEY = "admin-auth-config".getBytes(StandardCharsets.UTF_8);
 
@@ -140,6 +143,79 @@ public class RocksDbAdminStateStore implements AdminStateRepository {
     }
 
     @Override
+    public void upsertClientSnapshot(String clusterId, EmbeddedAdminStateStore.ClientSnapshot clientSnapshot) {
+        memoryFallback.upsertClientSnapshot(clusterId, clientSnapshot);
+    }
+
+    @Override
+    public void removeClientSnapshot(String clusterId, String clientId) {
+        memoryFallback.removeClientSnapshot(clusterId, clientId);
+    }
+
+    @Override
+    public void replaceClientSubscriptions(String clusterId, String clientId, List<String> topics) {
+        memoryFallback.replaceClientSubscriptions(clusterId, clientId, topics);
+    }
+
+    @Override
+    public List<EmbeddedAdminStateStore.ClientSnapshot> listClientSnapshots(String clusterId) {
+        return memoryFallback.listClientSnapshots(clusterId);
+    }
+
+    @Override
+    public EmbeddedAdminStateStore.ClientSnapshot getClientSnapshot(String clusterId, String clientId) {
+        return memoryFallback.getClientSnapshot(clusterId, clientId);
+    }
+
+    @Override
+    public void upsertBlacklistEntry(String clusterId, EmbeddedAdminStateStore.BlacklistEntry entry) {
+        memoryFallback.upsertBlacklistEntry(clusterId, entry);
+        if (entry == null || entry.value() == null || entry.value().isBlank()) {
+            return;
+        }
+        put(blacklistKey(clusterId, entry.type(), entry.value()), encodeBlacklistEntry(entry), "upsertBlacklistEntry");
+    }
+
+    @Override
+    public void removeBlacklistEntry(String clusterId, String type, String value) {
+        memoryFallback.removeBlacklistEntry(clusterId, type, value);
+        try {
+            db.delete(blacklistKey(clusterId, type, value));
+        } catch (RocksDBException exception) {
+            LOG.log(Level.WARNING, "[ADMIN-STATE] removeBlacklistEntry failed: " + exception.getMessage(), exception);
+        }
+    }
+
+    @Override
+    public List<EmbeddedAdminStateStore.BlacklistEntry> listBlacklistEntries(String clusterId) {
+        return memoryFallback.listBlacklistEntries(clusterId);
+    }
+
+    @Override
+    public void upsertClientTraceTask(String clusterId, ClientTraceManager.ClientTraceTask task) {
+        memoryFallback.upsertClientTraceTask(clusterId, task);
+        if (task == null || task.id() == null || task.id().isBlank()) {
+            return;
+        }
+        put(clientTraceKey(clusterId, task.id()), encodeClientTraceTask(task), "upsertClientTraceTask");
+    }
+
+    @Override
+    public void removeClientTraceTask(String clusterId, String taskId) {
+        memoryFallback.removeClientTraceTask(clusterId, taskId);
+        try {
+            db.delete(clientTraceKey(clusterId, taskId));
+        } catch (RocksDBException exception) {
+            LOG.log(Level.WARNING, "[ADMIN-STATE] removeClientTraceTask failed: " + exception.getMessage(), exception);
+        }
+    }
+
+    @Override
+    public List<ClientTraceManager.ClientTraceTask> listClientTraceTasks(String clusterId) {
+        return memoryFallback.listClientTraceTasks(clusterId);
+    }
+
+    @Override
     public void appendAuditLog(String clusterId, EmbeddedAdminStateStore.AuditLogEntry entry) {
         memoryFallback.appendAuditLog(clusterId, entry);
         if (entry == null || entry.id() == null || entry.id().isBlank()) {
@@ -197,6 +273,33 @@ public class RocksDbAdminStateStore implements AdminStateRepository {
                     EmbeddedAdminStateStore.NodeMetrics metrics = decodeNodeMetrics(value);
                     if (metrics != null) {
                         memoryFallback.upsertNodeMetrics(clusterId, metrics);
+                    }
+                    continue;
+                }
+                if (startsWith(key, BLACKLIST_PREFIX)) {
+                    String composite = suffix(key, BLACKLIST_PREFIX);
+                    int first = composite.indexOf(':');
+                    int second = composite.indexOf(':', first + 1);
+                    if (first <= 0 || second <= first) {
+                        continue;
+                    }
+                    String clusterId = composite.substring(0, first);
+                    EmbeddedAdminStateStore.BlacklistEntry entry = decodeBlacklistEntry(value);
+                    if (entry != null) {
+                        memoryFallback.upsertBlacklistEntry(clusterId, entry);
+                    }
+                    continue;
+                }
+                if (startsWith(key, CLIENT_TRACE_PREFIX)) {
+                    String composite = suffix(key, CLIENT_TRACE_PREFIX);
+                    int split = composite.indexOf(':');
+                    if (split <= 0) {
+                        continue;
+                    }
+                    String clusterId = composite.substring(0, split);
+                    ClientTraceManager.ClientTraceTask task = decodeClientTraceTask(value);
+                    if (task != null) {
+                        memoryFallback.upsertClientTraceTask(clusterId, task);
                     }
                     continue;
                 }
@@ -275,6 +378,78 @@ public class RocksDbAdminStateStore implements AdminStateRepository {
             return out.toByteArray();
         } catch (Exception exception) {
             throw new IllegalStateException("encode cluster summary failed", exception);
+        }
+    }
+
+    private static byte[] encodeBlacklistEntry(EmbeddedAdminStateStore.BlacklistEntry entry) {
+        try {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            DataOutputStream data = new DataOutputStream(out);
+            data.writeByte(1);
+            writeString(data, entry.type());
+            writeString(data, entry.value());
+            data.writeLong(entry.createdAt());
+            writeString(data, entry.source());
+            data.flush();
+            return out.toByteArray();
+        } catch (Exception exception) {
+            throw new IllegalStateException("encode blacklist entry failed", exception);
+        }
+    }
+
+    private static EmbeddedAdminStateStore.BlacklistEntry decodeBlacklistEntry(byte[] raw) {
+        try {
+            DataInputStream in = new DataInputStream(new ByteArrayInputStream(raw));
+            if (in.readByte() != 1) {
+                return null;
+            }
+            return new EmbeddedAdminStateStore.BlacklistEntry(
+                    readString(in),
+                    readString(in),
+                    in.readLong(),
+                    readString(in)
+            );
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private static byte[] encodeClientTraceTask(ClientTraceManager.ClientTraceTask task) {
+        try {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            DataOutputStream data = new DataOutputStream(out);
+            data.writeByte(1);
+            writeString(data, task.id());
+            writeString(data, task.clientId());
+            data.writeLong(task.startAt());
+            data.writeLong(task.endAt());
+            data.writeLong(task.createdAt());
+            writeString(data, task.createdBy());
+            writeString(data, task.filePath());
+            data.flush();
+            return out.toByteArray();
+        } catch (Exception exception) {
+            throw new IllegalStateException("encode client trace task failed", exception);
+        }
+    }
+
+    private static ClientTraceManager.ClientTraceTask decodeClientTraceTask(byte[] raw) {
+        try {
+            DataInputStream in = new DataInputStream(new ByteArrayInputStream(raw));
+            if (in.readByte() != 1) {
+                return null;
+            }
+            return new ClientTraceManager.ClientTraceTask(
+                    readString(in),
+                    readString(in),
+                    in.readLong(),
+                    in.readLong(),
+                    in.readLong(),
+                    readString(in),
+                    readString(in)
+            ).normalize();
+        } catch (Exception ignored) {
+            return null;
         }
     }
 
@@ -867,6 +1042,14 @@ public class RocksDbAdminStateStore implements AdminStateRepository {
 
     private static byte[] nodeMetricsKey(String clusterId, String nodeId) {
         return key(NODE_METRICS_PREFIX, normalize(clusterId) + ":" + normalize(nodeId));
+    }
+
+    private static byte[] blacklistKey(String clusterId, String type, String value) {
+        return key(BLACKLIST_PREFIX, normalize(clusterId) + ":" + normalize(type) + ":" + normalize(value));
+    }
+
+    private static byte[] clientTraceKey(String clusterId, String taskId) {
+        return key(CLIENT_TRACE_PREFIX, normalize(clusterId) + ":" + normalize(taskId));
     }
 
     private static byte[] auditLogKey(String clusterId, long timestamp, String id) {

@@ -8,11 +8,16 @@
         </encoder>
     </appender>
 
+    <appender name="CLIENT_TRACE" class="com.jmqx.logging.ClientTraceFileAppender">
+        <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} [clientId=%X{clientId}] - %msg%n</pattern>
+    </appender>
+
     <logger name="io.netty" level="${JMQX_NETTY_LOG_LEVEL}"/>
     <logger name="org.rocksdb" level="WARN"/>
     <logger name="com.alipay.sofa.jraft" level="INFO"/>
 
     <root level="${JMQX_LOG_LEVEL}">
         <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="CLIENT_TRACE"/>
     </root>
 </configuration>

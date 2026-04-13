@@ -44,6 +44,8 @@ import com.jmqx.config.JmqxConfig;
 import com.jmqx.config.JmqxConfigMappers;
 import com.jmqx.protocol.AuthResult;
 import com.jmqx.protocol.ClientAuthenticator;
+import com.jmqx.protocol.ClientBlacklist;
+import com.jmqx.protocol.RuntimeClientBlacklist;
 import com.jmqx.router.LocalSubscriptionRegistry;
 import com.jmqx.router.SharedSubscriptionManager;
 import com.jmqx.router.SubscriptionRegistry;
@@ -206,6 +208,9 @@ public class JmqxApplication {
         ReloadableAclAuthorizer aclAuthorizer = new ReloadableAclAuthorizer(AclAuthorizerFactory.create(context.aclProperties()));
         AdminStateRepository adminStateRepository = buildAdminStateRepository(context.adminPanelSettings());
         AdminAuthRuntime adminAuthRuntime = new AdminAuthRuntime(resolveAdminAuthConfig(adminStateRepository, context.adminAuthSettings()));
+        RuntimeClientBlacklist clientBlacklist = new RuntimeClientBlacklist();
+        loadPersistedBlacklistEntries(adminStateRepository, context.adminSyncSettings().clusterId(), clientBlacklist);
+        loadPersistedClientTraceTasks(adminStateRepository, context.adminSyncSettings().clusterId());
         ClientAuthenticator clientAuthenticator = new ClientAuthenticator() {
             @Override
             public AuthResult authenticateResult(String clientId, String username, String password) {
@@ -226,11 +231,13 @@ public class JmqxApplication {
         MetadataRuntime metadataRuntime = buildMetadataRuntime(
                 context.clusterRoleProvider(),
                 context.globalSubscriptionRegistry(),
+                context.adminSyncSettings().clusterId(),
                 context.sessionRegistry(),
                 retainedMessageStore,
                 adminStateRepository,
                 builtInDatabaseUserService,
                 clientAuthenticator,
+                clientBlacklist,
                 (clusterId, securityConfig) -> applyRuntimeSecurityConfig(
                         context.authProperties(),
                         context.aclProperties(),
@@ -306,6 +313,7 @@ public class JmqxApplication {
                 context.adminSyncSettings(),
                 adminAuthRuntime,
                 context.clusterRoleProvider().nodeId(),
+                context.sessionRegistry(),
                 connectionMetrics
         );
 
@@ -315,6 +323,7 @@ public class JmqxApplication {
                 context.subscriptionRegistry(),
                 retainedMessageStore,
                 clientAuthenticator,
+                clientBlacklist,
                 aclAuthorizer,
                 sharedSubscriptionManager,
                 messageBridge,
@@ -359,6 +368,7 @@ public class JmqxApplication {
                 context.clusterRoleProvider().role().name(),
                 context.adminSyncSettings().clusterId(),
                 context.adminSyncSettings().nodeIp(),
+                context.sessionRegistry(),
                 connectionMetrics,
                 context.adminSyncSettings().dashboardPublishIntervalMs()
         );
@@ -391,6 +401,71 @@ public class JmqxApplication {
                         AdminConfigCodec.encodeClusterConfigToString(clusterConfig),
                         context.clusterRoleProvider().nodeId()
                 )),
+                (clusterId, clientId) -> metadataRuntime.gateway().submit(new MetadataCommand(
+                        ClusterMetadataCommandApplier.SESSION_NAMESPACE,
+                        "kick",
+                        clientId,
+                        "admin",
+                        context.clusterRoleProvider().nodeId()
+                )),
+                new AdminPanelServer.BlacklistUpdater() {
+                    @Override
+                    public void upsert(String clusterId, EmbeddedAdminStateStore.BlacklistEntry entry) {
+                        metadataRuntime.gateway().submit(new MetadataCommand(
+                                ClusterMetadataCommandApplier.ADMIN_BLACKLIST_NAMESPACE,
+                                "upsert",
+                                clusterId,
+                                AdminConfigCodec.encodeBlacklistEntryToString(entry),
+                                context.clusterRoleProvider().nodeId()
+                        ));
+                    }
+
+                    @Override
+                    public void delete(String clusterId, String type, String value) {
+                        metadataRuntime.gateway().submit(new MetadataCommand(
+                                ClusterMetadataCommandApplier.ADMIN_BLACKLIST_NAMESPACE,
+                                "delete",
+                                clusterId,
+                                AdminConfigCodec.encodeBlacklistEntryToString(
+                                        new EmbeddedAdminStateStore.BlacklistEntry(type, value, System.currentTimeMillis(), context.clusterRoleProvider().nodeId())
+                                ),
+                                context.clusterRoleProvider().nodeId()
+                        ));
+                    }
+                },
+                new AdminPanelServer.ClientTraceUpdater() {
+                    @Override
+                    public void upsert(String clusterId, com.jmqx.common.logging.ClientTraceManager.ClientTraceTask task) {
+                        metadataRuntime.gateway().submit(new MetadataCommand(
+                                ClusterMetadataCommandApplier.ADMIN_CLIENT_TRACE_NAMESPACE,
+                                "upsert",
+                                clusterId,
+                                AdminConfigCodec.encodeClientTraceTaskToString(task),
+                                context.clusterRoleProvider().nodeId()
+                        ));
+                    }
+
+                    @Override
+                    public void delete(String clusterId, String taskId) {
+                        metadataRuntime.gateway().submit(new MetadataCommand(
+                                ClusterMetadataCommandApplier.ADMIN_CLIENT_TRACE_NAMESPACE,
+                                "delete",
+                                clusterId,
+                                AdminConfigCodec.encodeClientTraceTaskToString(
+                                        new com.jmqx.common.logging.ClientTraceManager.ClientTraceTask(
+                                                taskId,
+                                                "",
+                                                0L,
+                                                0L,
+                                                System.currentTimeMillis(),
+                                                context.clusterRoleProvider().nodeId(),
+                                                ""
+                                        )
+                                ),
+                                context.clusterRoleProvider().nodeId()
+                        ));
+                    }
+                },
                 new AdminPanelServer.BuiltInDatabaseUsersUpdater() {
                     @Override
                     public void upsert(String clusterId, EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig config, String userId, String password, boolean superuser) {
@@ -736,6 +811,7 @@ public class JmqxApplication {
             AdminSyncSettings settings,
             AdminAuthRuntime adminAuthRuntime,
             String nodeId,
+            SessionRegistry sessionRegistry,
             ConnectionMetrics connectionMetrics
     ) {
         if (settings == null || !settings.enabled()) {
@@ -751,6 +827,7 @@ public class JmqxApplication {
                 adminAuthRuntime == null ? new AdminAuthRuntime(AdminAuthRuntime.Config.defaults()) : adminAuthRuntime,
                 nodeId,
                 nodeIp,
+                sessionRegistry,
                 connectionMetrics,
                 settings.connectTimeoutMs(),
                 settings.requestTimeoutMs(),
@@ -764,6 +841,7 @@ public class JmqxApplication {
             String nodeRole,
             String clusterId,
             String configuredNodeIp,
+            SessionRegistry sessionRegistry,
             ConnectionMetrics connectionMetrics,
             long publishIntervalMs
     ) {
@@ -781,12 +859,13 @@ public class JmqxApplication {
         final String safeNodeIp = nodeIp;
         scheduler.scheduleWithFixedDelay(() -> {
             try {
+                int connectedClients = sessionRegistry == null ? 0 : sessionRegistry.list().size();
                 String payload = "{"
                         + "\"clusterId\":\"" + safeJson(safeClusterId) + "\","
                         + "\"nodeId\":\"" + safeJson(nodeId) + "\","
                         + "\"role\":\"" + safeJson(nodeRole) + "\","
                         + "\"nodeIp\":\"" + safeJson(safeNodeIp) + "\","
-                        + "\"connections\":" + connectionMetrics.getActiveConnections() + ","
+                        + "\"connections\":" + connectedClients + ","
                         + "\"inboundBytes\":" + connectionMetrics.getInboundBytes() + ","
                         + "\"outboundBytes\":" + connectionMetrics.getOutboundBytes() + ","
                         + "\"timestamp\":" + System.currentTimeMillis()
@@ -813,6 +892,9 @@ public class JmqxApplication {
             EmbeddedAdminStateStore.ClusterConfig initialClusterConfig,
             AdminPanelServer.SecurityConfigUpdater securityConfigUpdater,
             AdminPanelServer.ClusterConfigUpdater clusterConfigUpdater,
+            AdminPanelServer.ClientKickUpdater clientKickUpdater,
+            AdminPanelServer.BlacklistUpdater blacklistUpdater,
+            AdminPanelServer.ClientTraceUpdater clientTraceUpdater,
             AdminPanelServer.BuiltInDatabaseUsersUpdater builtInDatabaseUsersUpdater
     ) {
         String panelNodeIp = resolveLocalNodeIp();
@@ -834,6 +916,9 @@ public class JmqxApplication {
                 initialClusterConfig,
                 securityConfigUpdater,
                 clusterConfigUpdater,
+                clientKickUpdater,
+                blacklistUpdater,
+                clientTraceUpdater,
                 builtInDatabaseUsersUpdater,
                 builtInDatabaseUserService
         );
@@ -871,14 +956,50 @@ public class JmqxApplication {
         return fallback;
     }
 
+    private static void loadPersistedBlacklistEntries(
+            AdminStateRepository adminStateRepository,
+            String clusterId,
+            ClientBlacklist clientBlacklist
+    ) {
+        if (adminStateRepository == null || clientBlacklist == null) {
+            return;
+        }
+        String effectiveClusterId = (clusterId == null || clusterId.isBlank()) ? "default" : clusterId.trim();
+        for (EmbeddedAdminStateStore.BlacklistEntry entry : adminStateRepository.listBlacklistEntries(effectiveClusterId)) {
+            if (entry == null) {
+                continue;
+            }
+            clientBlacklist.upsert(entry.type(), entry.value());
+        }
+    }
+
+    private static void loadPersistedClientTraceTasks(
+            AdminStateRepository adminStateRepository,
+            String clusterId
+    ) {
+        if (adminStateRepository == null) {
+            return;
+        }
+        String effectiveClusterId = (clusterId == null || clusterId.isBlank()) ? "default" : clusterId.trim();
+        com.jmqx.common.logging.ClientTraceManager manager = com.jmqx.common.logging.ClientTraceManager.getInstance();
+        for (com.jmqx.common.logging.ClientTraceManager.ClientTraceTask task : adminStateRepository.listClientTraceTasks(effectiveClusterId)) {
+            if (task == null) {
+                continue;
+            }
+            manager.upsert(task);
+        }
+    }
+
     private static MetadataRuntime buildMetadataRuntime(
             ClusterRoleProvider clusterRoleProvider,
             GlobalSubscriptionRegistry globalSubscriptionRegistry,
+            String localClusterId,
             SessionRegistry sessionRegistry,
             RetainedMessageStore retainedMessageStore,
             AdminStateRepository adminStateRepository,
             BuiltInDatabaseUserService builtInDatabaseUserService,
             ClientAuthenticator clientAuthenticator,
+            ClientBlacklist clientBlacklist,
             JmqxMetadataProjectionHandlers.AdminSecurityConfigApplier adminSecurityConfigApplier,
             JmqxMetadataProjectionHandlers.AdminClusterConfigApplier adminClusterConfigApplier,
             String coreBindHost,
@@ -900,11 +1021,13 @@ public class JmqxApplication {
     ) {
         JmqxMetadataProjectionHandlers handlers = new JmqxMetadataProjectionHandlers(
                 globalSubscriptionRegistry,
+                localClusterId,
                 sessionRegistry,
                 retainedMessageStore,
                 adminStateRepository,
                 builtInDatabaseUserService,
                 clientAuthenticator,
+                clientBlacklist,
                 adminSecurityConfigApplier,
                 adminClusterConfigApplier
         );
@@ -915,7 +1038,9 @@ public class JmqxApplication {
                 handlers::applyRetainedCommand,
                 handlers::applyAdminSecurityConfigCommand,
                 handlers::applyAdminClusterConfigCommand,
-                handlers::applyBuiltInUserCommand
+                handlers::applyBuiltInUserCommand,
+                handlers::applyAdminBlacklistCommand,
+                handlers::applyClientTraceCommand
         );
         if (clusterRoleProvider.role() == NodeRole.CORE) {
             SofaJraftMetadataCommandGateway raftGateway = new SofaJraftMetadataCommandGateway(

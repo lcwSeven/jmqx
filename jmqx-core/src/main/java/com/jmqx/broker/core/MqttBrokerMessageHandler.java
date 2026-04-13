@@ -15,10 +15,12 @@ import com.jmqx.bridge.MessageBridge;
 import com.jmqx.cluster.MetadataCommand;
 import com.jmqx.cluster.MetadataCommandGateway;
 import com.jmqx.common.SharedSubscription;
+import com.jmqx.common.logging.ClientLogContext;
 import com.jmqx.protocol.BrokerMessageHandler;
 import com.jmqx.protocol.AuthDecision;
 import com.jmqx.protocol.AuthResult;
 import com.jmqx.protocol.ClientAuthenticator;
+import com.jmqx.protocol.ClientBlacklist;
 import com.jmqx.router.SharedSubscriptionManager;
 import com.jmqx.router.SubscriptionRegistry;
 import com.jmqx.router.SubscriptionMatchResult;
@@ -118,6 +120,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     private final boolean willPersistenceEnabled;
     private final BrokerInflightManager inflightManager;
     private final ClientAuthenticator clientAuthenticator;
+    private final ClientBlacklist clientBlacklist;
     private final AclAuthorizer aclAuthorizer;
     private final SharedSubscriptionManager sharedSubscriptionManager;
     private final MessageBridge messageBridge;
@@ -149,6 +152,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             SubscriptionRegistry subscriptionRegistry,
             RetainedMessageStore retainedMessageStore,
             ClientAuthenticator clientAuthenticator,
+            ClientBlacklist clientBlacklist,
             AclAuthorizer aclAuthorizer,
             SharedSubscriptionManager sharedSubscriptionManager,
             MessageBridge messageBridge,
@@ -171,6 +175,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         this.subscriptionRegistry = subscriptionRegistry;
         this.retainedMessageStore = retainedMessageStore;
         this.clientAuthenticator = clientAuthenticator;
+        this.clientBlacklist = clientBlacklist == null ? ClientBlacklist.NOOP : clientBlacklist;
         this.aclAuthorizer = aclAuthorizer;
         this.sharedSubscriptionManager = sharedSubscriptionManager == null
             ? new SharedSubscriptionManager()
@@ -216,29 +221,31 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             return;
         }
 
-        // 按 MQTT 报文类型分发到对应处理函数。
-        MqttMessageType messageType = message.fixedHeader().messageType();
-        switch (messageType) {
-            case CONNECT -> handleConnect(ctx, (MqttConnectMessage) message);
-            case SUBSCRIBE -> handleSubscribe(ctx, (MqttSubscribeMessage) message);
-            case UNSUBSCRIBE -> handleUnsubscribe(ctx, (MqttUnsubscribeMessage) message);
-            case PUBLISH -> handlePublish(ctx, (MqttPublishMessage) message);
-            case PUBACK -> handlePubAck(ctx, (MqttPubAckMessage) message);
-            case PUBREC -> handlePubRec(ctx, message);
-            case PUBREL -> handlePubRel(ctx, message);
-            case PUBCOMP -> handlePubComp(ctx, message);
-            case PINGREQ -> {
-                LOG.fine(() -> "[PING] clientId=" + currentClientId(ctx.channel()));
-                ctx.writeAndFlush(new MqttMessage(
-                        new MqttFixedHeader(MqttMessageType.PINGRESP, false, MqttQoS.AT_MOST_ONCE, false, 0)
-                ));
-            }
-            case DISCONNECT -> {
-                ctx.channel().attr(GRACEFUL_DISCONNECT).set(true);
-                LOG.fine(() -> "[DISCONNECT] clientId=" + currentClientId(ctx.channel()));
-                ctx.close();
-            }
-            default -> {
+        try (ClientLogContext.Scope ignored = ClientLogContext.open(resolveLoggingClientId(ctx.channel(), message))) {
+            // 按 MQTT 报文类型分发到对应处理函数。
+            MqttMessageType messageType = message.fixedHeader().messageType();
+            switch (messageType) {
+                case CONNECT -> handleConnect(ctx, (MqttConnectMessage) message);
+                case SUBSCRIBE -> handleSubscribe(ctx, (MqttSubscribeMessage) message);
+                case UNSUBSCRIBE -> handleUnsubscribe(ctx, (MqttUnsubscribeMessage) message);
+                case PUBLISH -> handlePublish(ctx, (MqttPublishMessage) message);
+                case PUBACK -> handlePubAck(ctx, (MqttPubAckMessage) message);
+                case PUBREC -> handlePubRec(ctx, message);
+                case PUBREL -> handlePubRel(ctx, message);
+                case PUBCOMP -> handlePubComp(ctx, message);
+                case PINGREQ -> {
+                    LOG.fine(() -> "[PING] clientId=" + currentClientId(ctx.channel()));
+                    ctx.writeAndFlush(new MqttMessage(
+                            new MqttFixedHeader(MqttMessageType.PINGRESP, false, MqttQoS.AT_MOST_ONCE, false, 0)
+                    ));
+                }
+                case DISCONNECT -> {
+                    ctx.channel().attr(GRACEFUL_DISCONNECT).set(true);
+                    LOG.fine(() -> "[DISCONNECT] clientId=" + currentClientId(ctx.channel()));
+                    ctx.close();
+                }
+                default -> {
+                }
             }
         }
     }
@@ -250,58 +257,60 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             return;
         }
 
-        ClientSession session = sessionRegistry.get(clientId).orElse(null);
-        String username = session == null ? null : session.username();
-        String connectionType = session == null ? null : session.connectionType();
-        String serviceNodeIp = session == null ? null : session.serviceNodeIp();
-        int keepAliveSeconds = session == null ? 0 : session.keepAliveSeconds();
-        String clientIp = resolveClientIp(channel);
-        boolean cleanStart = Optional.ofNullable(channel.attr(CLEAN_START).get()).orElse(false);
-        long sessionExpirySeconds = session == null ? SESSION_EXPIRY_IMMEDIATE : session.sessionExpiryIntervalSeconds();
-        boolean gracefulDisconnect = Optional.ofNullable(channel.attr(GRACEFUL_DISCONNECT).get()).orElse(false);
+        try (ClientLogContext.Scope ignored = ClientLogContext.open(clientId)) {
+            ClientSession session = sessionRegistry.get(clientId).orElse(null);
+            String username = session == null ? null : session.username();
+            String connectionType = session == null ? null : session.connectionType();
+            String serviceNodeIp = session == null ? null : session.serviceNodeIp();
+            int keepAliveSeconds = session == null ? 0 : session.keepAliveSeconds();
+            String clientIp = resolveClientIp(channel);
+            boolean cleanStart = Optional.ofNullable(channel.attr(CLEAN_START).get()).orElse(false);
+            long sessionExpirySeconds = session == null ? SESSION_EXPIRY_IMMEDIATE : session.sessionExpiryIntervalSeconds();
+            boolean gracefulDisconnect = Optional.ofNullable(channel.attr(GRACEFUL_DISCONNECT).get()).orElse(false);
 
-        if (!gracefulDisconnect) {
-            publishWillMessageIfPresent(channel, clientId);
-        }
-        willMessageStore.remove(clientId);
+            if (!gracefulDisconnect) {
+                publishWillMessageIfPresent(channel, clientId);
+            }
+            willMessageStore.remove(clientId);
 
-        clientAuthenticator.evictCache(clientId, username);
-        applyGlobalClientAuthCacheEvictAfterDisconnect(clientId, username);
-        adminReporter.removeClientSession(clientId);
-        sessionRegistry.remove(clientId);
-        inflightManager.removeRuntimeState(clientId);
-        if (shouldClearSessionState(cleanStart, sessionExpirySeconds)) {
-            inflightManager.clearPersistentState(clientId);
-            sharedSubscriptionManager.removeClient(clientId);
-            Set<String> removedLastTopics = subscriptionRegistry.removeClientAndCollectLastTopics(clientId);
-            removedLastTopics.forEach(this::applyGlobalUnregisterAfterLocal);
+            clientAuthenticator.evictCache(clientId, username);
+            applyGlobalClientAuthCacheEvictAfterDisconnect(clientId, username);
+            adminReporter.removeClientSession(clientId);
+            sessionRegistry.remove(clientId);
+            inflightManager.removeRuntimeState(clientId);
+            if (shouldClearSessionState(cleanStart, sessionExpirySeconds)) {
+                inflightManager.clearPersistentState(clientId);
+                sharedSubscriptionManager.removeClient(clientId);
+                Set<String> removedLastTopics = subscriptionRegistry.removeClientAndCollectLastTopics(clientId);
+                removedLastTopics.forEach(this::applyGlobalUnregisterAfterLocal);
+            }
+            publishClientLifecycleEvent(
+                TOPIC_CLIENT_DISCONNECTED,
+                dashboardClusterId,
+                nodeId,
+                clientId,
+                clientIp,
+                username,
+                connectionType,
+                serviceNodeIp,
+                keepAliveSeconds,
+                gracefulDisconnect ? "graceful" : "unexpected"
+            );
+            publishClientLifecycleEvent(
+                dashboardTopic("client/disconnected"),
+                dashboardClusterId,
+                nodeId,
+                clientId,
+                clientIp,
+                username,
+                connectionType,
+                serviceNodeIp,
+                keepAliveSeconds,
+                gracefulDisconnect ? "graceful" : "unexpected"
+            );
+            LOG.fine(() -> "[SESSION] offline clientId=" + clientId
+                + ", cleanStart=" + cleanStart + ", sessionExpirySeconds=" + sessionExpirySeconds);
         }
-        publishClientLifecycleEvent(
-            TOPIC_CLIENT_DISCONNECTED,
-            dashboardClusterId,
-            nodeId,
-            clientId,
-            clientIp,
-            username,
-            connectionType,
-            serviceNodeIp,
-            keepAliveSeconds,
-            gracefulDisconnect ? "graceful" : "unexpected"
-        );
-        publishClientLifecycleEvent(
-            dashboardTopic("client/disconnected"),
-            dashboardClusterId,
-            nodeId,
-            clientId,
-            clientIp,
-            username,
-            connectionType,
-            serviceNodeIp,
-            keepAliveSeconds,
-            gracefulDisconnect ? "graceful" : "unexpected"
-        );
-        LOG.fine(() -> "[SESSION] offline clientId=" + clientId
-            + ", cleanStart=" + cleanStart + ", sessionExpirySeconds=" + sessionExpirySeconds);
     }
 
     private void handleConnect(ChannelHandlerContext ctx, MqttConnectMessage message) {
@@ -354,6 +363,19 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         String password = message.payload().passwordInBytes() == null
                 ? null
                 : new String(message.payload().passwordInBytes(), StandardCharsets.UTF_8);
+        String clientIp = resolveClientIp(ctx.channel());
+
+        if (clientBlacklist.isBlocked(clientId, clientIp)) {
+            LOG.warning(() -> "[CONNECT] blacklisted client rejected, clientId=" + clientId + ", clientIp=" + clientIp);
+            rejectConnection(
+                ctx,
+                mqtt5
+                    ? MqttConnectReturnCode.CONNECTION_REFUSED_NOT_AUTHORIZED
+                    : MqttConnectReturnCode.CONNECTION_REFUSED_NOT_AUTHORIZED,
+                mqtt5
+            );
+            return;
+        }
 
         // 第三步：执行连接鉴权（AUTH 插件链），失败时返回标准 CONNACK 错误码并终止流程。
         AuthResult authResult = clientAuthenticator.authenticateResult(clientId, username, password);
@@ -376,7 +398,6 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             : (cleanStart ? SESSION_EXPIRY_IMMEDIATE : SESSION_EXPIRY_PERSISTENT);
         int keepAliveSeconds = Math.max(message.variableHeader().keepAliveTimeSeconds(), 0);
         String serviceNodeIp = resolveServiceNodeIp(ctx.channel());
-        String clientIp = resolveClientIp(ctx.channel());
         boolean sessionPresent = !cleanStart && inflightManager.hasPersistedSessionState(clientId, subscriptionRegistry);
         ctx.channel().attr(CLIENT_ID).set(clientId);
         ctx.channel().attr(CLEAN_START).set(cleanStart);
@@ -1200,6 +1221,20 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             return null;
         }
         return clientId;
+    }
+
+    private String resolveLoggingClientId(Channel channel, MqttMessage message) {
+        String current = currentClientId(channel);
+        if (current != null && !current.isBlank()) {
+            return current;
+        }
+        if (message instanceof MqttConnectMessage connectMessage
+                && connectMessage.payload() != null
+                && connectMessage.payload().clientIdentifier() != null
+                && !connectMessage.payload().clientIdentifier().isBlank()) {
+            return connectMessage.payload().clientIdentifier();
+        }
+        return null;
     }
 
     private String normalize(String value) {

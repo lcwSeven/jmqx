@@ -3,6 +3,8 @@ export const adminComputed = {
         const labels = {
             overview: "集群概览",
             clients: this.selectedClient ? "客户端详情" : "客户端列表",
+            trace: "日志追踪",
+            blacklist: "黑名单",
             acl: "ACL 鉴权",
             auth: this.authCreateMode ? "创建认证" : "连接鉴权",
             "built-in-users": "内置数据库用户管理",
@@ -15,6 +17,8 @@ export const adminComputed = {
         const descriptions = {
             overview: "实时查看节点负载、流量和运行态变化。",
             clients: "搜索在线客户端，快速定位连接和订阅信息。",
+            trace: "为指定 clientId 预约日志追踪窗口，并把命中的日志写入独立文件。",
+            blacklist: "按 clientId 或 IP 管理黑名单，并立即阻断命中连接。",
             acl: "维护主题访问策略与鉴权缓存设置。",
             auth: "统一管理客户端接入认证与数据源配置。",
             "built-in-users": "添加、导入和删除内置数据库认证用户。",
@@ -86,6 +90,12 @@ export const adminComputed = {
         const total = Number(this.clients.total || 0);
         const keyword = [this.search.clientId, this.search.userName].filter(Boolean).join(" / ");
         return keyword ? `共 ${total} 条结果，筛选条件：${keyword}` : `共 ${total} 个在线客户端`;
+    },
+    blacklistSummaryText() {
+        return `共 ${Array.isArray(this.blacklistEntries) ? this.blacklistEntries.length : 0} 条黑名单规则`;
+    },
+    clientTraceSummaryText() {
+        return `共 ${Array.isArray(this.clientTraces) ? this.clientTraces.length : 0} 条追踪任务`;
     },
     auditSummaryText() {
         return `最近 ${Array.isArray(this.auditLogs) ? this.auditLogs.length : 0} 条审计记录`;

@@ -33,6 +33,17 @@ export function createInitialState() {
         clients: { records: [], total: 0, pageNo: 1, pageSize: 20 },
         search: { clientId: "", userName: "", pageNo: 1, pageSize: 20 },
         selectedClient: null,
+        clientTraces: [],
+        clientTraceForm: {
+            clientId: "",
+            startAt: "",
+            durationMinutes: 5
+        },
+        blacklistEntries: [],
+        blacklistForm: {
+            type: "clientId",
+            value: ""
+        },
         builtInUsers: {
             accountType: "username",
             passwordHashAlgorithm: "sha256",

@@ -546,6 +546,42 @@ textarea {
 
 .btn.secondary { background: #526657; }
 .btn.secondary:hover { background: #425247; }
+.btn.warning { background: #a06c1a; }
+.btn.warning:hover { background: #8b5b0f; }
+.btn.danger { background: var(--danger); }
+.btn.danger:hover { background: #963b2d; }
+
+.table-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.blacklist-create {
+    display: grid;
+    grid-template-columns: 180px minmax(0, 1fr) auto;
+    gap: 12px;
+    align-items: center;
+    margin-bottom: 16px;
+}
+
+.blacklist-type-select {
+    width: 100%;
+}
+
+.trace-create {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(220px, 1fr)) auto;
+    gap: 12px;
+    align-items: end;
+    margin-bottom: 16px;
+}
+
+.trace-create-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+}
 
 .form-grid {
     display: grid;

@@ -4,6 +4,8 @@ import { commonMethods } from "./shared/common.js";
 import { dashboardMethods } from "./shared/dashboard.js";
 import { overviewPageMethods } from "./pages/overview.js";
 import { clientsPageMethods } from "./pages/clients.js";
+import { tracePageMethods } from "./pages/trace.js";
+import { blacklistPageMethods } from "./pages/blacklist.js";
 import { securityPageMethods } from "./pages/security.js";
 import { builtInUsersPageMethods } from "./pages/built-in-users.js";
 import { clusterPageMethods } from "./pages/cluster.js";
@@ -43,6 +45,8 @@ export function createAdminApp() {
             ...dashboardMethods,
             ...overviewPageMethods,
             ...clientsPageMethods,
+            ...tracePageMethods,
+            ...blacklistPageMethods,
             ...securityPageMethods,
             ...builtInUsersPageMethods,
             ...clusterPageMethods,

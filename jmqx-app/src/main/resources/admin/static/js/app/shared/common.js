@@ -13,6 +13,12 @@ export const commonMethods = {
             this.authCreateMode = false;
             this.authStep = 1;
         }
+        if (menu === "trace" && typeof this.loadClientTraces === "function") {
+            this.loadClientTraces();
+        }
+        if (menu === "blacklist" && typeof this.loadBlacklistEntries === "function") {
+            this.loadBlacklistEntries();
+        }
         this.clearTips();
     },
     resetAdminWorkspace() {
@@ -25,6 +31,10 @@ export const commonMethods = {
         this.clients = initial.clients;
         this.search = initial.search;
         this.selectedClient = null;
+        this.clientTraces = initial.clientTraces;
+        this.clientTraceForm = initial.clientTraceForm;
+        this.blacklistEntries = initial.blacklistEntries;
+        this.blacklistForm = initial.blacklistForm;
         this.builtInUsers = initial.builtInUsers;
         this.builtInUserForm = initial.builtInUserForm;
         this.builtInUserImportText = "";
@@ -49,6 +59,8 @@ export const commonMethods = {
             { label: "登录会话", run: () => this.loadAdminSession() },
             { label: "集群概览", run: () => this.refreshOverview() },
             { label: "客户端列表", run: () => this.queryClients() },
+            { label: "日志追踪", optional: true, run: () => this.loadClientTraces() },
+            { label: "黑名单", optional: true, run: () => this.loadBlacklistEntries() },
             { label: "安全配置", run: () => this.loadSecurityConfig() },
             { label: "集群配置", run: () => this.loadClusterConfig() },
             { label: "操作审计", optional: true, run: () => this.loadAuditLogs() }

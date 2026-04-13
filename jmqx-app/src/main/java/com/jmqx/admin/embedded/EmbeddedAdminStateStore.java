@@ -1,5 +1,7 @@
 package com.jmqx.admin.embedded;
 
+import com.jmqx.common.logging.ClientTraceManager;
+
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -118,6 +120,105 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
         List<NodeMetrics> metrics = new ArrayList<>(getOrCreate(clusterId).nodeMetrics.values());
         metrics.sort(Comparator.comparing(NodeMetrics::nodeId));
         return metrics;
+    }
+
+    @Override
+    public void upsertClientSnapshot(String clusterId, ClientSnapshot clientSnapshot) {
+        if (clientSnapshot == null || clientSnapshot.clientId() == null || clientSnapshot.clientId().isBlank()) {
+            return;
+        }
+        getOrCreate(clusterId).clientSnapshots.put(clientSnapshot.clientId(), clientSnapshot);
+    }
+
+    @Override
+    public void removeClientSnapshot(String clusterId, String clientId) {
+        if (clientId == null || clientId.isBlank()) {
+            return;
+        }
+        getOrCreate(clusterId).clientSnapshots.remove(clientId);
+    }
+
+    @Override
+    public void replaceClientSubscriptions(String clusterId, String clientId, List<String> topics) {
+        if (clientId == null || clientId.isBlank()) {
+            return;
+        }
+        ClusterState state = getOrCreate(clusterId);
+        ClientSnapshot existing = state.clientSnapshots.get(clientId);
+        if (existing == null) {
+            return;
+        }
+        state.clientSnapshots.put(clientId, new ClientSnapshot(
+                existing.clientId(),
+                existing.nodeId(),
+                existing.clientIp(),
+                existing.keepAliveSeconds(),
+                existing.connectionType(),
+                existing.username(),
+                existing.connectedAt(),
+                normalizeList(topics)
+        ));
+    }
+
+    @Override
+    public List<ClientSnapshot> listClientSnapshots(String clusterId) {
+        List<ClientSnapshot> clients = new ArrayList<>(getOrCreate(clusterId).clientSnapshots.values());
+        clients.sort(Comparator.comparing(ClientSnapshot::connectedAt).reversed());
+        return clients;
+    }
+
+    @Override
+    public ClientSnapshot getClientSnapshot(String clusterId, String clientId) {
+        if (clientId == null || clientId.isBlank()) {
+            return null;
+        }
+        return getOrCreate(clusterId).clientSnapshots.get(clientId);
+    }
+
+    @Override
+    public void upsertBlacklistEntry(String clusterId, BlacklistEntry entry) {
+        if (entry == null || entry.value() == null || entry.value().isBlank()) {
+            return;
+        }
+        getOrCreate(clusterId).blacklistEntries.put(blacklistKey(entry.type(), entry.value()), entry);
+    }
+
+    @Override
+    public void removeBlacklistEntry(String clusterId, String type, String value) {
+        if (value == null || value.isBlank()) {
+            return;
+        }
+        getOrCreate(clusterId).blacklistEntries.remove(blacklistKey(type, value));
+    }
+
+    @Override
+    public List<BlacklistEntry> listBlacklistEntries(String clusterId) {
+        List<BlacklistEntry> entries = new ArrayList<>(getOrCreate(clusterId).blacklistEntries.values());
+        entries.sort(Comparator.comparing(BlacklistEntry::createdAt).reversed());
+        return entries;
+    }
+
+    @Override
+    public void upsertClientTraceTask(String clusterId, ClientTraceManager.ClientTraceTask task) {
+        if (task == null || task.id() == null || task.id().isBlank()) {
+            return;
+        }
+        getOrCreate(clusterId).clientTraceTasks.put(task.id(), task.normalize());
+    }
+
+    @Override
+    public void removeClientTraceTask(String clusterId, String taskId) {
+        if (taskId == null || taskId.isBlank()) {
+            return;
+        }
+        getOrCreate(clusterId).clientTraceTasks.remove(taskId);
+    }
+
+    @Override
+    public List<ClientTraceManager.ClientTraceTask> listClientTraceTasks(String clusterId) {
+        List<ClientTraceManager.ClientTraceTask> tasks = new ArrayList<>(getOrCreate(clusterId).clientTraceTasks.values());
+        tasks.sort(Comparator.comparing(ClientTraceManager.ClientTraceTask::startAt).reversed());
+        return tasks;
     }
 
     @Override
@@ -410,6 +511,48 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
     }
 
     /**
+     * 客户端会话快照。
+     */
+    public record ClientSnapshot(
+            String clientId,
+            String nodeId,
+            String clientIp,
+            int keepAliveSeconds,
+            String connectionType,
+            String username,
+            long connectedAt,
+            List<String> subscribedTopics
+    ) {
+        public ClientSnapshot {
+            clientId = normalize(clientId, "");
+            nodeId = normalize(nodeId, "unknown");
+            clientIp = normalize(clientIp, "unknown");
+            connectionType = normalize(connectionType, "");
+            username = normalize(username, "");
+            keepAliveSeconds = Math.max(0, keepAliveSeconds);
+            connectedAt = Math.max(0L, connectedAt);
+            subscribedTopics = normalizeList(subscribedTopics);
+        }
+    }
+
+    /**
+     * 黑名单条目。
+     */
+    public record BlacklistEntry(
+            String type,
+            String value,
+            long createdAt,
+            String source
+    ) {
+        public BlacklistEntry {
+            type = normalizeBlacklistType(type);
+            value = normalize(value, "");
+            createdAt = Math.max(0L, createdAt);
+            source = normalize(source, "");
+        }
+    }
+
+    /**
      * 配置变更审计日志。
      */
     public record AuditLogEntry(
@@ -430,6 +573,9 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
         private volatile boolean clusterConfigInitialized;
         private volatile boolean securityConfigInitialized;
         private final Map<String, NodeMetrics> nodeMetrics = new ConcurrentHashMap<>();
+        private final Map<String, ClientSnapshot> clientSnapshots = new ConcurrentHashMap<>();
+        private final Map<String, BlacklistEntry> blacklistEntries = new ConcurrentHashMap<>();
+        private final Map<String, ClientTraceManager.ClientTraceTask> clientTraceTasks = new ConcurrentHashMap<>();
         private final List<AuditLogEntry> auditLogs = new CopyOnWriteArrayList<>();
 
         private ClusterState(ClusterSummary summary, ClusterConfig clusterConfig, SecurityConfig securityConfig) {
@@ -460,5 +606,14 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
             return defaultValue;
         }
         return normalize(values.get(0), defaultValue);
+    }
+
+    private static String normalizeBlacklistType(String type) {
+        String normalized = normalize(type, "clientId");
+        return "ip".equalsIgnoreCase(normalized) ? "ip" : "clientId";
+    }
+
+    private static String blacklistKey(String type, String value) {
+        return normalizeBlacklistType(type) + ":" + normalize(value, "");
     }
 }
