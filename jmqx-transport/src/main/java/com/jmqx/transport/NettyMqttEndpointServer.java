@@ -15,6 +15,7 @@ import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http.websocketx.WebSocketServerProtocolHandler;
 import io.netty.handler.codec.mqtt.MqttDecoder;
 import io.netty.handler.codec.mqtt.MqttEncoder;
+import io.netty.handler.flush.FlushConsolidationHandler;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.timeout.IdleStateHandler;
 import io.netty.util.AttributeKey;
@@ -30,6 +31,7 @@ import java.util.logging.Logger;
 public class NettyMqttEndpointServer {
     private static final Logger LOG = Logger.getLogger(NettyMqttEndpointServer.class.getName());
     private static final int MAX_MQTT_MESSAGE_SIZE = 256 * 1024;
+    private static final int FLUSH_CONSOLIDATION_EXPLICIT_FLUSH_AFTER = 256;
     private static final String WS_SUB_PROTOCOLS = "mqtt,mqttv3.1,mqttv3.1.1";
     private static final AttributeKey<String> CONNECTION_TYPE = AttributeKey.valueOf("jmqx.connectionType");
 
@@ -97,6 +99,10 @@ public class NettyMqttEndpointServer {
                             .addLast("mqtt-decoder", new MqttDecoder(MAX_MQTT_MESSAGE_SIZE))
                             .addLast("ws-frame-encoder", new ByteBufToWebSocketFrameEncoder())
                             .addLast("mqtt-encoder", MqttEncoder.INSTANCE)
+                            .addLast("flush-consolidation", new FlushConsolidationHandler(
+                                FLUSH_CONSOLIDATION_EXPLICIT_FLUSH_AFTER,
+                                true
+                            ))
                             .addLast("mqtt-handler", new NettyMqttChannelHandler(brokerMessageHandler, connectionMetrics));
                         return;
                     }
@@ -104,6 +110,10 @@ public class NettyMqttEndpointServer {
                     ch.pipeline()
                         .addLast("mqtt-decoder", new MqttDecoder(MAX_MQTT_MESSAGE_SIZE))
                         .addLast("mqtt-encoder", MqttEncoder.INSTANCE)
+                        .addLast("flush-consolidation", new FlushConsolidationHandler(
+                            FLUSH_CONSOLIDATION_EXPLICIT_FLUSH_AFTER,
+                            true
+                        ))
                         .addLast("mqtt-handler", new NettyMqttChannelHandler(brokerMessageHandler, connectionMetrics));
                 }
             });

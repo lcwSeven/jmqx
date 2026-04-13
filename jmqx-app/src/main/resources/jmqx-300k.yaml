@@ -15,6 +15,7 @@ jmqx:
     workerThreads: 0
     readerIdleSeconds: 180
     maxQos: 2
+    maxWillPayloadBytes: 262144
     rateLimit:
       clientId:
         enabled: false
@@ -40,6 +41,11 @@ jmqx:
     inflight:
       rocksdb:
         path: data/qos2-inflight-rocksdb
+  will:
+    persist:
+      enabled: true
+      rocksdb:
+        path: data/will-rocksdb
 
   shared:
     maxSubscribersPerGroup: 1000

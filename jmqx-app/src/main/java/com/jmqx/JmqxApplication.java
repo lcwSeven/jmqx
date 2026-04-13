@@ -45,10 +45,12 @@ import com.jmqx.session.SessionRegistry;
 import com.jmqx.store.RocksDbRetainedMessageStore;
 import com.jmqx.store.RocksDbQos1InflightStore;
 import com.jmqx.store.RocksDbQos2InflightStore;
+import com.jmqx.store.RocksDbWillMessageStore;
 import com.jmqx.store.Qos1InflightStore;
 import com.jmqx.store.Qos2InflightStore;
 import com.jmqx.store.RetainedMessageStore;
 import com.jmqx.store.RetainedStoreProperties;
+import com.jmqx.store.WillMessageStore;
 import com.jmqx.transport.ConnectionMetrics;
 import com.jmqx.transport.NettyMqttEndpointServer;
 
@@ -103,6 +105,16 @@ public class JmqxApplication {
                 "jmqx.qos2.inflight.rocksdb.path",
                 "data/qos2-inflight-rocksdb"
         );
+        boolean willPersistEnabled = getBooleanProperty(
+                config,
+                "jmqx.will.persist.enabled",
+                true
+        );
+        String willRocksdbPath = getStringProperty(
+                config,
+                "jmqx.will.persist.rocksdb.path",
+                "data/will-rocksdb"
+        );
         AdminSyncSettings adminSyncSettings = loadAdminSyncSettings(config);
         AdminPanelSettings adminPanelSettings = loadAdminPanelSettings(config);
         int sharedMaxSubscribers = getIntProperty(config, "jmqx.shared.maxSubscribersPerGroup", 1000);
@@ -123,6 +135,8 @@ public class JmqxApplication {
                 retainedStoreProperties,
                 qos1InflightRocksdbPath,
                 qos2InflightRocksdbPath,
+                willPersistEnabled,
+                willRocksdbPath,
                 sharedMaxSubscribers,
                 sharedSlowThreshold,
                 clusterRoleProvider,
@@ -140,6 +154,9 @@ public class JmqxApplication {
         RetainedMessageStore retainedMessageStore = buildRetainedMessageStore(context.retainedStoreProperties());
         Qos1InflightStore qos1InflightStore = new RocksDbQos1InflightStore(context.qos1InflightRocksdbPath());
         Qos2InflightStore qos2InflightStore = new RocksDbQos2InflightStore(context.qos2InflightRocksdbPath());
+        WillMessageStore willMessageStore = context.willPersistEnabled()
+                ? new RocksDbWillMessageStore(context.willRocksdbPath())
+                : WillMessageStore.NOOP;
 
         // 1) 构建并启动元数据运行时（CORE 负责写入与复制，REPLICANT 负责追平日志）。
         MetadataRuntime metadataRuntime = buildMetadataRuntime(
@@ -218,6 +235,8 @@ public class JmqxApplication {
                 context.retainedStoreProperties().isRetainedEnabled(),
                 qos1InflightStore,
                 qos2InflightStore,
+                willMessageStore,
+                context.brokerProperties().getMaxWillPayloadBytes(),
                 context.globalSubscriptionRegistry(),
                 context.clusterRoleProvider().nodeId(),
                 metadataRuntime.gateway(),
@@ -292,6 +311,7 @@ public class JmqxApplication {
                 clusterMessageTransport,
                 brokerMessageHandler,
                 retainedMessageStore,
+                willMessageStore,
                 messageBridge,
                 endpointServers,
                 dashboardPublisher,
@@ -380,6 +400,7 @@ public class JmqxApplication {
             runtimeComponents.dashboardPublisher().shutdownNow();
             runtimeComponents.brokerMessageHandler().shutdown();
             runtimeComponents.retainedMessageStore().close();
+            runtimeComponents.willMessageStore().close();
             runtimeComponents.messageBridge().close();
             runtimeComponents.clusterMessageTransport().stop();
             runtimeComponents.metadataRuntime().replicator().stop();
@@ -423,6 +444,7 @@ public class JmqxApplication {
                 + ", connectIpPerSecond=" + brokerProperties.getRateLimitConnectIpPerSecond()
                 + ", cleanupIntervalSeconds=" + brokerProperties.getRateLimitCleanupIntervalSeconds()
                 + ", idleSeconds=" + brokerProperties.getRateLimitIdleSeconds());
+        System.out.println("BROKER maxWillPayloadBytes=" + brokerProperties.getMaxWillPayloadBytes());
         System.out.println("RETAINED maxEntries=" + context.retainedStoreProperties().getMaxEntries()
                 + ", maxBytes=" + context.retainedStoreProperties().getMaxBytes()
                 + ", maxPayloadBytes=" + context.retainedStoreProperties().getMaxPayloadBytes()
@@ -431,6 +453,8 @@ public class JmqxApplication {
                 + ", overflowStrategy=" + context.retainedStoreProperties().getOverflowStrategy());
         System.out.println("QOS1 inflight rocksdbPath=" + context.qos1InflightRocksdbPath());
         System.out.println("QOS2 inflight rocksdbPath=" + context.qos2InflightRocksdbPath());
+        System.out.println("WILL persist enabled=" + context.willPersistEnabled()
+                + ", rocksdbPath=" + context.willRocksdbPath());
         System.out.println("SHARED maxSubscribersPerGroup=" + context.sharedMaxSubscribers()
                 + ", slowConsumerStrikeThreshold=" + context.sharedSlowThreshold());
         System.out.println("ADMIN-SYNC enabled=" + context.adminSyncSettings().enabled()
@@ -910,6 +934,8 @@ public class JmqxApplication {
             RetainedStoreProperties retainedStoreProperties,
             String qos1InflightRocksdbPath,
             String qos2InflightRocksdbPath,
+            boolean willPersistEnabled,
+            String willRocksdbPath,
             int sharedMaxSubscribers,
             int sharedSlowThreshold,
             ClusterRoleProvider clusterRoleProvider,
@@ -981,6 +1007,7 @@ public class JmqxApplication {
             NettyClusterMessageTransport clusterMessageTransport,
             MqttBrokerMessageHandler brokerMessageHandler,
             RetainedMessageStore retainedMessageStore,
+            WillMessageStore willMessageStore,
             MessageBridge messageBridge,
             EndpointServers endpointServers,
             ScheduledExecutorService dashboardPublisher,

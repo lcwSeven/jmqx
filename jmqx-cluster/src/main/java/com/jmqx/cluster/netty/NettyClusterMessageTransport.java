@@ -26,6 +26,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Logger;
 
@@ -47,6 +48,8 @@ public class NettyClusterMessageTransport implements MetadataReplicator {
     private static final short TAG_PUBLISH_QOS = 4;
     private static final short TAG_INCLUDE_NORMAL = 5;
     private static final short TAG_SHARED_GROUPS = 6;
+    private static final int MAX_SEND_RETRIES = 2;
+    private static final long SEND_RETRY_BACKOFF_MS = 150L;
     // 本地节点 ID
     private final String localNodeId;
     private final String bindHost;
@@ -139,7 +142,7 @@ public class NettyClusterMessageTransport implements MetadataReplicator {
             normalizeSharedGroups(sharedGroups)
         ));
         // 投递
-        sendOnce(endpoint, frame);
+        sendOnce(endpoint, frame, 0);
     }
 
     @Override
@@ -225,11 +228,24 @@ public class NettyClusterMessageTransport implements MetadataReplicator {
         LOG.info("[CLUSTER][MSG] server stopped");
     }
 
-    private void sendOnce(ClusterEndpoint endpoint, byte[] frame) {
+    /**
+     * 单次发送入口：
+     * 1. 优先复用现有长连接；
+     * 2. 不可用时尝试建立连接；
+     * 3. 失败则在限定次数内做退避重试。
+     *
+     * @param endpoint 目标端点
+     * @param frame 协议帧
+     * @param attempt 当前尝试次数（从 0 开始）
+     */
+    private void sendOnce(ClusterEndpoint endpoint, byte[] frame, int attempt) {
+        if (!running.get()) {
+            return;
+        }
         // 端点级长连接复用，优先走已建立连接发送。
         Channel cached = outboundChannels.get(endpoint);
         if (cached != null && cached.isActive()) {
-            writeToChannel(endpoint, cached, frame);
+            writeToChannel(endpoint, cached, frame, attempt);
             return;
         }
         // 同一端点复用连接中的 Future，避免并发下重复 connect。
@@ -252,19 +268,24 @@ public class NettyClusterMessageTransport implements MetadataReplicator {
                 String error = cause == null ? "unknown" : cause.getMessage();
                 LOG.fine(() -> "[CLUSTER][MSG] connect failed endpoint=" + endpoint + ", error=" + error);
                 outboundConnectFutures.remove(endpoint, connectFuture);
+                scheduleRetry(endpoint, frame, attempt, "connect");
                 return;
             }
             Channel channel = future.channel();
             outboundChannels.put(endpoint, channel);
             outboundConnectFutures.remove(endpoint, connectFuture);
             channel.closeFuture().addListener(closeFuture -> outboundChannels.remove(endpoint, channel));
-            writeToChannel(endpoint, channel, frame);
+            writeToChannel(endpoint, channel, frame, attempt);
         });
     }
 
-    private void writeToChannel(ClusterEndpoint endpoint, Channel channel, byte[] frame) {
+    /**
+     * 向指定 Channel 写入数据，写失败时触发重试。
+     */
+    private void writeToChannel(ClusterEndpoint endpoint, Channel channel, byte[] frame, int attempt) {
         if (channel == null || !channel.isActive()) {
             outboundChannels.remove(endpoint, channel);
+            scheduleRetry(endpoint, frame, attempt, "inactive-channel");
             return;
         }
         channel.writeAndFlush(frame).addListener((ChannelFutureListener) writeFuture -> {
@@ -276,7 +297,35 @@ public class NettyClusterMessageTransport implements MetadataReplicator {
             LOG.fine(() -> "[CLUSTER][MSG] send failed endpoint=" + endpoint + ", error=" + error);
             outboundChannels.remove(endpoint, channel);
             channel.close();
+            scheduleRetry(endpoint, frame, attempt, "write");
         });
+    }
+
+    /**
+     * 失败重试调度（有界）：
+     * - 最多重试 MAX_SEND_RETRIES 次，避免无上限堆积；
+     * - 基于 clientGroup 事件循环延迟调度，避免阻塞业务线程。
+     */
+    private void scheduleRetry(ClusterEndpoint endpoint, byte[] frame, int attempt, String reason) {
+        if (!running.get()) {
+            return;
+        }
+        if (attempt >= MAX_SEND_RETRIES) {
+            LOG.warning(() -> "[CLUSTER][MSG] give up send after retries endpoint=" + endpoint + ", reason=" + reason
+                + ", attempts=" + (attempt + 1));
+            return;
+        }
+        NioEventLoopGroup group = clientGroup;
+        if (group == null || group.isShuttingDown()) {
+            return;
+        }
+        int nextAttempt = attempt + 1;
+        long delayMs = SEND_RETRY_BACKOFF_MS * nextAttempt;
+        group.next().schedule(
+            () -> sendOnce(endpoint, frame, nextAttempt),
+            delayMs,
+            TimeUnit.MILLISECONDS
+        );
     }
 
     /**

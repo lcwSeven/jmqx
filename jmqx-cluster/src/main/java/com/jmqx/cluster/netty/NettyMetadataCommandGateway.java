@@ -80,14 +80,17 @@ public class NettyMetadataCommandGateway implements MetadataCommandGateway {
                 continue;
             }
             SubmitResponse response = submitToEndpoint(endpoint, command);
+            // 这里返回空表示超时，则重试。
             if (response == null) {
                 markFailureIfPreferred(endpoint);
                 continue;
             }
+            // 提交成功时返回当前已应用索引，作为提交确认位置。
             if (response.success()) {
                 markPreferredLeader(endpoint.host() + ":" + endpoint.port());
                 return response.logIndex();
             }
+            // 提交失败时返回 leader 端点，作为重试目标。
             if (response.leaderEndpoint() != null && !response.leaderEndpoint().isBlank()) {
                 leaderHint = response.leaderEndpoint();
                 markPreferredLeader(leaderHint);

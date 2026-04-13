@@ -22,3 +22,10 @@ jmqx:
     inflight:
       rocksdb:
         path: data/qos2-inflight-rocksdb
+  # Will message persistence. Enable to survive broker restart/crash.
+  will:
+    persist:
+      # Persist CONNECT will message on disk, and publish on unexpected disconnect.
+      enabled: true
+      rocksdb:
+        path: data/will-rocksdb

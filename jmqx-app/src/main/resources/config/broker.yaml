@@ -11,6 +11,8 @@ jmqx:
     readerIdleSeconds: 120
     # Maximum QoS supported by broker (0/1/2).
     maxQos: 2
+    # Maximum allowed WILL payload bytes. CONNECT is rejected when exceeded.
+    maxWillPayloadBytes: 1048576
     # MQTT over WebSocket.
     websocket:
       enabled: true

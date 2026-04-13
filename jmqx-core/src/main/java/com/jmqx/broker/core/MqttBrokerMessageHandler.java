@@ -28,6 +28,7 @@ import com.jmqx.store.RetainedMessage;
 import com.jmqx.store.RetainedMessageStore;
 import com.jmqx.store.Qos1InflightStore;
 import com.jmqx.store.Qos2InflightStore;
+import com.jmqx.store.WillMessageStore;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
@@ -99,10 +100,13 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     private static final long SESSION_EXPIRY_IMMEDIATE = 0L;
     private static final long SESSION_EXPIRY_PERSISTENT = Long.MAX_VALUE;
     private static final long RETAINED_RETRY_INTERVAL_MS = 2000L;
+    private static final long METADATA_COMMAND_RETRY_INTERVAL_MS = 2000L;
 
     private final SessionRegistry sessionRegistry;
     private final SubscriptionRegistry subscriptionRegistry;
     private final RetainedMessageStore retainedMessageStore;
+    private final WillMessageStore willMessageStore;
+    private final boolean willPersistenceEnabled;
     private final BrokerInflightManager inflightManager;
     private final ClientAuthenticator clientAuthenticator;
     private final AclAuthorizer aclAuthorizer;
@@ -117,10 +121,13 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     private final String dashboardClusterId;
     private final List<String> bridgeTopicFilters;
     private final int maxAllowedQos;
+    private final int maxWillPayloadBytes;
     private final ConcurrentMap<String, AtomicLong> sharedGroupNodeRoundRobin = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, SharedGroupNodeOrderSnapshot> sharedGroupNodeOrderSnapshots = new ConcurrentHashMap<>();
     private final RetainedCommandReplicator retainedCommandReplicator;
     private final BrokerRateLimiter rateLimiter;
     private final ScheduledExecutorService qos1RetryExecutor;
+    private final ConcurrentMap<String, PendingMetadataCommand> pendingMetadataCommands = new ConcurrentHashMap<>();
 
 
     public MqttBrokerMessageHandler(
@@ -134,6 +141,8 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             boolean retainedEnabled,
             Qos1InflightStore qos1InflightStore,
             Qos2InflightStore qos2InflightStore,
+            WillMessageStore willMessageStore,
+            int maxWillPayloadBytes,
             GlobalSubscriptionRegistry globalSubscriptionRegistry,
             String nodeId,
             MetadataCommandGateway metadataCommandGateway,
@@ -153,6 +162,8 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             : sharedSubscriptionManager;
         this.messageBridge = messageBridge == null ? MessageBridge.NOOP : messageBridge;
         this.retainedEnabled = retainedEnabled;
+        this.willMessageStore = willMessageStore == null ? WillMessageStore.NOOP : willMessageStore;
+        this.willPersistenceEnabled = this.willMessageStore != WillMessageStore.NOOP;
         this.inflightManager = new BrokerInflightManager(qos1InflightStore, qos2InflightStore, LOG);
         this.globalSubscriptionRegistry = globalSubscriptionRegistry;
         this.nodeId = (nodeId == null || nodeId.isBlank()) ? "node-1" : nodeId;
@@ -164,6 +175,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             : dashboardClusterId.trim();
         this.bridgeTopicFilters = parseBridgeTopicFilters(bridgeTopicFilters);
         this.maxAllowedQos = normalizeMaxQos(maxAllowedQos);
+        this.maxWillPayloadBytes = maxWillPayloadBytes <= 0 ? 1024 * 1024 : maxWillPayloadBytes;
         this.rateLimiter = new BrokerRateLimiter(rateLimitConfig);
         this.retainedCommandReplicator = new RetainedCommandReplicator(this.metadataCommandGateway, this.nodeId, LOG);
         this.qos1RetryExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
@@ -235,6 +247,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         if (!gracefulDisconnect) {
             publishWillMessageIfPresent(channel, clientId);
         }
+        willMessageStore.remove(clientId);
 
         adminReporter.removeClientSession(clientId);
         sessionRegistry.remove(clientId);
@@ -350,12 +363,26 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         ctx.channel().attr(CLEAN_START).set(cleanStart);
         ctx.channel().attr(GRACEFUL_DISCONNECT).set(false);
 
-        // 第五步：解析并缓存遗嘱消息，供异常断连时发布。
+        // 第五步：解析并校验遗嘱消息大小，超限则拒绝连接，避免大遗嘱导致内存风险。
+        if (isWillPayloadTooLarge(message)) {
+            LOG.warning(() -> "[CONNECT] rejected oversize will payload, clientId=" + clientId
+                + ", maxWillPayloadBytes=" + maxWillPayloadBytes);
+            rejectConnection(ctx, MqttConnectReturnCode.CONNECTION_REFUSED_NOT_AUTHORIZED, mqtt5);
+            return;
+        }
+        // 第六步：解析并缓存/持久化遗嘱消息，供异常断连时发布。
         WillMessage willMessage = buildWillMessage(message);
         if (willMessage != null) {
-            ctx.channel().attr(WILL_MESSAGE).set(willMessage);
+            if (willPersistenceEnabled) {
+                // 持久化模式下不常驻内存，断连时按需从存储读取，降低连接规模放大时的堆占用。
+                ctx.channel().attr(WILL_MESSAGE).set(null);
+                willMessageStore.save(clientId, willMessage);
+            } else {
+                ctx.channel().attr(WILL_MESSAGE).set(willMessage);
+            }
         } else {
             ctx.channel().attr(WILL_MESSAGE).set(null);
+            willMessageStore.remove(clientId);
         }
 
         // 第五步：发送 CONNACK 成功回包，完成 MQTT CONNECT 握手。
@@ -667,6 +694,9 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
 
     private void publishWillMessageIfPresent(Channel channel, String clientId) {
         WillMessage willMessage = channel.attr(WILL_MESSAGE).get();
+        if (willMessage == null && clientId != null && !clientId.isBlank()) {
+            willMessage = willMessageStore.get(clientId).orElse(null);
+        }
         if (willMessage == null) {
             return;
         }
@@ -677,7 +707,17 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             willMessage.qos(),
             willMessage.retain()
         );
-        LOG.fine(() -> "[WILL] published clientId=" + clientId + ", topic=" + willMessage.topic());
+        final WillMessage publishedWillMessage = willMessage;
+        LOG.fine(() -> "[WILL] published clientId=" + clientId + ", topic=" + publishedWillMessage.topic());
+    }
+
+    private boolean isWillPayloadTooLarge(MqttConnectMessage connectMessage) {
+        if (connectMessage == null || connectMessage.payload() == null || !connectMessage.variableHeader().isWillFlag()) {
+            return false;
+        }
+        byte[] payload = connectMessage.payload().willMessageInBytes();
+        int payloadLength = payload == null ? 0 : payload.length;
+        return payloadLength > maxWillPayloadBytes;
     }
 
     private void publishClientLifecycleEvent(
@@ -915,19 +955,16 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         if (group == null || group.isBlank()) {
             return null;
         }
-        Set<String> nodeCandidates = new LinkedHashSet<>(globalNodes);
-        if (localCandidates != null && !localCandidates.isEmpty()) {
-            nodeCandidates.add(nodeId);
-        }
+        boolean hasLocalCandidates = localCandidates != null && !localCandidates.isEmpty();
+        List<String> orderedGlobalNodes = resolveOrderedGlobalNodes(group, globalNodes);
+        List<String> nodeCandidates = buildNodeCandidates(orderedGlobalNodes, hasLocalCandidates);
         if (nodeCandidates.isEmpty()) {
             return null;
         }
-        List<String> sortedNodes = new ArrayList<>(nodeCandidates);
-        Collections.sort(sortedNodes);
         AtomicLong cursor = sharedGroupNodeRoundRobin.computeIfAbsent(group, ignored -> new AtomicLong(0));
-        int start = Math.floorMod(cursor.getAndIncrement(), sortedNodes.size());
-        for (int i = 0; i < sortedNodes.size(); i++) {
-            String selectedNode = sortedNodes.get((start + i) % sortedNodes.size());
+        int start = Math.floorMod(cursor.getAndIncrement(), nodeCandidates.size());
+        for (int i = 0; i < nodeCandidates.size(); i++) {
+            String selectedNode = nodeCandidates.get((start + i) % nodeCandidates.size());
             if (selectedNode.equals(nodeId)) {
                 String localClient = sharedSubscriptionManager.selectSubscriber(group, localCandidates, sessionRegistry);
                 if (localClient != null) {
@@ -938,6 +975,55 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             return SharedDeliveryTarget.remote(selectedNode);
         }
         return null;
+    }
+
+    /**
+     * 获取共享组的全局节点有序快照，避免每条消息重复排序。
+     */
+    private List<String> resolveOrderedGlobalNodes(String group, Set<String> globalNodes) {
+        if (group == null || group.isBlank() || globalNodes == null || globalNodes.isEmpty()) {
+            return Collections.emptyList();
+        }
+        int size = globalNodes.size();
+        int hash = globalNodes.hashCode();
+        SharedGroupNodeOrderSnapshot snapshot = sharedGroupNodeOrderSnapshots.get(group);
+        if (snapshot != null && snapshot.matches(size, hash)) {
+            return snapshot.orderedNodes();
+        }
+        List<String> ordered = new ArrayList<>(globalNodes.size());
+        for (String node : globalNodes) {
+            if (node != null && !node.isBlank()) {
+                ordered.add(node);
+            }
+        }
+        Collections.sort(ordered);
+        List<String> immutableOrdered = Collections.unmodifiableList(ordered);
+        sharedGroupNodeOrderSnapshots.put(group, new SharedGroupNodeOrderSnapshot(size, hash, immutableOrdered));
+        return immutableOrdered;
+    }
+
+    /**
+     * 组装本次共享投递的候选节点列表：
+     * 1. 使用全局有序节点快照；
+     * 2. 本地存在候选客户端时，把本节点插入有序位置。
+     */
+    private List<String> buildNodeCandidates(List<String> orderedGlobalNodes, boolean includeLocalNode) {
+        if (!includeLocalNode) {
+            return orderedGlobalNodes;
+        }
+        if (orderedGlobalNodes.isEmpty()) {
+            return List.of(nodeId);
+        }
+        int index = Collections.binarySearch(orderedGlobalNodes, nodeId);
+        if (index >= 0) {
+            return orderedGlobalNodes;
+        }
+        int insertPosition = -index - 1;
+        List<String> merged = new ArrayList<>(orderedGlobalNodes.size() + 1);
+        merged.addAll(orderedGlobalNodes.subList(0, insertPosition));
+        merged.add(nodeId);
+        merged.addAll(orderedGlobalNodes.subList(insertPosition, orderedGlobalNodes.size()));
+        return merged;
     }
 
     private void replayRetained(Channel channel, String topicFilter) {
@@ -1140,17 +1226,13 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         SharedSubscription.Parsed shared = SharedSubscription.parse(topicFilter);
         String normalized = SharedSubscription.normalizeTopicFilter(topicFilter);
         String group = shared == null ? null : shared.group();
-        long committedIndex = metadataCommandGateway.submit(new MetadataCommand(
+        submitMetadataCommand(new MetadataCommand(
             SUBSCRIPTION_NAMESPACE,
             OP_REGISTER,
             normalized,
             group,
             nodeId
-        ));
-        if (committedIndex >= 0) {
-            return;
-        }
-        LOG.warning(() -> "[CLUSTER] metadata submit failed, skip global-register apply, topicFilter=" + topicFilter);
+        ), "global-register topicFilter=" + topicFilter);
     }
 
     private void applyGlobalUnregisterAfterLocal(String topicFilter) {
@@ -1160,17 +1242,13 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         SharedSubscription.Parsed shared = SharedSubscription.parse(topicFilter);
         String normalized = SharedSubscription.normalizeTopicFilter(topicFilter);
         String group = shared == null ? null : shared.group();
-        long committedIndex = metadataCommandGateway.submit(new MetadataCommand(
+        submitMetadataCommand(new MetadataCommand(
             SUBSCRIPTION_NAMESPACE,
             OP_UNREGISTER,
             normalized,
             group,
             nodeId
-        ));
-        if (committedIndex >= 0) {
-            return;
-        }
-        LOG.warning(() -> "[CLUSTER] metadata submit failed, skip global-unregister apply, topicFilter=" + topicFilter);
+        ), "global-unregister topicFilter=" + topicFilter);
     }
 
     /**
@@ -1182,17 +1260,13 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         if (clientId == null || clientId.isBlank()) {
             return;
         }
-        long committedIndex = metadataCommandGateway.submit(new MetadataCommand(
+        submitMetadataCommand(new MetadataCommand(
             SESSION_NAMESPACE,
             OP_ONLINE,
             clientId,
             String.valueOf(Math.max(0L, connectedAtMs)),
             nodeId
-        ));
-        if (committedIndex >= 0) {
-            return;
-        }
-        LOG.warning(() -> "[CLUSTER] metadata submit failed, skip session-online apply, clientId=" + clientId);
+        ), "session-online clientId=" + clientId);
     }
 
     public void shutdown() {
@@ -1223,9 +1297,106 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             LOG.warning("[RETAINED] pending command retry task failed: " + exception.getMessage());
         }
         try {
+            retryPendingMetadataCommands();
+        } catch (Exception exception) {
+            LOG.warning("[CLUSTER] metadata pending command retry task failed: " + exception.getMessage());
+        }
+        try {
             cleanupRateLimitState();
         } catch (Exception exception) {
             LOG.warning("[RATE_LIMIT] cleanup task failed: " + exception.getMessage());
+        }
+    }
+
+    /**
+     * 提交元数据命令；失败时写入待重试队列，由周期任务异步重试。
+     * 这里不阻塞主协议线程，避免 SUB/UNSUB/CONNECT 处理链路被远端抖动拖慢。
+     */
+    private void submitMetadataCommand(MetadataCommand command, String context) {
+        String retryKey = metadataRetryKey(command);
+        long committedIndex = metadataCommandGateway.submit(command);
+        if (committedIndex >= 0) {
+            pendingMetadataCommands.remove(retryKey);
+            return;
+        }
+        pendingMetadataCommands.compute(retryKey, (key, previous) -> {
+            int attempts = previous == null ? 1 : previous.attempts + 1;
+            long nextRetryAt = System.currentTimeMillis() + METADATA_COMMAND_RETRY_INTERVAL_MS;
+            return new PendingMetadataCommand(command, attempts, nextRetryAt);
+        });
+        LOG.warning(() -> "[CLUSTER] metadata submit failed, command queued for retry, context=" + context);
+    }
+
+    /**
+     * 周期重试元数据命令，成功后从待重试队列移除。
+     */
+    private void retryPendingMetadataCommands() {
+        if (pendingMetadataCommands.isEmpty()) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        pendingMetadataCommands.forEach((retryKey, pending) -> {
+            if (pending == null || pending.nextRetryAt > now) {
+                return;
+            }
+            long committedIndex = metadataCommandGateway.submit(pending.command);
+            if (committedIndex >= 0) {
+                pendingMetadataCommands.remove(retryKey, pending);
+                return;
+            }
+            PendingMetadataCommand nextPending = new PendingMetadataCommand(
+                pending.command,
+                pending.attempts + 1,
+                System.currentTimeMillis() + METADATA_COMMAND_RETRY_INTERVAL_MS
+            );
+            pendingMetadataCommands.replace(retryKey, pending, nextPending);
+        });
+    }
+
+    /**
+     * 命令去重键：
+     * 1. 订阅命令按 namespace + key(topic) + value(group) + sourceNode 去重，后写覆盖前写。
+     * 2. 会话命令按 namespace + key(clientId) + sourceNode 去重，保留最新 online 事件。
+     */
+    private static String metadataRetryKey(MetadataCommand command) {
+        if (command == null) {
+            return "";
+        }
+        StringBuilder builder = new StringBuilder(128);
+        builder.append(Objects.toString(command.namespace(), "")).append('|')
+            .append(Objects.toString(command.key(), "")).append('|')
+            .append(Objects.toString(command.sourceNodeId(), ""));
+        if (SUBSCRIPTION_NAMESPACE.equals(command.namespace())) {
+            builder.append('|').append(Objects.toString(command.value(), ""));
+        }
+        return builder.toString();
+    }
+
+    /**
+     * 元数据命令待重试快照。
+     */
+    private static final class PendingMetadataCommand {
+        private final MetadataCommand command;
+        private final int attempts;
+        private final long nextRetryAt;
+
+        private PendingMetadataCommand(MetadataCommand command, int attempts, long nextRetryAt) {
+            this.command = command;
+            this.attempts = attempts;
+            this.nextRetryAt = nextRetryAt;
+        }
+    }
+
+    /**
+     * 共享组节点有序快照。
+     */
+    private record SharedGroupNodeOrderSnapshot(
+        int size,
+        int hash,
+        List<String> orderedNodes
+    ) {
+        private boolean matches(int currentSize, int currentHash) {
+            return this.size == currentSize && this.hash == currentHash;
         }
     }
 
