@@ -1,4 +1,4 @@
-package com.jmqx.store;
+package com.jmqx.store.qos;
 
 import java.util.Collections;
 import java.util.List;

@@ -43,15 +43,19 @@ import com.jmqx.router.global.DefaultGlobalSubscriptionRegistry;
 import com.jmqx.router.global.GlobalSubscriptionRegistry;
 import com.jmqx.session.LocalSessionRegistry;
 import com.jmqx.session.SessionRegistry;
-import com.jmqx.store.RocksDbRetainedMessageStore;
-import com.jmqx.store.RocksDbQos1InflightStore;
-import com.jmqx.store.RocksDbQos2InflightStore;
-import com.jmqx.store.RocksDbWillMessageStore;
-import com.jmqx.store.Qos1InflightStore;
-import com.jmqx.store.Qos2InflightStore;
-import com.jmqx.store.RetainedMessageStore;
-import com.jmqx.store.RetainedStoreProperties;
-import com.jmqx.store.WillMessageStore;
+import com.jmqx.store.rocksdb.RocksDbRetainedMessageStore;
+import com.jmqx.store.rocksdb.RocksDbQos1InflightStore;
+import com.jmqx.store.rocksdb.RocksDbQos2InflightStore;
+import com.jmqx.store.rocksdb.RocksDbWillMessageStore;
+import com.jmqx.store.async.AsyncQos1InflightStore;
+import com.jmqx.store.async.AsyncQos2InflightStore;
+import com.jmqx.store.async.AsyncWillMessageStore;
+import com.jmqx.store.qos.Qos1InflightStore;
+import com.jmqx.store.qos.Qos2InflightStore;
+import com.jmqx.store.retained.RetainedMessageStore;
+import com.jmqx.store.retained.RetainedStoreProperties;
+import com.jmqx.store.async.SharedAsyncStoreExecutor;
+import com.jmqx.store.will.WillMessageStore;
 import com.jmqx.transport.ConnectionMetrics;
 import com.jmqx.transport.NettyMqttEndpointServer;
 
@@ -126,6 +130,12 @@ public class JmqxApplication {
                 getIntProperty(config, "jmqx.cluster.dispatch.async.workerCount", 2),
                 getIntProperty(config, "jmqx.cluster.dispatch.async.enqueueTimeoutMs", 2)
         );
+        StorageAsyncSettings storageAsyncSettings = new StorageAsyncSettings(
+                getBooleanProperty(config, "jmqx.storage.async.enabled", true),
+                getIntProperty(config, "jmqx.storage.async.queueCapacity", 20000),
+                getIntProperty(config, "jmqx.storage.async.workerCount", 2),
+                getIntProperty(config, "jmqx.storage.async.enqueueTimeoutMs", 2)
+        );
         String nodeId = getStringProperty(config, "jmqx.node.id", "node-1");
         NodeRole nodeRole = NodeRole.from(getStringProperty(config, "jmqx.cluster.role", "core"), NodeRole.CORE);
         Set<String> coreEndpoints = getStringSetProperty(config, "jmqx.cluster.coreEndpoints");
@@ -147,6 +157,7 @@ public class JmqxApplication {
                 sharedMaxSubscribers,
                 sharedSlowThreshold,
                 clusterDispatchAsyncSettings,
+                storageAsyncSettings,
                 clusterRoleProvider,
                 sessionRegistry,
                 subscriptionRegistry,
@@ -160,11 +171,19 @@ public class JmqxApplication {
     private static RuntimeComponents startRuntime(StartupContext context) throws InterruptedException {
         // 0) 提前构建 retained store，供元数据投影器与 Broker 共用同一存储实例。
         RetainedMessageStore retainedMessageStore = buildRetainedMessageStore(context.retainedStoreProperties());
-        Qos1InflightStore qos1InflightStore = new RocksDbQos1InflightStore(context.qos1InflightRocksdbPath());
-        Qos2InflightStore qos2InflightStore = new RocksDbQos2InflightStore(context.qos2InflightRocksdbPath());
-        WillMessageStore willMessageStore = context.willPersistEnabled()
-                ? new RocksDbWillMessageStore(context.willRocksdbPath())
-                : WillMessageStore.NOOP;
+        SharedAsyncStoreExecutor sharedAsyncStoreExecutor = null;
+        if (context.storageAsyncSettings().enabled()) {
+            // Will/QoS1/QoS2 复用一个异步执行器，减少线程池数量，把线程预算留给连接与网络 IO。
+            sharedAsyncStoreExecutor = new SharedAsyncStoreExecutor(
+                    "jmqx-store-async",
+                    context.storageAsyncSettings().queueCapacity(),
+                    context.storageAsyncSettings().workerCount(),
+                    context.storageAsyncSettings().enqueueTimeoutMs()
+            );
+        }
+        Qos1InflightStore qos1InflightStore = buildQos1InflightStore(context, sharedAsyncStoreExecutor);
+        Qos2InflightStore qos2InflightStore = buildQos2InflightStore(context, sharedAsyncStoreExecutor);
+        WillMessageStore willMessageStore = buildWillMessageStore(context, sharedAsyncStoreExecutor);
 
         // 1) 构建并启动元数据运行时（CORE 负责写入与复制，REPLICANT 负责追平日志）。
         MetadataRuntime metadataRuntime = buildMetadataRuntime(
@@ -332,6 +351,7 @@ public class JmqxApplication {
                 metadataRuntime,
                 clusterMessageTransport,
                 clusterMessageDispatcherCloser,
+                sharedAsyncStoreExecutor,
                 brokerMessageHandler,
                 retainedMessageStore,
                 willMessageStore,
@@ -424,6 +444,7 @@ public class JmqxApplication {
             runtimeComponents.brokerMessageHandler().shutdown();
             runtimeComponents.retainedMessageStore().close();
             runtimeComponents.willMessageStore().close();
+            closeQuietly(runtimeComponents.storageAsyncExecutorCloser());
             runtimeComponents.messageBridge().close();
             closeQuietly(runtimeComponents.clusterMessageDispatcherCloser());
             runtimeComponents.clusterMessageTransport().stop();
@@ -485,6 +506,10 @@ public class JmqxApplication {
                 + ", queueCapacity=" + context.clusterDispatchAsyncSettings().queueCapacity()
                 + ", workerCount=" + context.clusterDispatchAsyncSettings().workerCount()
                 + ", enqueueTimeoutMs=" + context.clusterDispatchAsyncSettings().enqueueTimeoutMs());
+        System.out.println("STORE-ASYNC enabled=" + context.storageAsyncSettings().enabled()
+                + ", queueCapacity=" + context.storageAsyncSettings().queueCapacity()
+                + ", workerCount=" + context.storageAsyncSettings().workerCount()
+                + ", enqueueTimeoutMs=" + context.storageAsyncSettings().enqueueTimeoutMs());
         System.out.println("ADMIN-SYNC enabled=" + context.adminSyncSettings().enabled()
                 + ", url=" + context.adminSyncSettings().url()
                 + ", clusterId=" + context.adminSyncSettings().clusterId()
@@ -521,6 +546,42 @@ public class JmqxApplication {
 
     private static RetainedMessageStore buildRetainedMessageStore(RetainedStoreProperties properties) {
         return new RocksDbRetainedMessageStore(properties);
+    }
+
+    private static Qos1InflightStore buildQos1InflightStore(
+            StartupContext context,
+            SharedAsyncStoreExecutor sharedAsyncStoreExecutor
+    ) {
+        Qos1InflightStore store = new RocksDbQos1InflightStore(context.qos1InflightRocksdbPath());
+        if (!context.storageAsyncSettings().enabled() || sharedAsyncStoreExecutor == null) {
+            return store;
+        }
+        return new AsyncQos1InflightStore(store, sharedAsyncStoreExecutor);
+    }
+
+    private static Qos2InflightStore buildQos2InflightStore(
+            StartupContext context,
+            SharedAsyncStoreExecutor sharedAsyncStoreExecutor
+    ) {
+        Qos2InflightStore store = new RocksDbQos2InflightStore(context.qos2InflightRocksdbPath());
+        if (!context.storageAsyncSettings().enabled() || sharedAsyncStoreExecutor == null) {
+            return store;
+        }
+        return new AsyncQos2InflightStore(store, sharedAsyncStoreExecutor);
+    }
+
+    private static WillMessageStore buildWillMessageStore(
+            StartupContext context,
+            SharedAsyncStoreExecutor sharedAsyncStoreExecutor
+    ) {
+        if (!context.willPersistEnabled()) {
+            return WillMessageStore.NOOP;
+        }
+        WillMessageStore store = new RocksDbWillMessageStore(context.willRocksdbPath());
+        if (!context.storageAsyncSettings().enabled() || sharedAsyncStoreExecutor == null) {
+            return store;
+        }
+        return new AsyncWillMessageStore(store, sharedAsyncStoreExecutor);
     }
 
     private static AdminSyncSettings loadAdminSyncSettings(JmqxConfig config) {
@@ -977,6 +1038,7 @@ public class JmqxApplication {
             int sharedMaxSubscribers,
             int sharedSlowThreshold,
             ClusterDispatchAsyncSettings clusterDispatchAsyncSettings,
+            StorageAsyncSettings storageAsyncSettings,
             ClusterRoleProvider clusterRoleProvider,
             SessionRegistry sessionRegistry,
             SubscriptionRegistry subscriptionRegistry,
@@ -994,6 +1056,17 @@ public class JmqxApplication {
      * @date 2026/4/13
      */
     private record ClusterDispatchAsyncSettings(
+            boolean enabled,
+            int queueCapacity,
+            int workerCount,
+            int enqueueTimeoutMs
+    ) {
+    }
+
+    /**
+     * 本地持久化异步写配置（Will/QoS inflight）。
+     */
+    private record StorageAsyncSettings(
             boolean enabled,
             int queueCapacity,
             int workerCount,
@@ -1059,6 +1132,7 @@ public class JmqxApplication {
             MetadataRuntime metadataRuntime,
             NettyClusterMessageTransport clusterMessageTransport,
             AutoCloseable clusterMessageDispatcherCloser,
+            AutoCloseable storageAsyncExecutorCloser,
             MqttBrokerMessageHandler brokerMessageHandler,
             RetainedMessageStore retainedMessageStore,
             WillMessageStore willMessageStore,

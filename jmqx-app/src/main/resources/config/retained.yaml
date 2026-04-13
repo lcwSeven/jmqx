@@ -1,5 +1,12 @@
 # Retained message store and QoS inflight persistence paths.
 jmqx:
+  # Async persistence for Will/QoS inflight stores.
+  storage:
+    async:
+      enabled: true
+      queueCapacity: 20000
+      workerCount: 2
+      enqueueTimeoutMs: 2
   retained:
     # Enable retained feature globally.
     enabled: true

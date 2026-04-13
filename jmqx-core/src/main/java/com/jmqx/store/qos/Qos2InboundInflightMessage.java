@@ -1,4 +1,4 @@
-package com.jmqx.store;
+package com.jmqx.store.qos;
 
 /**
  * QoS2 上行 inflight 消息模型。

@@ -1,9 +1,14 @@
-package com.jmqx.store;
+package com.jmqx.store.rocksdb;
+
+import com.jmqx.store.qos.Qos1InflightMessage;
+import com.jmqx.store.qos.Qos1InflightStore;
 
 import org.rocksdb.Options;
 import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
 import org.rocksdb.RocksIterator;
+import org.rocksdb.WriteBatch;
+import org.rocksdb.WriteOptions;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -28,6 +33,7 @@ public class RocksDbQos1InflightStore implements Qos1InflightStore {
     private static final Logger LOG = Logger.getLogger(RocksDbQos1InflightStore.class.getName());
 
     private final Options options;
+    private final WriteOptions writeOptions;
     private final RocksDB db;
 
     public RocksDbQos1InflightStore(String dbPath) {
@@ -35,6 +41,7 @@ public class RocksDbQos1InflightStore implements Qos1InflightStore {
         ensureParentDirectory(path);
         try {
             this.options = new Options().setCreateIfMissing(true);
+            this.writeOptions = new WriteOptions();
             this.db = RocksDB.open(options, path);
         } catch (RocksDBException exception) {
             throw new IllegalStateException("open qos1 inflight rocksdb failed: " + exception.getMessage(), exception);
@@ -83,12 +90,16 @@ public class RocksDbQos1InflightStore implements Qos1InflightStore {
                 keys.add(key.clone());
             }
         }
-        for (byte[] key : keys) {
-            try {
-                db.delete(key);
-            } catch (RocksDBException exception) {
-                LOG.log(Level.WARNING, "[QOS1][STORE] remove client key failed clientId=" + clientId, exception);
+        if (keys.isEmpty()) {
+            return;
+        }
+        try (WriteBatch batch = new WriteBatch()) {
+            for (byte[] key : keys) {
+                batch.delete(key);
             }
+            db.write(writeOptions, batch);
+        } catch (RocksDBException exception) {
+            LOG.log(Level.WARNING, "[QOS1][STORE] remove client batch failed clientId=" + clientId, exception);
         }
     }
 
@@ -128,6 +139,7 @@ public class RocksDbQos1InflightStore implements Qos1InflightStore {
     @Override
     public void close() {
         db.close();
+        writeOptions.close();
         options.close();
     }
 

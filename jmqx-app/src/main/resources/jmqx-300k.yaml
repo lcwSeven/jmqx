@@ -33,6 +33,12 @@ jmqx:
 
   retained:
     enabled: false
+  storage:
+    async:
+      enabled: true
+      queueCapacity: 50000
+      workerCount: 2
+      enqueueTimeoutMs: 1
   qos1:
     inflight:
       rocksdb:

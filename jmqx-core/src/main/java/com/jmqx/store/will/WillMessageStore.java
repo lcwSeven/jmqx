@@ -1,4 +1,4 @@
-package com.jmqx.store;
+package com.jmqx.store.will;
 
 import com.jmqx.broker.core.WillMessage;
 

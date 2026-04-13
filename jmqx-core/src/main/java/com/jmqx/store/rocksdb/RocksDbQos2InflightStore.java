@@ -1,9 +1,15 @@
-package com.jmqx.store;
+package com.jmqx.store.rocksdb;
+
+import com.jmqx.store.qos.Qos2InboundInflightMessage;
+import com.jmqx.store.qos.Qos2InflightStore;
+import com.jmqx.store.qos.Qos2OutboundInflightMessage;
 
 import org.rocksdb.Options;
 import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
 import org.rocksdb.RocksIterator;
+import org.rocksdb.WriteBatch;
+import org.rocksdb.WriteOptions;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -29,10 +35,12 @@ public class RocksDbQos2InflightStore implements Qos2InflightStore {
     private static final Logger LOG = Logger.getLogger(RocksDbQos2InflightStore.class.getName());
     private static final byte KEY_KIND_OUTBOUND = 'o';
     private static final byte KEY_KIND_INBOUND = 'i';
-    private static final byte VALUE_OUTBOUND = 1;
+    private static final byte VALUE_OUTBOUND_V1 = 1;
+    private static final byte VALUE_OUTBOUND_V2 = 3;
     private static final byte VALUE_INBOUND = 2;
 
     private final Options options;
+    private final WriteOptions writeOptions;
     private final RocksDB db;
 
     public RocksDbQos2InflightStore(String dbPath) {
@@ -40,6 +48,7 @@ public class RocksDbQos2InflightStore implements Qos2InflightStore {
         ensureParentDirectory(path);
         try {
             this.options = new Options().setCreateIfMissing(true);
+            this.writeOptions = new WriteOptions();
             this.db = RocksDB.open(options, path);
         } catch (RocksDBException exception) {
             throw new IllegalStateException("open qos2 inflight rocksdb failed: " + exception.getMessage(), exception);
@@ -165,6 +174,7 @@ public class RocksDbQos2InflightStore implements Qos2InflightStore {
     @Override
     public void close() {
         db.close();
+        writeOptions.close();
         options.close();
     }
 
@@ -193,8 +203,16 @@ public class RocksDbQos2InflightStore implements Qos2InflightStore {
                 keys.add(key.clone());
             }
         }
-        for (byte[] key : keys) {
-            deleteKey(key, logPrefix);
+        if (keys.isEmpty()) {
+            return;
+        }
+        try (WriteBatch batch = new WriteBatch()) {
+            for (byte[] key : keys) {
+                batch.delete(key);
+            }
+            db.write(writeOptions, batch);
+        } catch (RocksDBException exception) {
+            LOG.log(Level.WARNING, logPrefix + ", error=" + exception.getMessage(), exception);
         }
     }
 
@@ -236,11 +254,12 @@ public class RocksDbQos2InflightStore implements Qos2InflightStore {
     private static byte[] encodeOutbound(Qos2OutboundInflightMessage message) {
         byte[] topicBytes = message.topic() == null ? new byte[0] : message.topic().getBytes(StandardCharsets.UTF_8);
         byte[] payloadBytes = message.payload() == null ? new byte[0] : message.payload();
-        ByteBuffer buffer = ByteBuffer.allocate(1 + 4 + 8 + 4 + 4 + topicBytes.length + 4 + payloadBytes.length);
-        buffer.put(VALUE_OUTBOUND);
+        // v2: state 压缩为 1 byte，降低 inflight value 占用。
+        ByteBuffer buffer = ByteBuffer.allocate(1 + 4 + 8 + 1 + 4 + topicBytes.length + 4 + payloadBytes.length);
+        buffer.put(VALUE_OUTBOUND_V2);
         buffer.putInt(message.packetId());
         buffer.putLong(message.lastSentAtMs());
-        buffer.putInt(message.state());
+        buffer.put((byte) (message.state() & 0xFF));
         buffer.putInt(topicBytes.length);
         buffer.put(topicBytes);
         buffer.putInt(payloadBytes.length);
@@ -254,12 +273,15 @@ public class RocksDbQos2InflightStore implements Qos2InflightStore {
         }
         try {
             ByteBuffer buffer = ByteBuffer.wrap(raw);
-            if (buffer.get() != VALUE_OUTBOUND) {
+            byte marker = buffer.get();
+            if (marker != VALUE_OUTBOUND_V1 && marker != VALUE_OUTBOUND_V2) {
                 return null;
             }
             int packetId = buffer.getInt();
             long lastSentAtMs = buffer.getLong();
-            int state = buffer.getInt();
+            int state = marker == VALUE_OUTBOUND_V2
+                ? Byte.toUnsignedInt(buffer.get())
+                : buffer.getInt();
             int topicLen = buffer.getInt();
             if (topicLen < 0 || topicLen > buffer.remaining()) {
                 return null;

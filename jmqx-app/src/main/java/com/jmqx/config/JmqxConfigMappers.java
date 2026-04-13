@@ -4,8 +4,8 @@ import com.jmqx.acl.AclProperties;
 import com.jmqx.auth.AuthProperties;
 import com.jmqx.bridge.BridgeProperties;
 import com.jmqx.common.BrokerProperties;
-import com.jmqx.store.RetainedOverflowStrategy;
-import com.jmqx.store.RetainedStoreProperties;
+import com.jmqx.store.retained.RetainedOverflowStrategy;
+import com.jmqx.store.retained.RetainedStoreProperties;
 
 import java.util.ArrayList;
 import java.util.List;

@@ -1,6 +1,7 @@
-package com.jmqx.store;
+package com.jmqx.store.rocksdb;
 
 import com.jmqx.broker.core.WillMessage;
+import com.jmqx.store.will.WillMessageStore;
 import org.rocksdb.Options;
 import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
@@ -164,4 +165,3 @@ public class RocksDbWillMessageStore implements WillMessageStore {
         return value == null || value.isBlank();
     }
 }
-

@@ -24,11 +24,11 @@ import com.jmqx.router.global.GlobalSubscriptionMatch;
 import com.jmqx.router.global.GlobalSubscriptionRegistry;
 import com.jmqx.session.ClientSession;
 import com.jmqx.session.SessionRegistry;
-import com.jmqx.store.RetainedMessage;
-import com.jmqx.store.RetainedMessageStore;
-import com.jmqx.store.Qos1InflightStore;
-import com.jmqx.store.Qos2InflightStore;
-import com.jmqx.store.WillMessageStore;
+import com.jmqx.store.retained.RetainedMessage;
+import com.jmqx.store.retained.RetainedMessageStore;
+import com.jmqx.store.qos.Qos1InflightStore;
+import com.jmqx.store.qos.Qos2InflightStore;
+import com.jmqx.store.will.WillMessageStore;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
@@ -67,6 +67,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -101,6 +102,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     private static final long SESSION_EXPIRY_PERSISTENT = Long.MAX_VALUE;
     private static final long RETAINED_RETRY_INTERVAL_MS = 2000L;
     private static final long METADATA_COMMAND_RETRY_INTERVAL_MS = 2000L;
+    private static final long ADMIN_SUBSCRIPTIONS_SYNC_DEBOUNCE_MS = 300L;
     private static final long GLOBAL_MATCH_CACHE_TTL_MS = 200L;
     private static final int GLOBAL_MATCH_CACHE_MAX_TOPICS = 16_384;
     private static final GlobalSubscriptionMatch EMPTY_GLOBAL_MATCH =
@@ -130,10 +132,12 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     private final ConcurrentMap<String, SharedGroupNodeOrderSnapshot> sharedGroupNodeOrderSnapshots = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, CachedGlobalMatch> globalMatchCache = new ConcurrentHashMap<>();
     private final ThreadLocal<RouteScratch> routeScratchHolder = ThreadLocal.withInitial(RouteScratch::new);
+    private final ThreadLocal<DeliveryScratch> deliveryScratchHolder = ThreadLocal.withInitial(DeliveryScratch::new);
     private final RetainedCommandReplicator retainedCommandReplicator;
     private final BrokerRateLimiter rateLimiter;
-    private final ScheduledExecutorService qos1RetryExecutor;
+    private final ScheduledExecutorService maintenanceExecutor;
     private final ConcurrentMap<String, PendingMetadataCommand> pendingMetadataCommands = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, Long> adminSubscriptionsSyncDeadlineByClient = new ConcurrentHashMap<>();
 
 
     public MqttBrokerMessageHandler(
@@ -184,12 +188,12 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         this.maxWillPayloadBytes = maxWillPayloadBytes <= 0 ? 1024 * 1024 : maxWillPayloadBytes;
         this.rateLimiter = new BrokerRateLimiter(rateLimitConfig);
         this.retainedCommandReplicator = new RetainedCommandReplicator(this.metadataCommandGateway, this.nodeId, LOG);
-        this.qos1RetryExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
-            Thread thread = new Thread(runnable, "jmqx-qos1-retry");
+        this.maintenanceExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "jmqx-maintenance");
             thread.setDaemon(true);
             return thread;
         });
-        this.qos1RetryExecutor.scheduleAtFixedRate(
+        this.maintenanceExecutor.scheduleAtFixedRate(
             this::runPeriodicMaintenance,
             RETAINED_RETRY_INTERVAL_MS,
             RETAINED_RETRY_INTERVAL_MS,
@@ -457,7 +461,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             username,
             connectedAt.toEpochMilli()
         );
-        syncClientSubscriptionsForAdmin(clientId);
+        scheduleClientSubscriptionsSync(clientId);
         if (LOG.isLoggable(Level.FINE)) {
             LOG.fine("[CONNECT] accepted clientId=" + clientId
                 + ", connectionType=" + connectionType
@@ -484,6 +488,8 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         }
 
         List<Integer> grantedQos = new ArrayList<>();
+        List<String> firstLocalTopicFilters = new ArrayList<>();
+        Set<String> retainedReplayFilters = retainedEnabled ? new LinkedHashSet<>() : Collections.emptySet();
         for (MqttTopicSubscription subscription : message.payload().topicSubscriptions()) {
             String topicFilter = subscription.topicFilter();
             String normalizedFilter = SharedSubscription.normalizeTopicFilter(topicFilter);
@@ -505,11 +511,11 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             // 先更新本地订阅，再在首次订阅时同步全局路由。
             boolean firstLocal = subscriptionRegistry.subscribeAndCheckFirst(clientId, topicFilter, effectiveQos);
             if (firstLocal) {
-                applyGlobalRegisterAfterLocal(topicFilter);
+                firstLocalTopicFilters.add(topicFilter);
             }
             grantedQos.add(effectiveQos);
             if (retainedEnabled) {
-                replayRetained(ctx.channel(), normalizedFilter);
+                retainedReplayFilters.add(normalizedFilter);
             }
             LOG.info(() -> "[SUBSCRIBE] clientId=" + clientId + ", topicFilter=" + topicFilter
                     + ", qos=" + qos + ", effectiveQos=" + effectiveQos);
@@ -522,8 +528,13 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             MqttQoS mqttQoS = MqttQoS.valueOf(qos);
             subAckBuilder.addGrantedQos(mqttQoS);
         });
-        ctx.writeAndFlush(subAckBuilder.build());
-        syncClientSubscriptionsForAdmin(clientId);
+        ctx.write(subAckBuilder.build());
+        if (retainedEnabled && !retainedReplayFilters.isEmpty()) {
+            replayRetainedBatch(ctx.channel(), retainedReplayFilters);
+        }
+        ctx.flush();
+        submitGlobalRegisterBatchAsync(firstLocalTopicFilters);
+        scheduleClientSubscriptionsSync(clientId);
     }
 
     private void handleUnsubscribe(ChannelHandlerContext ctx, MqttUnsubscribeMessage message) {
@@ -544,7 +555,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             }
         });
         ctx.writeAndFlush(MqttMessageBuilders.unsubAck().packetId(message.variableHeader().messageId()).build());
-        syncClientSubscriptionsForAdmin(clientId);
+        scheduleClientSubscriptionsSync(clientId);
         LOG.fine(() -> "[UNSUBSCRIBE] clientId=" + clientId + ", topics=" + message.payload().topics());
     }
 
@@ -895,7 +906,9 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
      */
     private void deliverToLocalSubscribers(String topic, byte[] payload, Set<String> subscribers, int publishQos) {
         LOG.fine(() -> "[ROUTE][LOCAL] topic=" + topic + ", subscribers=" + subscribers.size());
-        Set<Channel> channelsToFlush = new LinkedHashSet<>();
+        DeliveryScratch deliveryScratch = deliveryScratchHolder.get();
+        Set<Channel> channelsToFlush = deliveryScratch.channelsToFlush();
+        channelsToFlush.clear();
         for (String subscriber : subscribers) {
             Optional<ClientSession> sessionOptional = sessionRegistry.get(subscriber);
             if (sessionOptional.isEmpty()) {
@@ -938,6 +951,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
                 channel.flush();
             }
         }
+        channelsToFlush.clear();
     }
 
     /**
@@ -1076,15 +1090,26 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         return merged;
     }
 
-    private void replayRetained(Channel channel, String topicFilter) {
-        List<RetainedMessage> retainedMessages = retainedMessageStore.findByTopicFilter(topicFilter);
-        for (RetainedMessage retained : retainedMessages) {
-            channel.writeAndFlush(MqttMessageBuilders.publish()
-                    .topicName(retained.topic())
-                    .retained(true)
-                    .qos(MqttQoS.AT_MOST_ONCE)
-                    .payload(Unpooled.wrappedBuffer(retained.payload()))
-                    .build());
+    /**
+     * 批量回放 retained，减少 SUBSCRIBE 场景的 flush 次数。
+     */
+    private void replayRetainedBatch(Channel channel, Set<String> topicFilters) {
+        if (channel == null || !channel.isActive() || topicFilters == null || topicFilters.isEmpty()) {
+            return;
+        }
+        for (String topicFilter : topicFilters) {
+            if (topicFilter == null || topicFilter.isBlank()) {
+                continue;
+            }
+            List<RetainedMessage> retainedMessages = retainedMessageStore.findByTopicFilter(topicFilter);
+            for (RetainedMessage retained : retainedMessages) {
+                channel.write(MqttMessageBuilders.publish()
+                        .topicName(retained.topic())
+                        .retained(true)
+                        .qos(MqttQoS.AT_MOST_ONCE)
+                        .payload(Unpooled.wrappedBuffer(retained.payload()))
+                        .build());
+            }
         }
     }
 
@@ -1171,6 +1196,34 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         } catch (Exception exception) {
             LOG.warning("[ADMIN] sync subscriptions failed, clientId=" + clientId + ", error=" + exception.getMessage());
         }
+    }
+
+    /**
+     * 管理端订阅同步防抖，避免高频 SUB/UNSUB 每次都做全量快照与上报。
+     */
+    private void scheduleClientSubscriptionsSync(String clientId) {
+        if (clientId == null || clientId.isBlank()) {
+            return;
+        }
+        long deadline = System.currentTimeMillis() + ADMIN_SUBSCRIPTIONS_SYNC_DEBOUNCE_MS;
+        adminSubscriptionsSyncDeadlineByClient.put(clientId, deadline);
+        try {
+            maintenanceExecutor.schedule(
+                    () -> trySyncClientSubscriptionsIfDue(clientId, deadline),
+                    ADMIN_SUBSCRIPTIONS_SYNC_DEBOUNCE_MS,
+                    TimeUnit.MILLISECONDS
+            );
+        } catch (RejectedExecutionException ignored) {
+        }
+    }
+
+    private void trySyncClientSubscriptionsIfDue(String clientId, long expectedDeadline) {
+        Long latest = adminSubscriptionsSyncDeadlineByClient.get(clientId);
+        if (latest == null || latest != expectedDeadline) {
+            return;
+        }
+        adminSubscriptionsSyncDeadlineByClient.remove(clientId, latest);
+        syncClientSubscriptionsForAdmin(clientId);
     }
 
     private String resolveClientIp(Channel channel) {
@@ -1285,6 +1338,24 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         ), "global-register topicFilter=" + topicFilter);
     }
 
+    /**
+     * SUBSCRIBE 报文内首次订阅批量异步提交全局路由，避免阻塞 I/O 线程。
+     */
+    private void submitGlobalRegisterBatchAsync(List<String> topicFilters) {
+        if (topicFilters == null || topicFilters.isEmpty()) {
+            return;
+        }
+        List<String> snapshot = new ArrayList<>(topicFilters);
+        try {
+            maintenanceExecutor.execute(() -> {
+                for (String topicFilter : snapshot) {
+                    applyGlobalRegisterAfterLocal(topicFilter);
+                }
+            });
+        } catch (RejectedExecutionException ignored) {
+        }
+    }
+
     private void applyGlobalUnregisterAfterLocal(String topicFilter) {
         if (globalSubscriptionRegistry == null || topicFilter == null || topicFilter.isBlank()) {
             return;
@@ -1321,14 +1392,14 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
 
     public void shutdown() {
         adminReporter.shutdown();
-        qos1RetryExecutor.shutdown();
+        maintenanceExecutor.shutdown();
         try {
-            if (!qos1RetryExecutor.awaitTermination(3, TimeUnit.SECONDS)) {
-                qos1RetryExecutor.shutdownNow();
+            if (!maintenanceExecutor.awaitTermination(3, TimeUnit.SECONDS)) {
+                maintenanceExecutor.shutdownNow();
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            qos1RetryExecutor.shutdownNow();
+            maintenanceExecutor.shutdownNow();
         } finally {
             inflightManager.close();
         }
@@ -1476,6 +1547,17 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
 
         private Map<String, ClusterMessageDispatcher.DispatchTarget> remoteTargetPlans() {
             return remoteTargetPlans;
+        }
+    }
+
+    /**
+     * 本地投递热路径复用容器，避免每条消息都创建 flush 集合。
+     */
+    private static final class DeliveryScratch {
+        private final Set<Channel> channelsToFlush = new LinkedHashSet<>();
+
+        private Set<Channel> channelsToFlush() {
+            return channelsToFlush;
         }
     }
 

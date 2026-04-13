@@ -1,4 +1,4 @@
-package com.jmqx.store;
+package com.jmqx.store.retained;
 
 /**
  * Retained 存储参数。

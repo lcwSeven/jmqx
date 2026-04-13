@@ -4,16 +4,19 @@ import com.jmqx.broker.protocol.MqttPacketFactory;
 import com.jmqx.router.SubscriptionRegistry;
 import com.jmqx.session.ClientSession;
 import com.jmqx.session.SessionRegistry;
-import com.jmqx.store.Qos1InflightMessage;
-import com.jmqx.store.Qos1InflightStore;
-import com.jmqx.store.Qos2InboundInflightMessage;
-import com.jmqx.store.Qos2InflightStore;
-import com.jmqx.store.Qos2OutboundInflightMessage;
+import com.jmqx.store.qos.Qos1InflightMessage;
+import com.jmqx.store.qos.Qos1InflightStore;
+import com.jmqx.store.qos.Qos2InboundInflightMessage;
+import com.jmqx.store.qos.Qos2InflightStore;
+import com.jmqx.store.qos.Qos2OutboundInflightMessage;
 import io.netty.channel.Channel;
 import io.netty.handler.codec.mqtt.MqttQoS;
 
+import java.util.concurrent.DelayQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.Delayed;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Logger;
 
@@ -30,6 +33,7 @@ public class BrokerInflightManager {
     private static final int QOS1_MAX_RETRIES = 3;
     private static final long QOS2_RETRY_INTERVAL_MS = 5000L;
     private static final int QOS2_MAX_RETRIES = 5;
+    private static final int RETRY_POLL_LIMIT_PER_TICK = 4096;
 
     private final Qos1InflightStore qos1InflightStore;
     private final Qos2InflightStore qos2InflightStore;
@@ -37,6 +41,7 @@ public class BrokerInflightManager {
     private final ConcurrentMap<String, AtomicInteger> outboundPacketIdByClient = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, ConcurrentMap<Integer, OutboundInflightMessage>> outboundInflightByClient = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, ConcurrentMap<Integer, InboundQos2Publish>> inboundQos2ByClient = new ConcurrentHashMap<>();
+    private final DelayQueue<InflightRetryTask> retryQueue = new DelayQueue<>();
 
     public BrokerInflightManager(Qos1InflightStore qos1InflightStore, Qos2InflightStore qos2InflightStore, Logger logger) {
         this.qos1InflightStore = qos1InflightStore == null ? Qos1InflightStore.NOOP : qos1InflightStore;
@@ -173,8 +178,7 @@ public class BrokerInflightManager {
     }
 
     public void retryInflight(SessionRegistry sessionRegistry) {
-        retryInflightQos1Messages(sessionRegistry);
-        retryInflightQos2Messages(sessionRegistry);
+        processDueRetryTasks(sessionRegistry);
     }
 
     public void restoreInflightState(String clientId, boolean sessionPresent, Channel channel) {
@@ -211,54 +215,55 @@ public class BrokerInflightManager {
         qos2InflightStore.close();
     }
 
-    private void retryInflightQos1Messages(SessionRegistry sessionRegistry) {
+    private void processDueRetryTasks(SessionRegistry sessionRegistry) {
         long now = System.currentTimeMillis();
-        outboundInflightByClient.forEach((clientId, inflight) -> {
-            ClientSession session = sessionRegistry == null ? null : sessionRegistry.get(clientId).orElse(null);
-            if (session == null || session.channel() == null || !session.channel().isActive()) {
+        int processed = 0;
+        while (processed < RETRY_POLL_LIMIT_PER_TICK) {
+            InflightRetryTask task = retryQueue.poll();
+            if (task == null) {
                 return;
             }
-            Channel channel = session.channel();
-            inflight.forEach((packetId, entry) -> {
-                if (entry.qos() != MqttQoS.AT_LEAST_ONCE.value()) {
-                    return;
+            processed++;
+            String clientId = task.clientId();
+            int packetId = task.packetId();
+            ConcurrentMap<Integer, OutboundInflightMessage> inflight = outboundInflightByClient.get(clientId);
+            if (inflight == null) {
+                continue;
+            }
+            OutboundInflightMessage entry = inflight.get(packetId);
+            if (entry == null) {
+                if (inflight.isEmpty()) {
+                    outboundInflightByClient.remove(clientId, inflight);
                 }
-                if (now - entry.lastSentAtMs() < QOS1_RETRY_INTERVAL_MS) {
-                    return;
+                continue;
+            }
+            long expectedRetryAt = entry.lastSentAtMs() + retryIntervalMs(entry);
+            // 旧任务（例如状态已更新后留下的历史重试任务）直接丢弃，避免重复入队造成队列膨胀。
+            if (task.retryAtMs() != expectedRetryAt) {
+                continue;
+            }
+            if (expectedRetryAt > now) {
+                retryQueue.offer(new InflightRetryTask(clientId, packetId, expectedRetryAt));
+                continue;
+            }
+            ClientSession session = sessionRegistry == null ? null : sessionRegistry.get(clientId).orElse(null);
+            Channel channel = session == null ? null : session.channel();
+            if (channel == null || !channel.isActive()) {
+                retryQueue.offer(new InflightRetryTask(clientId, packetId, now + retryIntervalMs(entry)));
+                continue;
+            }
+            if (reachRetryLimit(entry)) {
+                removeOutboundInflight(clientId, packetId, inflight);
+                if (inflight.isEmpty()) {
+                    outboundInflightByClient.remove(clientId, inflight);
                 }
-                if (entry.retryCount() >= QOS1_MAX_RETRIES) {
-                    removeOutboundInflight(clientId, packetId, inflight);
-                    return;
-                }
+                continue;
+            }
+            if (entry.qos() == MqttQoS.AT_LEAST_ONCE.value()) {
                 channel.writeAndFlush(MqttPacketFactory.buildQos1PublishMessage(entry.topic(), entry.payload(), packetId, true));
                 OutboundInflightMessage retried = entry.nextQos1Retry(now);
                 putOutboundInflight(clientId, packetId, retried, inflight);
-            });
-            if (inflight.isEmpty()) {
-                outboundInflightByClient.remove(clientId, inflight);
-            }
-        });
-    }
-
-    private void retryInflightQos2Messages(SessionRegistry sessionRegistry) {
-        long now = System.currentTimeMillis();
-        outboundInflightByClient.forEach((clientId, inflight) -> {
-            ClientSession session = sessionRegistry == null ? null : sessionRegistry.get(clientId).orElse(null);
-            if (session == null || session.channel() == null || !session.channel().isActive()) {
-                return;
-            }
-            Channel channel = session.channel();
-            inflight.forEach((packetId, entry) -> {
-                if (entry.qos() != MqttQoS.EXACTLY_ONCE.value()) {
-                    return;
-                }
-                if (now - entry.lastSentAtMs() < QOS2_RETRY_INTERVAL_MS) {
-                    return;
-                }
-                if (entry.retryCount() >= QOS2_MAX_RETRIES) {
-                    removeOutboundInflight(clientId, packetId, inflight);
-                    return;
-                }
+            } else if (entry.qos() == MqttQoS.EXACTLY_ONCE.value()) {
                 if (entry.qos2State() == Qos2State.WAIT_PUBCOMP) {
                     channel.writeAndFlush(MqttPacketFactory.buildPubRelMessage(packetId));
                 } else {
@@ -266,11 +271,11 @@ public class BrokerInflightManager {
                 }
                 OutboundInflightMessage retried = entry.nextQos2Retry(now);
                 putOutboundInflight(clientId, packetId, retried, inflight);
-            });
+            }
             if (inflight.isEmpty()) {
                 outboundInflightByClient.remove(clientId, inflight);
             }
-        });
+        }
     }
 
     private void restoreOutboundInflightState(String clientId, Channel channel) {
@@ -349,6 +354,7 @@ public class BrokerInflightManager {
             return;
         }
         inflight.put(packetId, message);
+        scheduleRetry(clientId, packetId, message);
         if (message.qos() == MqttQoS.AT_LEAST_ONCE.value()) {
             qos1InflightStore.save(clientId, new Qos1InflightMessage(
                     packetId,
@@ -380,6 +386,54 @@ public class BrokerInflightManager {
         }
         qos1InflightStore.remove(clientId, packetId);
         qos2InflightStore.removeOutbound(clientId, packetId);
+    }
+
+    private void scheduleRetry(String clientId, int packetId, OutboundInflightMessage message) {
+        if (clientId == null || clientId.isBlank() || packetId <= 0 || message == null) {
+            return;
+        }
+        if (message.qos() != MqttQoS.AT_LEAST_ONCE.value() && message.qos() != MqttQoS.EXACTLY_ONCE.value()) {
+            return;
+        }
+        long retryAtMs = message.lastSentAtMs() + retryIntervalMs(message);
+        retryQueue.offer(new InflightRetryTask(clientId, packetId, retryAtMs));
+    }
+
+    private static long retryIntervalMs(OutboundInflightMessage message) {
+        if (message == null) {
+            return QOS1_RETRY_INTERVAL_MS;
+        }
+        return message.qos() == MqttQoS.EXACTLY_ONCE.value() ? QOS2_RETRY_INTERVAL_MS : QOS1_RETRY_INTERVAL_MS;
+    }
+
+    private static boolean reachRetryLimit(OutboundInflightMessage message) {
+        if (message == null) {
+            return true;
+        }
+        if (message.qos() == MqttQoS.EXACTLY_ONCE.value()) {
+            return message.retryCount() >= QOS2_MAX_RETRIES;
+        }
+        return message.retryCount() >= QOS1_MAX_RETRIES;
+    }
+
+    private record InflightRetryTask(String clientId, int packetId, long retryAtMs) implements Delayed {
+        @Override
+        public long getDelay(TimeUnit unit) {
+            long delayMs = retryAtMs - System.currentTimeMillis();
+            return unit.convert(delayMs, TimeUnit.MILLISECONDS);
+        }
+
+        @Override
+        public int compareTo(Delayed other) {
+            if (other == this) {
+                return 0;
+            }
+            long diff = getDelay(TimeUnit.MILLISECONDS) - other.getDelay(TimeUnit.MILLISECONDS);
+            if (diff == 0L) {
+                return 0;
+            }
+            return diff < 0 ? -1 : 1;
+        }
     }
 
 }

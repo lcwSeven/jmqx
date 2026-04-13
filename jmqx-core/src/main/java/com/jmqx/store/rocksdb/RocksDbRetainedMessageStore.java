@@ -1,6 +1,11 @@
-package com.jmqx.store;
+package com.jmqx.store.rocksdb;
 
 import com.jmqx.common.TopicMatcher;
+import com.jmqx.store.retained.RetainedMessage;
+import com.jmqx.store.retained.RetainedMessageStore;
+import com.jmqx.store.retained.RetainedOverflowStrategy;
+import com.jmqx.store.retained.RetainedStoreMetrics;
+import com.jmqx.store.retained.RetainedStoreProperties;
 import org.rocksdb.Options;
 import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
