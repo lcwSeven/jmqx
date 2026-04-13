@@ -56,7 +56,7 @@ public class AdminPanelServer {
     private final SessionRegistry sessionRegistry;
     private final SubscriptionRegistry subscriptionRegistry;
     private final ConnectionMetrics connectionMetrics;
-    private final EmbeddedAdminStateStore stateStore;
+    private final AdminStateRepository stateStore;
     private final SecurityConfigUpdater securityConfigUpdater;
     private final ClusterConfigUpdater clusterConfigUpdater;
     private final HttpClient httpClient;
@@ -73,6 +73,7 @@ public class AdminPanelServer {
                             SessionRegistry sessionRegistry,
                             SubscriptionRegistry subscriptionRegistry,
                             ConnectionMetrics connectionMetrics,
+                            AdminStateRepository stateStore,
                             EmbeddedAdminStateStore.SecurityConfig initialSecurityConfig,
                             EmbeddedAdminStateStore.ClusterConfig initialClusterConfig,
                             SecurityConfigUpdater securityConfigUpdater,
@@ -90,7 +91,7 @@ public class AdminPanelServer {
         this.sessionRegistry = sessionRegistry;
         this.subscriptionRegistry = subscriptionRegistry;
         this.connectionMetrics = connectionMetrics;
-        this.stateStore = new EmbeddedAdminStateStore();
+        this.stateStore = stateStore == null ? new EmbeddedAdminStateStore() : stateStore;
         this.stateStore.createCluster(this.defaultClusterId, "默认集群", this.nodeIp + ":7800");
         if (initialSecurityConfig != null) {
             this.stateStore.setSecurityConfig(this.defaultClusterId, initialSecurityConfig);
@@ -128,6 +129,7 @@ public class AdminPanelServer {
             server.stop(0);
             server = null;
         }
+        stateStore.close();
     }
 
     private final class RootHandler implements HttpHandler {
@@ -202,14 +204,29 @@ public class AdminPanelServer {
             writeJson(exchange, 200, buildOverviewJson(clusterId));
             return;
         }
+        if (path.startsWith("/api/v1/internal/nodes/") && path.endsWith("/metrics") && "POST".equals(method)) {
+            String nodeId = decode(path.substring("/api/v1/internal/nodes/".length(), path.length() - "/metrics".length()));
+            EmbeddedAdminStateStore.NodeMetrics metrics = parseNodeMetrics(nodeId, body, clusterId);
+            stateStore.upsertNodeMetrics(clusterId, metrics);
+            writeJson(exchange, 200, "{\"ok\":true}");
+            return;
+        }
         if ("/api/v1/cluster/config".equals(path) && "GET".equals(method)) {
             writeJson(exchange, 200, toClusterConfigJson(stateStore.getClusterConfig(clusterId)));
             return;
         }
         if ("/api/v1/cluster/config".equals(path) && "PUT".equals(method)) {
-            EmbeddedAdminStateStore.ClusterConfig config = parseClusterConfig(body, stateStore.getClusterConfig(clusterId));
+            EmbeddedAdminStateStore.ClusterConfig before = stateStore.getClusterConfig(clusterId);
+            EmbeddedAdminStateStore.ClusterConfig config = parseClusterConfig(body, before);
             clusterConfigUpdater.apply(clusterId, config);
             stateStore.setClusterConfig(clusterId, config);
+            appendAuditLog(
+                    clusterId,
+                    "cluster.config.updated",
+                    resolveAuditSource(exchange),
+                    toClusterConfigJson(before),
+                    toClusterConfigJson(config)
+            );
             writeJson(exchange, 200, toClusterConfigJson(config));
             return;
         }
@@ -217,14 +234,27 @@ public class AdminPanelServer {
             writeJson(exchange, 200, toFullConfigJson(stateStore.getFullConfig(clusterId)));
             return;
         }
+        if ("/api/v1/audit/logs".equals(path) && "GET".equals(method)) {
+            int limit = Math.min(Math.max(parseInt(query.get("limit"), 20), 1), 200);
+            writeJson(exchange, 200, toAuditLogsJson(stateStore.listAuditLogs(clusterId, limit)));
+            return;
+        }
         if ("/api/v1/security/config".equals(path) && "GET".equals(method)) {
             writeJson(exchange, 200, toSecurityConfigJson(stateStore.getSecurityConfig(clusterId)));
             return;
         }
         if ("/api/v1/security/config".equals(path) && "PUT".equals(method)) {
-            EmbeddedAdminStateStore.SecurityConfig config = parseSecurityConfig(body, stateStore.getSecurityConfig(clusterId));
+            EmbeddedAdminStateStore.SecurityConfig before = stateStore.getSecurityConfig(clusterId);
+            EmbeddedAdminStateStore.SecurityConfig config = parseSecurityConfig(body, before);
             securityConfigUpdater.apply(clusterId, config);
             stateStore.setSecurityConfig(clusterId, config);
+            appendAuditLog(
+                    clusterId,
+                    "security.config.updated",
+                    resolveAuditSource(exchange),
+                    toSecurityConfigJson(before),
+                    toSecurityConfigJson(config)
+            );
             writeJson(exchange, 200, toSecurityConfigJson(config));
             return;
         }
@@ -323,26 +353,46 @@ public class AdminPanelServer {
     }
 
     private String buildOverviewJson(String clusterId) {
-        int connections = connectionMetrics == null ? 0 : connectionMetrics.getActiveConnections();
-        long inbound = connectionMetrics == null ? 0 : connectionMetrics.getInboundBytes();
-        long outbound = connectionMetrics == null ? 0 : connectionMetrics.getOutboundBytes();
-        long now = System.currentTimeMillis();
-        String node = "{"
-                + "\"nodeId\":\"" + escape(nodeId) + "\","
-                + "\"nodeIp\":\"" + escape(nodeIp) + "\","
-                + "\"role\":\"" + escape(nodeRole) + "\","
-                + "\"inboundBytes\":" + inbound + ","
-                + "\"outboundBytes\":" + outbound + ","
-                + "\"connectedClients\":" + connections + ","
-                + "\"lastReportTime\":" + now
-                + "}";
+        upsertLocalNodeSnapshot(clusterId);
+        List<EmbeddedAdminStateStore.NodeMetrics> nodes = stateStore.listNodeMetrics(clusterId);
+        int connections = 0;
+        long inbound = 0;
+        long outbound = 0;
+        StringBuilder nodeJson = new StringBuilder("[");
+        for (int i = 0; i < nodes.size(); i++) {
+            EmbeddedAdminStateStore.NodeMetrics node = nodes.get(i);
+            if (i > 0) {
+                nodeJson.append(",");
+            }
+            connections += Math.max(0, node.connectedClients());
+            inbound += Math.max(0, node.inboundBytes());
+            outbound += Math.max(0, node.outboundBytes());
+            nodeJson.append(toNodeMetricsJson(node));
+        }
+        nodeJson.append("]");
         return "{"
                 + "\"clusterId\":\"" + escape(clusterId) + "\","
                 + "\"totalConnections\":" + connections + ","
                 + "\"totalInboundBytes\":" + inbound + ","
                 + "\"totalOutboundBytes\":" + outbound + ","
-                + "\"nodes\":[" + node + "]"
+                + "\"nodes\":" + nodeJson
                 + "}";
+    }
+
+    private void upsertLocalNodeSnapshot(String clusterId) {
+        int connections = connectionMetrics == null ? 0 : connectionMetrics.getActiveConnections();
+        long inbound = connectionMetrics == null ? 0 : connectionMetrics.getInboundBytes();
+        long outbound = connectionMetrics == null ? 0 : connectionMetrics.getOutboundBytes();
+        EmbeddedAdminStateStore.NodeMetrics localMetrics = new EmbeddedAdminStateStore.NodeMetrics(
+                nodeId,
+                nodeIp,
+                nodeRole,
+                inbound,
+                outbound,
+                connections,
+                System.currentTimeMillis()
+        );
+        stateStore.upsertNodeMetrics(clusterId, localMetrics);
     }
 
     private String buildClientsJson(Map<String, String> query) {
@@ -478,6 +528,42 @@ public class AdminPanelServer {
                 + "}";
     }
 
+    private static String toNodeMetricsJson(EmbeddedAdminStateStore.NodeMetrics metrics) {
+        return "{"
+                + "\"nodeId\":\"" + escape(metrics.nodeId()) + "\","
+                + "\"nodeIp\":\"" + escape(metrics.nodeIp()) + "\","
+                + "\"role\":\"" + escape(metrics.role()) + "\","
+                + "\"inboundBytes\":" + metrics.inboundBytes() + ","
+                + "\"outboundBytes\":" + metrics.outboundBytes() + ","
+                + "\"connectedClients\":" + metrics.connectedClients() + ","
+                + "\"lastReportTime\":" + metrics.reportTime()
+                + "}";
+    }
+
+    private static String toAuditLogJson(EmbeddedAdminStateStore.AuditLogEntry entry) {
+        return "{"
+                + "\"id\":\"" + escape(entry.id()) + "\","
+                + "\"clusterId\":\"" + escape(entry.clusterId()) + "\","
+                + "\"action\":\"" + escape(entry.action()) + "\","
+                + "\"source\":\"" + escape(entry.source()) + "\","
+                + "\"timestamp\":" + entry.timestamp() + ","
+                + "\"beforeJson\":\"" + escape(entry.beforeJson()) + "\","
+                + "\"afterJson\":\"" + escape(entry.afterJson()) + "\""
+                + "}";
+    }
+
+    private static String toAuditLogsJson(List<EmbeddedAdminStateStore.AuditLogEntry> entries) {
+        StringBuilder builder = new StringBuilder("[");
+        for (int i = 0; i < entries.size(); i++) {
+            if (i > 0) {
+                builder.append(",");
+            }
+            builder.append(toAuditLogJson(entries.get(i)));
+        }
+        builder.append("]");
+        return builder.toString();
+    }
+
     private static String toStringArray(List<String> values) {
         StringBuilder builder = new StringBuilder("[");
         for (int i = 0; i < values.size(); i++) {
@@ -514,6 +600,38 @@ public class AdminPanelServer {
             authChain = current.authChain();
         }
         return new EmbeddedAdminStateStore.SecurityConfig(aclEnabled, aclChain, authEnabled, authChain, cacheTtlMs);
+    }
+
+    private EmbeddedAdminStateStore.NodeMetrics parseNodeMetrics(String reportedNodeId, String body, String clusterId) {
+        String effectiveNodeId = normalize(reportedNodeId, nodeId);
+        String effectiveNodeIp = normalize(extractString(body, "nodeIp"), "unknown");
+        long inbound = Math.max(0L, extractLong(body, "inboundBytes", 0L));
+        long outbound = Math.max(0L, extractLong(body, "outboundBytes", 0L));
+        int connections = Math.max(0, extractInt(body, "connectedClients", 0));
+        long reportTime = extractLong(body, "reportTime", System.currentTimeMillis());
+
+        String role = "";
+        for (EmbeddedAdminStateStore.NodeMetrics current : stateStore.listNodeMetrics(clusterId)) {
+            if (effectiveNodeId.equals(current.nodeId())) {
+                role = current.role();
+                break;
+            }
+        }
+        if (effectiveNodeId.equals(nodeId) && (role == null || role.isBlank())) {
+            role = nodeRole;
+        }
+        if (role == null || role.isBlank()) {
+            role = "UNKNOWN";
+        }
+        return new EmbeddedAdminStateStore.NodeMetrics(
+                effectiveNodeId,
+                effectiveNodeIp,
+                role,
+                inbound,
+                outbound,
+                connections,
+                reportTime
+        );
     }
 
     private static Map<String, String> parseQuery(String raw) {
@@ -666,6 +784,29 @@ public class AdminPanelServer {
             return value.substring(0, value.length() - 1);
         }
         return value;
+    }
+
+    private void appendAuditLog(String clusterId, String action, String source, String beforeJson, String afterJson) {
+        long now = System.currentTimeMillis();
+        stateStore.appendAuditLog(clusterId, new EmbeddedAdminStateStore.AuditLogEntry(
+                clusterId + "-" + now,
+                clusterId,
+                action,
+                source,
+                now,
+                beforeJson,
+                afterJson
+        ));
+    }
+
+    private static String resolveAuditSource(HttpExchange exchange) {
+        if (exchange == null || exchange.getRemoteAddress() == null) {
+            return "unknown";
+        }
+        if (exchange.getRemoteAddress().getAddress() != null) {
+            return exchange.getRemoteAddress().getAddress().getHostAddress();
+        }
+        return String.valueOf(exchange.getRemoteAddress());
     }
 
     private static String escape(String value) {

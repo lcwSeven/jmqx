@@ -264,6 +264,73 @@ body {
     font-size: 16px;
 }
 
+.audit-list {
+    display: grid;
+    gap: 12px;
+    margin-top: 12px;
+}
+
+.audit-card {
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 14px;
+    background: linear-gradient(180deg, #ffffff, #f6fbf8);
+}
+
+.audit-card-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+}
+
+.audit-card-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.audit-action {
+    font-size: 16px;
+    font-weight: 700;
+}
+
+.audit-meta,
+.audit-label {
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.audit-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    margin-top: 14px;
+}
+
+.audit-json {
+    margin: 6px 0 0;
+    padding: 12px;
+    border-radius: 12px;
+    border: 1px solid var(--line);
+    background: #f4faf6;
+    color: #284335;
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.audit-select {
+    min-width: 180px;
+}
+
+.audit-btn {
+    padding: 6px 12px;
+    font-size: 12px;
+}
+
 .toolbar {
     display: flex;
     flex-wrap: wrap;
@@ -716,6 +783,9 @@ textarea {
     .hero-metrics {
         min-width: 0;
         width: 100%;
+        grid-template-columns: 1fr;
+    }
+    .audit-grid {
         grid-template-columns: 1fr;
     }
     .section-head {

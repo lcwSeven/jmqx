@@ -65,3 +65,7 @@ export function saveClusterConfig(clusterId, payload) {
 export function fetchClusterFullConfig(clusterId) {
     return request("/api/v1/cluster/full-config?clusterId=" + encodeURIComponent(clusterId));
 }
+
+export function fetchAuditLogs(clusterId, limit = 20) {
+    return request("/api/v1/audit/logs?clusterId=" + encodeURIComponent(clusterId) + "&limit=" + encodeURIComponent(limit));
+}

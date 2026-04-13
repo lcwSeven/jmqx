@@ -38,6 +38,13 @@ JMQX 管理页面是 `jmqx-app` 的内嵌控制台，目标是提供：
 - `jmqx-app/src/main/java/com/jmqx/admin/embedded/EmbeddedAdminStateStore.java`
 - `jmqx-core/src/main/java/com/jmqx/broker/MqttBrokerMessageHandler.java`
 
+集群统一概览前提：
+
+- 需要在各节点开启 `jmqx.admin.enabled=true`
+- 需要让各节点的 `jmqx.admin.url` 指向同一个管理端，例如 `http://10.0.0.10:18081`
+- 需要让同一集群内节点使用相同的 `jmqx.admin.clusterId`
+- 管理端会通过 `/api/v1/internal/nodes/{nodeId}/metrics` 聚合各节点指标，再由 `/api/v1/cluster/overview` 对外返回
+
 ## 4. 功能清单
 
 ### 4.1 集群概览
@@ -78,12 +85,18 @@ JMQX 管理页面是 `jmqx-app` 的内嵌控制台，目标是提供：
 
 ### 6.1 读链路（已打通）
 
-- `/cluster/overview` 读取 `ConnectionMetrics` 与节点信息
+- `/cluster/overview` 读取管理端已聚合的节点指标；若远端节点尚未上报，则至少包含当前节点快照
 - `/clients*` 读取 `SessionRegistry` 与 `SubscriptionRegistry`
 - 页面实时流订阅：
   - `$SYS/dashboard/{clusterId}/cluster/overview`
   - `$SYS/dashboard/{clusterId}/client/connected`
   - `$SYS/dashboard/{clusterId}/client/disconnected`
+
+### 6.1.1 集群指标上报链路
+
+- Broker 节点通过 `HttpAdminReporter` 周期性上报节点指标
+- 上报地址由 `jmqx.admin.url` 决定
+- 建议将所有节点统一上报到承载管理页的节点 `http://<admin-host>:18081`
 
 ### 6.2 写链路（已动态生效）
 

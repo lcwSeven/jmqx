@@ -2,8 +2,10 @@ package com.jmqx;
 
 import com.jmqx.admin.AdminReporter;
 import com.jmqx.admin.HttpAdminReporter;
+import com.jmqx.admin.embedded.AdminStateRepository;
 import com.jmqx.admin.embedded.AdminPanelServer;
 import com.jmqx.admin.embedded.EmbeddedAdminStateStore;
+import com.jmqx.admin.embedded.RocksDbAdminStateStore;
 import com.jmqx.acl.AclAuthorizerFactory;
 import com.jmqx.acl.AclProperties;
 import com.jmqx.acl.ReloadableAclAuthorizer;
@@ -589,7 +591,7 @@ public class JmqxApplication {
     private static AdminSyncSettings loadAdminSyncSettings(JmqxConfig config) {
         return new AdminSyncSettings(
                 getBooleanProperty(config, "jmqx.admin.enabled", false),
-                getStringProperty(config, "jmqx.admin.url", "http://127.0.0.1:18080"),
+                getStringProperty(config, "jmqx.admin.url", "http://127.0.0.1:18081"),
                 getStringProperty(config, "jmqx.admin.clusterId", "default"),
                 getStringProperty(config, "jmqx.admin.nodeIp", ""),
                 getIntProperty(config, "jmqx.admin.http.connectTimeoutMs", 1500),
@@ -605,7 +607,9 @@ public class JmqxApplication {
                 getStringProperty(config, "jmqx.admin.panel.host", "0.0.0.0"),
                 getIntProperty(config, "jmqx.admin.panel.port", 18081),
                 getStringProperty(config, "jmqx.admin.panel.basePath", "/admin"),
-                getStringProperty(config, "jmqx.admin.panel.backendUrl", "http://127.0.0.1:18080")
+                getStringProperty(config, "jmqx.admin.panel.backendUrl", "http://127.0.0.1:18080"),
+                getBooleanProperty(config, "jmqx.admin.panel.persistence.enabled", true),
+                getStringProperty(config, "jmqx.admin.panel.persistence.rocksdb.path", "data/admin-state-rocksdb")
         );
     }
 
@@ -687,6 +691,7 @@ public class JmqxApplication {
             AdminPanelServer.ClusterConfigUpdater clusterConfigUpdater
     ) {
         String panelNodeIp = resolveLocalNodeIp();
+        AdminStateRepository stateRepository = buildAdminStateRepository(settings);
         AdminPanelServer server = new AdminPanelServer(
                 settings.host(),
                 settings.port(),
@@ -699,6 +704,7 @@ public class JmqxApplication {
                 sessionRegistry,
                 subscriptionRegistry,
                 connectionMetrics,
+                stateRepository,
                 initialSecurityConfig,
                 initialClusterConfig,
                 securityConfigUpdater,
@@ -708,6 +714,13 @@ public class JmqxApplication {
             server.start();
         }
         return server;
+    }
+
+    private static AdminStateRepository buildAdminStateRepository(AdminPanelSettings settings) {
+        if (settings == null || !settings.persistenceEnabled()) {
+            return new EmbeddedAdminStateStore();
+        }
+        return new RocksDbAdminStateStore(settings.persistenceRocksdbPath());
     }
 
     private static MetadataRuntime buildMetadataRuntime(
@@ -1105,7 +1118,9 @@ public class JmqxApplication {
             String host,
             int port,
             String basePath,
-            String backendUrl
+            String backendUrl,
+            boolean persistenceEnabled,
+            String persistenceRocksdbPath
     ) {
     }
 

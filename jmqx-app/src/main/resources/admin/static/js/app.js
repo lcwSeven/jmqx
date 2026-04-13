@@ -1,4 +1,5 @@
 import {
+    fetchAuditLogs,
     fetchClientDetail,
     fetchClients,
     fetchClusterConfig,
@@ -25,6 +26,9 @@ createApp({
             clients: { records: [], total: 0, pageNo: 1, pageSize: 20 },
             search: { clientId: "", userName: "", pageNo: 1, pageSize: 20 },
             selectedClient: null,
+            auditLogs: [],
+            auditFilter: "all",
+            expandedAuditIds: [],
             securityConfig: { aclEnabled: true, aclChain: ["file"], authEnabled: true, authChain: ["file"], cacheTtlMs: 60000 },
             clusterConfig: { coreNodes: ["core-1:9801"], replicantNodes: [], coreAcceptClientConnections: true, sharedSubscriptionMaxMembersPerGroup: 10000 },
             authCreateMode: false,
@@ -59,7 +63,8 @@ createApp({
                 clients: this.selectedClient ? "客户端详情" : "客户端列表",
                 acl: "ACL 鉴权",
                 auth: this.authCreateMode ? "创建认证" : "连接鉴权",
-                cluster: "集群配置"
+                cluster: "集群配置",
+                audit: "操作审计"
             };
             return labels[this.activeMenu] || "JMQX Admin";
         },
@@ -69,7 +74,8 @@ createApp({
                 clients: "搜索在线客户端，快速定位连接和订阅信息。",
                 acl: "维护主题访问策略与鉴权缓存设置。",
                 auth: "统一管理客户端接入认证与数据源配置。",
-                cluster: "调整节点角色、共享订阅容量和集群行为。"
+                cluster: "调整节点角色、共享订阅容量和集群行为。",
+                audit: "查看配置变更来源、时间与前后快照。"
             };
             return descriptions[this.activeMenu] || "";
         },
@@ -98,6 +104,29 @@ createApp({
             const total = Number(this.clients.total || 0);
             const keyword = [this.search.clientId, this.search.userName].filter(Boolean).join(" / ");
             return keyword ? `共 ${total} 条结果，筛选条件：${keyword}` : `共 ${total} 个在线客户端`;
+        },
+        auditSummaryText() {
+            return `最近 ${Array.isArray(this.auditLogs) ? this.auditLogs.length : 0} 条审计记录`;
+        },
+        filteredAuditLogs() {
+            if (!Array.isArray(this.auditLogs)) {
+                return [];
+            }
+            if (this.auditFilter === "all") {
+                return this.auditLogs;
+            }
+            return this.auditLogs.filter(entry => entry && entry.action === this.auditFilter);
+        },
+        auditActions() {
+            const values = new Set(["all"]);
+            if (Array.isArray(this.auditLogs)) {
+                this.auditLogs.forEach(entry => {
+                    if (entry && entry.action) {
+                        values.add(entry.action);
+                    }
+                });
+            }
+            return Array.from(values);
         }
     },
     async mounted() {
@@ -132,7 +161,8 @@ createApp({
                     this.refreshOverview(),
                     this.queryClients(),
                     this.loadSecurityConfig(),
-                    this.loadClusterConfig()
+                    this.loadClusterConfig(),
+                    this.loadAuditLogs()
                 ]);
             } catch (e) {
                 this.error = "加载集群数据失败: " + e.message;
@@ -285,6 +315,10 @@ createApp({
         async loadSecurityConfig() {
             this.securityConfig = await fetchSecurityConfig(this.currentClusterId);
         },
+        async loadAuditLogs() {
+            this.auditLogs = await fetchAuditLogs(this.currentClusterId, 50);
+            this.expandedAuditIds = [];
+        },
         async saveSecurityConfig() {
             try {
                 const payload = {
@@ -293,6 +327,7 @@ createApp({
                     authChain: this.toCommaList(this.securityConfig.authChain)
                 };
                 await saveSecurityConfig(this.currentClusterId, payload);
+                await this.loadAuditLogs();
                 this.message = "安全配置保存成功";
                 this.error = "";
             } catch (e) {
@@ -430,6 +465,7 @@ createApp({
                     replicantNodes: this.toLineList(this.clusterConfig.replicantNodes)
                 };
                 await saveClusterConfig(this.currentClusterId, payload);
+                await this.loadAuditLogs();
                 this.message = "集群配置保存成功";
                 this.error = "";
             } catch (e) {
@@ -468,6 +504,54 @@ createApp({
             const num = Number(value || 0);
             return Number.isFinite(num) ? num.toLocaleString() : "0";
         },
+        formatJsonPreview(value) {
+            if (!value) {
+                return "-";
+            }
+            try {
+                return JSON.stringify(JSON.parse(value), null, 2);
+            } catch (e) {
+                return value;
+            }
+        },
+        isAuditExpanded(entryId) {
+            return this.expandedAuditIds.includes(entryId);
+        },
+        toggleAudit(entryId) {
+            if (!entryId) {
+                return;
+            }
+            if (this.isAuditExpanded(entryId)) {
+                this.expandedAuditIds = this.expandedAuditIds.filter(id => id !== entryId);
+                return;
+            }
+            this.expandedAuditIds = [...this.expandedAuditIds, entryId];
+        },
+        async copyAudit(entry) {
+            if (!entry) {
+                return;
+            }
+            const text = [
+                `action: ${entry.action || ""}`,
+                `source: ${entry.source || ""}`,
+                `timestamp: ${this.formatDateTime(entry.timestamp)}`,
+                "before:",
+                this.formatJsonPreview(entry.beforeJson),
+                "after:",
+                this.formatJsonPreview(entry.afterJson)
+            ].join("\n");
+            try {
+                if (navigator?.clipboard?.writeText) {
+                    await navigator.clipboard.writeText(text);
+                    this.message = "审计快照已复制";
+                    this.error = "";
+                    return;
+                }
+            } catch (e) {
+                // fallback below
+            }
+            this.error = "当前环境不支持复制，请手动复制内容";
+        },
         nodeHealthLabel(node) {
             const ts = Number(node?.lastReportTime || 0);
             if (!ts) {
@@ -498,6 +582,7 @@ createApp({
           <button class="menu-item" :class="{active: activeMenu==='auth'}" @click="setMenu('auth')">连接鉴权</button>
           <div class="menu-title">系统配置</div>
           <button class="menu-item" :class="{active: activeMenu==='cluster'}" @click="setMenu('cluster')">集群配置</button>
+          <button class="menu-item" :class="{active: activeMenu==='audit'}" @click="setMenu('audit')">操作审计</button>
           <div class="sidebar-footer">
             <div class="sidebar-foot-label">Cluster</div>
             <div class="sidebar-foot-value">{{ currentClusterId }}</div>
@@ -871,6 +956,51 @@ createApp({
             <div style="margin-top: 10px">
               <button class="btn" @click="saveClusterConfig">保存</button>
             </div>
+          </section>
+
+          <section class="panel" v-if="activeMenu==='audit'">
+            <div class="section-head">
+              <div>
+                <h2 class="title">操作审计</h2>
+                <div class="section-subtitle">{{ auditSummaryText }}</div>
+              </div>
+              <div class="toolbar">
+                <select v-model="auditFilter" class="audit-select">
+                  <option v-for="action in auditActions" :key="action" :value="action">
+                    {{ action === 'all' ? '全部操作' : action }}
+                  </option>
+                </select>
+                <button class="btn" @click="loadAuditLogs">刷新</button>
+              </div>
+            </div>
+            <div class="audit-list" v-if="filteredAuditLogs && filteredAuditLogs.length">
+              <article class="audit-card" v-for="entry in filteredAuditLogs" :key="entry.id">
+                <div class="audit-card-head">
+                  <div>
+                    <div class="audit-action">{{ entry.action }}</div>
+                    <div class="audit-meta">{{ entry.source }} · {{ formatDateTime(entry.timestamp) }}</div>
+                  </div>
+                  <div class="audit-card-actions">
+                    <span class="status-badge is-up">{{ entry.clusterId }}</span>
+                    <button class="btn secondary audit-btn" @click="toggleAudit(entry.id)">
+                      {{ isAuditExpanded(entry.id) ? '收起' : '展开' }}
+                    </button>
+                    <button class="btn secondary audit-btn" @click="copyAudit(entry)">复制</button>
+                  </div>
+                </div>
+                <div class="audit-grid" v-if="isAuditExpanded(entry.id)">
+                  <div>
+                    <div class="audit-label">变更前</div>
+                    <pre class="audit-json">{{ formatJsonPreview(entry.beforeJson) }}</pre>
+                  </div>
+                  <div>
+                    <div class="audit-label">变更后</div>
+                    <pre class="audit-json">{{ formatJsonPreview(entry.afterJson) }}</pre>
+                  </div>
+                </div>
+              </article>
+            </div>
+            <div class="hint" v-else>暂无符合条件的审计记录，配置保存后会在这里显示。</div>
           </section>
         </main>
       </div>

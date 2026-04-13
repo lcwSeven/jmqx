@@ -78,6 +78,12 @@ mvn -pl jmqx-app -am exec:java
 - `jmqx.admin.panel.port=18081`
 - `jmqx.admin.panel.basePath=/admin`
 
+集群统一概览补充：
+
+- 需要将各节点的 `jmqx.admin.enabled=true`
+- 需要将各节点的 `jmqx.admin.url` 指向同一个管理端地址，例如 `http://10.0.0.10:18081`
+- `jmqx.admin.clusterId` 需要保持一致，管理页的“集群概览”才会按整个集群聚合
+
 ### 启动压测工具
 
 ```bash
