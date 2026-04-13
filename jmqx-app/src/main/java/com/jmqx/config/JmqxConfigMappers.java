@@ -32,6 +32,7 @@ public final class JmqxConfigMappers {
         properties.setReaderIdleSeconds(config.getInt("jmqx.broker.readerIdleSeconds", properties.getReaderIdleSeconds()));
         properties.setMaxQos(config.getInt("jmqx.broker.maxQos", properties.getMaxQos()));
         properties.setMaxWillPayloadBytes(config.getInt("jmqx.broker.maxWillPayloadBytes", properties.getMaxWillPayloadBytes()));
+        properties.setMaxSubscriptionsPerClient(config.getInt("jmqx.broker.maxSubscriptionsPerClient", properties.getMaxSubscriptionsPerClient()));
         properties.setWebsocketEnabled(config.getBoolean("jmqx.broker.websocket.enabled", properties.isWebsocketEnabled()));
         properties.setWebsocketHost(config.getString("jmqx.broker.websocket.host", properties.getWebsocketHost()));
         properties.setWebsocketPort(config.getInt("jmqx.broker.websocket.port", properties.getWebsocketPort()));

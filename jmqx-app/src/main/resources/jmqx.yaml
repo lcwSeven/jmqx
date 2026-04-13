@@ -12,6 +12,7 @@
 #   broker:
 #     port: 1883
 #     maxQos: 2
+#     maxSubscriptionsPerClient: 1000
 #     websocket:
 #       port: 8083
 #     rateLimit:

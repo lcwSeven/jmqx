@@ -8,6 +8,7 @@ import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -87,6 +88,44 @@ public class LocalSubscriptionRegistry implements SubscriptionRegistry {
             subscriptionsByClient.remove(clientId, clientSubscriptions);
         }
         return lastLocal;
+    }
+
+    @Override
+    public Set<String> unsubscribeBatchAndCollectLast(String clientId, List<String> topicFilters) {
+        if (clientId == null || clientId.isBlank() || topicFilters == null || topicFilters.isEmpty()) {
+            return Collections.emptySet();
+        }
+        ClientSubscriptions clientSubscriptions = subscriptionsByClient.get(clientId);
+        if (clientSubscriptions == null) {
+            return Collections.emptySet();
+        }
+        Set<String> removedTopics = new LinkedHashSet<>();
+        Set<String> lastTopics = new LinkedHashSet<>();
+        for (String topicFilter : topicFilters) {
+            if (topicFilter == null || topicFilter.isBlank()) {
+                continue;
+            }
+            if (!clientSubscriptions.removeIfPresent(topicFilter)) {
+                continue;
+            }
+            removedTopics.add(topicFilter);
+            if (decrementAndCheckLast(topicFilter)) {
+                lastTopics.add(topicFilter);
+            }
+        }
+        if (removedTopics.isEmpty()) {
+            return Collections.emptySet();
+        }
+        long stamp = trieLock.writeLock();
+        try {
+            removedTopics.forEach(topicFilter -> removeFromTrie(clientId, topicFilter));
+        } finally {
+            trieLock.unlockWrite(stamp);
+        }
+        if (clientSubscriptions.isEmpty()) {
+            subscriptionsByClient.remove(clientId, clientSubscriptions);
+        }
+        return lastTopics;
     }
 
     @Override

@@ -15,6 +15,7 @@ jmqx:
     workerThreads: 0
     readerIdleSeconds: 180
     maxQos: 2
+    maxSubscriptionsPerClient: 100
     maxWillPayloadBytes: 262144
     rateLimit:
       clientId:

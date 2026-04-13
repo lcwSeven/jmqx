@@ -127,6 +127,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     private final String dashboardClusterId;
     private final List<String> bridgeTopicFilters;
     private final int maxAllowedQos;
+    private final int maxSubscriptionsPerClient;
     private final int maxWillPayloadBytes;
     private final ConcurrentMap<String, AtomicLong> sharedGroupNodeRoundRobin = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, SharedGroupNodeOrderSnapshot> sharedGroupNodeOrderSnapshots = new ConcurrentHashMap<>();
@@ -161,6 +162,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             String dashboardClusterId,
             String bridgeTopicFilters,
             int maxAllowedQos,
+            int maxSubscriptionsPerClient,
             BrokerRateLimitConfig rateLimitConfig) {
         this.sessionRegistry = sessionRegistry;
         this.subscriptionRegistry = subscriptionRegistry;
@@ -185,6 +187,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             : dashboardClusterId.trim();
         this.bridgeTopicFilters = parseBridgeTopicFilters(bridgeTopicFilters);
         this.maxAllowedQos = normalizeMaxQos(maxAllowedQos);
+        this.maxSubscriptionsPerClient = Math.max(1, maxSubscriptionsPerClient);
         this.maxWillPayloadBytes = maxWillPayloadBytes <= 0 ? 1024 * 1024 : maxWillPayloadBytes;
         this.rateLimiter = new BrokerRateLimiter(rateLimitConfig);
         this.retainedCommandReplicator = new RetainedCommandReplicator(this.metadataCommandGateway, this.nodeId, LOG);
@@ -487,12 +490,22 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             return;
         }
 
+        Map<String, Integer> existingSubscriptions = subscriptionRegistry.findSubscriptions(clientId);
+        int projectedSubscriptionCount = existingSubscriptions.size();
+        Set<String> packetNewSubscriptions = new LinkedHashSet<>();
         List<Integer> grantedQos = new ArrayList<>();
         List<String> firstLocalTopicFilters = new ArrayList<>();
         Set<String> retainedReplayFilters = retainedEnabled ? new LinkedHashSet<>() : Collections.emptySet();
         for (MqttTopicSubscription subscription : message.payload().topicSubscriptions()) {
             String topicFilter = subscription.topicFilter();
             String normalizedFilter = SharedSubscription.normalizeTopicFilter(topicFilter);
+            boolean isExisting = existingSubscriptions.containsKey(topicFilter) || packetNewSubscriptions.contains(topicFilter);
+            if (!isExisting && projectedSubscriptionCount >= maxSubscriptionsPerClient) {
+                grantedQos.add(MqttQoS.FAILURE.value());
+                LOG.warning(() -> "[SUBSCRIBE] rejected by maxSubscriptionsPerClient, clientId=" + clientId
+                        + ", topicFilter=" + topicFilter + ", limit=" + maxSubscriptionsPerClient);
+                continue;
+            }
             // ACL 鉴权
             if (isDenied(clientId, normalizedFilter, AclAction.SUBSCRIBE)) {
                 grantedQos.add(MqttQoS.FAILURE.value());
@@ -512,6 +525,10 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             boolean firstLocal = subscriptionRegistry.subscribeAndCheckFirst(clientId, topicFilter, effectiveQos);
             if (firstLocal) {
                 firstLocalTopicFilters.add(topicFilter);
+            }
+            if (!isExisting) {
+                packetNewSubscriptions.add(topicFilter);
+                projectedSubscriptionCount++;
             }
             grantedQos.add(effectiveQos);
             if (retainedEnabled) {
@@ -544,19 +561,18 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             return;
         }
 
-        message.payload().topics().forEach(topicFilter -> {
+        List<String> topics = message.payload().topics();
+        topics.forEach(topicFilter -> {
             SharedSubscription.Parsed shared = SharedSubscription.parse(topicFilter);
             if (shared != null) {
                 sharedSubscriptionManager.unregister(shared.group(), clientId);
             }
-            boolean lastLocal = subscriptionRegistry.unsubscribeAndCheckLast(clientId, topicFilter);
-            if (lastLocal) {
-                applyGlobalUnregisterAfterLocal(topicFilter);
-            }
         });
+        Set<String> lastLocalTopics = subscriptionRegistry.unsubscribeBatchAndCollectLast(clientId, topics);
+        submitGlobalUnregisterBatchAsync(lastLocalTopics);
         ctx.writeAndFlush(MqttMessageBuilders.unsubAck().packetId(message.variableHeader().messageId()).build());
         scheduleClientSubscriptionsSync(clientId);
-        LOG.fine(() -> "[UNSUBSCRIBE] clientId=" + clientId + ", topics=" + message.payload().topics());
+        LOG.fine(() -> "[UNSUBSCRIBE] clientId=" + clientId + ", topics=" + topics);
     }
 
     private void handlePublish(ChannelHandlerContext ctx, MqttPublishMessage message) {
@@ -1350,6 +1366,24 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             maintenanceExecutor.execute(() -> {
                 for (String topicFilter : snapshot) {
                     applyGlobalRegisterAfterLocal(topicFilter);
+                }
+            });
+        } catch (RejectedExecutionException ignored) {
+        }
+    }
+
+    /**
+     * UNSUBSCRIBE 报文内本节点最后引用批量异步提交全局路由删除，避免阻塞 I/O 线程。
+     */
+    private void submitGlobalUnregisterBatchAsync(Set<String> topicFilters) {
+        if (topicFilters == null || topicFilters.isEmpty()) {
+            return;
+        }
+        List<String> snapshot = new ArrayList<>(topicFilters);
+        try {
+            maintenanceExecutor.execute(() -> {
+                for (String topicFilter : snapshot) {
+                    applyGlobalUnregisterAfterLocal(topicFilter);
                 }
             });
         } catch (RejectedExecutionException ignored) {

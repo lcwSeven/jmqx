@@ -286,6 +286,7 @@ public class JmqxApplication {
                 context.adminSyncSettings().clusterId(),
                 context.bridgeProperties().getTopicFilters(),
                 context.brokerProperties().getMaxQos(),
+                context.brokerProperties().getMaxSubscriptionsPerClient(),
                 BrokerRateLimitConfig.of(
                         context.brokerProperties().isRateLimitClientIdEnabled(),
                         context.brokerProperties().getRateLimitClientIdPerSecond(),
@@ -489,7 +490,8 @@ public class JmqxApplication {
                 + ", connectIpPerSecond=" + brokerProperties.getRateLimitConnectIpPerSecond()
                 + ", cleanupIntervalSeconds=" + brokerProperties.getRateLimitCleanupIntervalSeconds()
                 + ", idleSeconds=" + brokerProperties.getRateLimitIdleSeconds());
-        System.out.println("BROKER maxWillPayloadBytes=" + brokerProperties.getMaxWillPayloadBytes());
+        System.out.println("BROKER maxWillPayloadBytes=" + brokerProperties.getMaxWillPayloadBytes()
+                + ", maxSubscriptionsPerClient=" + brokerProperties.getMaxSubscriptionsPerClient());
         System.out.println("RETAINED maxEntries=" + context.retainedStoreProperties().getMaxEntries()
                 + ", maxBytes=" + context.retainedStoreProperties().getMaxBytes()
                 + ", maxPayloadBytes=" + context.retainedStoreProperties().getMaxPayloadBytes()

@@ -5,5 +5,4 @@
 - [最佳实践](03-best-practices.md)
 - [配置项完整参考](04-configuration-reference.md)
 - [集群故障演练手册](05-cluster-failure-drill.md)
-- [单机 30 万连接里程碑](milestone-300k-single-node.md)
-- [变更记录（Changelog）](../CHANGELOG.md)
+

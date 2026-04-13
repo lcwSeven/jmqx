@@ -15,6 +15,7 @@ public class BrokerProperties {
     private int readerIdleSeconds = 120;
     private int maxQos = 2;
     private int maxWillPayloadBytes = 1024 * 1024;
+    private int maxSubscriptionsPerClient = 1000;
     private boolean websocketEnabled = true;
     private String websocketHost = "0.0.0.0";
     private int websocketPort = 8083;
@@ -116,6 +117,14 @@ public class BrokerProperties {
 
     public void setMaxWillPayloadBytes(int maxWillPayloadBytes) {
         this.maxWillPayloadBytes = maxWillPayloadBytes;
+    }
+
+    public int getMaxSubscriptionsPerClient() {
+        return maxSubscriptionsPerClient;
+    }
+
+    public void setMaxSubscriptionsPerClient(int maxSubscriptionsPerClient) {
+        this.maxSubscriptionsPerClient = maxSubscriptionsPerClient;
     }
 
     public boolean isWebsocketEnabled() {
