@@ -8,15 +8,13 @@ import com.jmqx.protocol.AuthResult;
  * @date 2026/4/4
  */
 public interface AuthProvider {
-    default boolean authenticate(AuthRequest request) {
-        return authenticateResult(request).decision() == AuthDecision.ALLOW;
-    }
 
-    default AuthDecision authenticateDecision(AuthRequest request) {
-        return authenticateResult(request).decision();
-    }
+
 
     AuthResult authenticateResult(AuthRequest request);
+
+    default void evictCache(String clientId, String username) {
+    }
 
     default void close() {
     }

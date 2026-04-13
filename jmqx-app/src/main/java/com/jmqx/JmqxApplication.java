@@ -2,6 +2,7 @@ package com.jmqx;
 
 import com.jmqx.admin.AdminReporter;
 import com.jmqx.admin.HttpAdminReporter;
+import com.jmqx.admin.embedded.AdminAuthRuntime;
 import com.jmqx.admin.embedded.AdminConfigCodec;
 import com.jmqx.admin.embedded.AdminStateRepository;
 import com.jmqx.admin.embedded.AdminPanelServer;
@@ -39,6 +40,7 @@ import com.jmqx.common.BrokerProperties;
 import com.jmqx.config.ClusterSettings;
 import com.jmqx.config.JmqxConfig;
 import com.jmqx.config.JmqxConfigMappers;
+import com.jmqx.protocol.AuthResult;
 import com.jmqx.protocol.ClientAuthenticator;
 import com.jmqx.router.LocalSubscriptionRegistry;
 import com.jmqx.router.SharedSubscriptionManager;
@@ -125,6 +127,7 @@ public class JmqxApplication {
                 "data/will-rocksdb"
         );
         AdminSyncSettings adminSyncSettings = loadAdminSyncSettings(config);
+        AdminAuthSettings adminAuthSettings = loadAdminAuthSettings(config);
         AdminPanelSettings adminPanelSettings = loadAdminPanelSettings(config);
         int sharedMaxSubscribers = getIntProperty(config, "jmqx.shared.maxSubscribersPerGroup", 1000);
         int sharedSlowThreshold = getIntProperty(config, "jmqx.shared.slowConsumerStrikeThreshold", 3);
@@ -168,6 +171,7 @@ public class JmqxApplication {
                 globalSubscriptionRegistry,
                 clusterSettings,
                 adminSyncSettings,
+                adminAuthSettings,
                 adminPanelSettings
         );
     }
@@ -194,9 +198,24 @@ public class JmqxApplication {
         );
         ReloadableAuthProvider authProvider = new ReloadableAuthProvider(AuthProviderFactory.create(context.authProperties()));
         ReloadableAclAuthorizer aclAuthorizer = new ReloadableAclAuthorizer(AclAuthorizerFactory.create(context.aclProperties()));
+        AdminStateRepository adminStateRepository = buildAdminStateRepository(context.adminPanelSettings());
+        AdminAuthRuntime adminAuthRuntime = new AdminAuthRuntime(resolveAdminAuthConfig(adminStateRepository, context.adminAuthSettings()));
+        ClientAuthenticator clientAuthenticator = new ClientAuthenticator() {
+            @Override
+            public AuthResult authenticateResult(String clientId, String username, String password) {
+                if (isAdminDashboardClient(adminAuthRuntime, clientId, username, password)) {
+                    return AuthResult.allow(true);
+                }
+                return authProvider.authenticateResult(new AuthRequest(clientId, username, password));
+            }
+
+            @Override
+            public void evictCache(String clientId, String username) {
+                authProvider.evictCache(clientId, username);
+            }
+        };
 
         // 1) 构建并启动元数据运行时（CORE 负责写入与复制，REPLICANT 负责追平日志）。
-        AdminStateRepository adminStateRepository = buildAdminStateRepository(context.adminPanelSettings());
         BuiltInDatabaseUserService builtInDatabaseUserService = new BuiltInDatabaseUserService();
         MetadataRuntime metadataRuntime = buildMetadataRuntime(
                 context.clusterRoleProvider(),
@@ -205,6 +224,7 @@ public class JmqxApplication {
                 retainedMessageStore,
                 adminStateRepository,
                 builtInDatabaseUserService,
+                clientAuthenticator,
                 (clusterId, securityConfig) -> applyRuntimeSecurityConfig(
                         context.authProperties(),
                         context.aclProperties(),
@@ -274,12 +294,11 @@ public class JmqxApplication {
         }
 
         // 3) 组装 Broker 依赖：共享订阅、保留消息、AUTH/ACL、桥接、连接指标、管理上报。
-        ClientAuthenticator clientAuthenticator = (clientId, username, password) ->
-                authProvider.authenticateResult(new AuthRequest(clientId, username, password));
         MessageBridge messageBridge = MessageBridgeFactory.create(context.bridgeProperties());
         ConnectionMetrics connectionMetrics = new ConnectionMetrics();
         AdminReporter adminReporter = buildAdminReporter(
                 context.adminSyncSettings(),
+                adminAuthRuntime,
                 context.clusterRoleProvider().nodeId(),
                 connectionMetrics
         );
@@ -347,6 +366,7 @@ public class JmqxApplication {
                 context.sessionRegistry(),
                 context.subscriptionRegistry(),
                 connectionMetrics,
+                adminAuthRuntime,
                 adminStateRepository,
                 builtInDatabaseUserService,
                 buildInitialSecurityConfig(context.authProperties(), context.aclProperties()),
@@ -676,6 +696,14 @@ public class JmqxApplication {
         );
     }
 
+    private static AdminAuthSettings loadAdminAuthSettings(JmqxConfig config) {
+        return new AdminAuthSettings(
+                getStringProperty(config, "jmqx.admin.auth.username", "admin"),
+                getStringProperty(config, "jmqx.admin.auth.password", "public"),
+                getStringProperty(config, "jmqx.admin.auth.role", "super_admin")
+        );
+    }
+
     private static AdminPanelSettings loadAdminPanelSettings(JmqxConfig config) {
         return new AdminPanelSettings(
                 getBooleanProperty(config, "jmqx.admin.panel.enabled", true),
@@ -690,6 +718,7 @@ public class JmqxApplication {
 
     private static AdminReporter buildAdminReporter(
             AdminSyncSettings settings,
+            AdminAuthRuntime adminAuthRuntime,
             String nodeId,
             ConnectionMetrics connectionMetrics
     ) {
@@ -703,6 +732,7 @@ public class JmqxApplication {
         return new HttpAdminReporter(
                 settings.url(),
                 settings.clusterId(),
+                adminAuthRuntime == null ? new AdminAuthRuntime(AdminAuthRuntime.Config.defaults()) : adminAuthRuntime,
                 nodeId,
                 nodeIp,
                 connectionMetrics,
@@ -760,6 +790,7 @@ public class JmqxApplication {
             SessionRegistry sessionRegistry,
             SubscriptionRegistry subscriptionRegistry,
             ConnectionMetrics connectionMetrics,
+            AdminAuthRuntime adminAuthRuntime,
             AdminStateRepository stateRepository,
             BuiltInDatabaseUserService builtInDatabaseUserService,
             EmbeddedAdminStateStore.SecurityConfig initialSecurityConfig,
@@ -774,6 +805,7 @@ public class JmqxApplication {
                 settings.port(),
                 settings.basePath(),
                 settings.backendUrl(),
+                adminAuthRuntime,
                 clusterId,
                 nodeId,
                 panelNodeIp,
@@ -802,6 +834,27 @@ public class JmqxApplication {
         return new RocksDbAdminStateStore(settings.persistenceRocksdbPath());
     }
 
+    private static AdminAuthRuntime.Config resolveAdminAuthConfig(
+            AdminStateRepository adminStateRepository,
+            AdminAuthSettings adminAuthSettings
+    ) {
+        if (adminStateRepository != null && adminStateRepository.hasAdminAuthConfig()) {
+            AdminAuthRuntime.Config persisted = adminStateRepository.getAdminAuthConfig();
+            if (persisted != null) {
+                return persisted.normalize();
+            }
+        }
+        AdminAuthRuntime.Config fallback = new AdminAuthRuntime.Config(
+                adminAuthSettings == null ? "admin" : adminAuthSettings.username(),
+                adminAuthSettings == null ? "public" : adminAuthSettings.password(),
+                adminAuthSettings == null ? "super_admin" : adminAuthSettings.role()
+        ).normalize();
+        if (adminStateRepository != null && !adminStateRepository.hasAdminAuthConfig()) {
+            adminStateRepository.setAdminAuthConfig(fallback);
+        }
+        return fallback;
+    }
+
     private static MetadataRuntime buildMetadataRuntime(
             ClusterRoleProvider clusterRoleProvider,
             GlobalSubscriptionRegistry globalSubscriptionRegistry,
@@ -809,6 +862,7 @@ public class JmqxApplication {
             RetainedMessageStore retainedMessageStore,
             AdminStateRepository adminStateRepository,
             BuiltInDatabaseUserService builtInDatabaseUserService,
+            ClientAuthenticator clientAuthenticator,
             JmqxMetadataProjectionHandlers.AdminSecurityConfigApplier adminSecurityConfigApplier,
             JmqxMetadataProjectionHandlers.AdminClusterConfigApplier adminClusterConfigApplier,
             String coreBindHost,
@@ -834,6 +888,7 @@ public class JmqxApplication {
                 retainedMessageStore,
                 adminStateRepository,
                 builtInDatabaseUserService,
+                clientAuthenticator,
                 adminSecurityConfigApplier,
                 adminClusterConfigApplier
         );
@@ -949,8 +1004,16 @@ public class JmqxApplication {
                 authChain,
                 Math.max(cacheTtlMs, 0),
                 new EmbeddedAdminStateStore.AuthHttpConfig(
+                        authProperties.getHttpMethod(),
                         authProperties.getHttpUrl(),
-                        authProperties.getHttpTimeoutMs()
+                        authProperties.getHttpHeaders(),
+                        authProperties.isHttpTlsEnabled(),
+                        authProperties.getHttpBodyTemplate(),
+                        authProperties.getHttpPoolSize(),
+                        authProperties.getHttpRateLimitPerSecond(),
+                        authProperties.getHttpRequestTimeoutMs(),
+                        authProperties.getHttpConnectTimeoutMs(),
+                        authProperties.getHttpPipelineCount()
                 ),
                 new EmbeddedAdminStateStore.AuthFileConfig(
                         authProperties.getFilePath()
@@ -1030,8 +1093,16 @@ public class JmqxApplication {
                 }
                 authProperties.setChain(String.join(",", authChain));
             }
+            authProperties.setHttpMethod(securityConfig.authHttp().method());
             authProperties.setHttpUrl(securityConfig.authHttp().url());
-            authProperties.setHttpTimeoutMs(securityConfig.authHttp().timeoutMs());
+            authProperties.setHttpHeaders(securityConfig.authHttp().headersText());
+            authProperties.setHttpTlsEnabled(securityConfig.authHttp().tlsEnabled());
+            authProperties.setHttpBodyTemplate(securityConfig.authHttp().bodyTemplate());
+            authProperties.setHttpPoolSize(securityConfig.authHttp().poolSize());
+            authProperties.setHttpRateLimitPerSecond(securityConfig.authHttp().rateLimitPerSecond());
+            authProperties.setHttpRequestTimeoutMs(securityConfig.authHttp().requestTimeoutMs());
+            authProperties.setHttpConnectTimeoutMs(securityConfig.authHttp().connectTimeoutMs());
+            authProperties.setHttpPipelineCount(securityConfig.authHttp().pipelineCount());
             authProperties.setFilePath(securityConfig.authFile().path());
             authProperties.setBuiltInDatabaseAccountType(securityConfig.authBuiltInDatabase().accountType());
             authProperties.setBuiltInDatabasePasswordHashAlgorithm(securityConfig.authBuiltInDatabase().passwordHashAlgorithm());
@@ -1181,6 +1252,21 @@ public class JmqxApplication {
                 .replace("\"", "\\\"");
     }
 
+    private static boolean isAdminDashboardClient(
+            AdminAuthRuntime adminAuthRuntime,
+            String clientId,
+            String username,
+            String password
+    ) {
+        if (adminAuthRuntime == null) {
+            return false;
+        }
+        if (clientId == null || !clientId.startsWith("admin-")) {
+            return false;
+        }
+        return adminAuthRuntime.matches(username, password);
+    }
+
     private static void closeQuietly(AutoCloseable closeable) {
         if (closeable == null) {
             return;
@@ -1221,6 +1307,7 @@ public class JmqxApplication {
             GlobalSubscriptionRegistry globalSubscriptionRegistry,
             ClusterSettings clusterSettings,
             AdminSyncSettings adminSyncSettings,
+            AdminAuthSettings adminAuthSettings,
             AdminPanelSettings adminPanelSettings
     ) {
     }
@@ -1265,6 +1352,13 @@ public class JmqxApplication {
             int requestTimeoutMs,
             int metricsIntervalMs,
             int dashboardPublishIntervalMs
+    ) {
+    }
+
+    private record AdminAuthSettings(
+            String username,
+            String password,
+            String role
     ) {
     }
 

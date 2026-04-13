@@ -1,4 +1,5 @@
 const API_BASE = "api/v1";
+const ADMIN_AUTH_STORAGE_KEY = "jmqx_admin_auth";
 
 function resolveCandidates(url) {
     const candidates = [url];
@@ -25,9 +26,12 @@ export async function request(url, options = {}) {
     let lastError = null;
     for (let index = 0; index < candidates.length; index++) {
         const candidate = candidates[index];
+        const authHeaders = getAdminAuthHeader();
+        const mergedHeaders = { "Content-Type": "application/json", ...authHeaders, ...(options.headers || {}) };
         const response = await fetch(candidate, {
-            headers: { "Content-Type": "application/json" },
             ...options
+            ,
+            headers: mergedHeaders
         });
         if (response.ok) {
             const text = await response.text();
@@ -35,6 +39,7 @@ export async function request(url, options = {}) {
         }
         const errorText = normalizeErrorText(await response.text());
         lastError = new Error(candidate + " -> HTTP " + response.status + ": " + errorText);
+        lastError.status = response.status;
         if (response.status !== 404 || index === candidates.length - 1) {
             throw lastError;
         }
@@ -42,8 +47,56 @@ export async function request(url, options = {}) {
     throw lastError || new Error("request failed");
 }
 
+export function getStoredAdminAuth() {
+    try {
+        const raw = window.sessionStorage.getItem(ADMIN_AUTH_STORAGE_KEY);
+        if (!raw) {
+            return { username: "", password: "" };
+        }
+        const parsed = JSON.parse(raw);
+        return {
+            username: String(parsed?.username || ""),
+            password: String(parsed?.password || "")
+        };
+    } catch (e) {
+        return { username: "", password: "" };
+    }
+}
+
+export function storeAdminAuth(username, password) {
+    window.sessionStorage.setItem(ADMIN_AUTH_STORAGE_KEY, JSON.stringify({
+        username: String(username || ""),
+        password: String(password || "")
+    }));
+}
+
+export function clearStoredAdminAuth() {
+    window.sessionStorage.removeItem(ADMIN_AUTH_STORAGE_KEY);
+}
+
+function getAdminAuthHeader() {
+    const auth = getStoredAdminAuth();
+    if (!auth.username) {
+        return {};
+    }
+    return {
+        Authorization: "Basic " + window.btoa(`${auth.username}:${auth.password || ""}`)
+    };
+}
+
 export function fetchClusters() {
     return request(API_BASE + "/clusters");
+}
+
+export function fetchAdminSession() {
+    return request(API_BASE + "/admin/session");
+}
+
+export function changeAdminPassword(payload) {
+    return request(API_BASE + "/admin/password", {
+        method: "PUT",
+        body: JSON.stringify(payload)
+    });
 }
 
 export function createCluster(payload) {

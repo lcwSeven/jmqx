@@ -100,6 +100,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     private static final String OP_REGISTER = "register";
     private static final String OP_UNREGISTER = "unregister";
     private static final String OP_ONLINE = "online";
+    private static final String OP_AUTH_CACHE_EVICT = "auth_cache_evict";
     private static final long SESSION_EXPIRY_IMMEDIATE = 0L;
     private static final long SESSION_EXPIRY_PERSISTENT = Long.MAX_VALUE;
     private static final long RETAINED_RETRY_INTERVAL_MS = 2000L;
@@ -264,6 +265,8 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         }
         willMessageStore.remove(clientId);
 
+        clientAuthenticator.evictCache(clientId, username);
+        applyGlobalClientAuthCacheEvictAfterDisconnect(clientId, username);
         adminReporter.removeClientSession(clientId);
         sessionRegistry.remove(clientId);
         inflightManager.removeRuntimeState(clientId);
@@ -1430,6 +1433,19 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             String.valueOf(Math.max(0L, connectedAtMs)),
             nodeId
         ), "session-online clientId=" + clientId);
+    }
+
+    private void applyGlobalClientAuthCacheEvictAfterDisconnect(String clientId, String username) {
+        if ((clientId == null || clientId.isBlank()) && (username == null || username.isBlank())) {
+            return;
+        }
+        submitMetadataCommand(new MetadataCommand(
+            SESSION_NAMESPACE,
+            OP_AUTH_CACHE_EVICT,
+            clientId == null ? "" : clientId,
+            username == null ? "" : username,
+            nodeId
+        ), "auth-cache-evict clientId=" + clientId);
     }
 
     public void shutdown() {

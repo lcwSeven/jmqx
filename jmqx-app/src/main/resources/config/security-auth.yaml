@@ -7,8 +7,20 @@ jmqx:
     cacheMillis: 60000
     # HTTP auth backend.
     http:
+      method: POST
       url: http://127.0.0.1:8080/auth/check
-      timeoutMs: 2000
+      headers: "content-type: application/json"
+      tlsEnabled: false
+      bodyTemplate: |
+        {
+          "username": "${username}",
+          "password": "${password}"
+        }
+      poolSize: 4
+      rateLimitPerSecond: 0
+      requestTimeoutMs: 2000
+      connectTimeoutMs: 1500
+      pipelineCount: 2
     # File auth backend.
     file:
       path: auth-users.txt

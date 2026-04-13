@@ -10,6 +10,12 @@ import java.util.List;
  */
 public interface AdminStateRepository extends AutoCloseable {
 
+    AdminAuthRuntime.Config getAdminAuthConfig();
+
+    void setAdminAuthConfig(AdminAuthRuntime.Config adminAuthConfig);
+
+    boolean hasAdminAuthConfig();
+
     EmbeddedAdminStateStore.ClusterSummary createCluster(String clusterId, String displayName, String seedCoreNode);
 
     List<EmbeddedAdminStateStore.ClusterSummary> listClusters();

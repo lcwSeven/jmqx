@@ -1,6 +1,10 @@
 # Admin sync and embedded admin panel settings.
 jmqx:
   admin:
+    auth:
+      username: admin
+      password: public
+      role: super_admin
     # Enable broker -> admin data sync.
     # For cluster-wide overview, point every node to the same admin panel endpoint.
     enabled: false

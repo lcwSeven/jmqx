@@ -69,6 +69,48 @@ export const securityPageMethods = {
         const hit = this.authDatasourceOptions.find(item => item.key === this.authDraft.datasource);
         return hit ? hit.label : "文件";
     },
+    parseHttpHeaders(text) {
+        const rows = String(text || "")
+            .split(/\r?\n/)
+            .map(line => line.trim())
+            .filter(Boolean)
+            .map(line => {
+                const split = line.indexOf(":");
+                if (split <= 0) {
+                    return null;
+                }
+                return {
+                    key: line.substring(0, split).trim(),
+                    value: line.substring(split + 1).trim()
+                };
+            })
+            .filter(Boolean);
+        return rows.length ? rows : [{ key: "content-type", value: "application/json" }];
+    },
+    serializeHttpHeaders(headers) {
+        if (!Array.isArray(headers)) {
+            return "content-type: application/json";
+        }
+        const rows = headers
+            .map(header => ({
+                key: String(header?.key || "").trim(),
+                value: String(header?.value || "").trim()
+            }))
+            .filter(header => header.key);
+        return rows.length
+            ? rows.map(header => `${header.key}: ${header.value}`).join("\n")
+            : "content-type: application/json";
+    },
+    addHttpHeaderRow() {
+        this.authDraft.httpHeaders.push({ key: "", value: "" });
+    },
+    removeHttpHeaderRow(index) {
+        if (!Array.isArray(this.authDraft.httpHeaders) || this.authDraft.httpHeaders.length <= 1) {
+            this.authDraft.httpHeaders = [{ key: "content-type", value: "application/json" }];
+            return;
+        }
+        this.authDraft.httpHeaders.splice(index, 1);
+    },
     mapDatasourceToPlugin(datasource) {
         if (datasource === "built_in_database") {
             return "built_in_database";
@@ -265,8 +307,16 @@ export const securityPageMethods = {
         this.authDraft.builtInDatabaseAccountType = this.securityConfig.authBuiltInDatabase?.accountType || "username";
         this.authDraft.builtInDatabasePasswordHashAlgorithm = this.securityConfig.authBuiltInDatabase?.passwordHashAlgorithm || "sha256";
         this.authDraft.builtInDatabaseSaltPosition = this.securityConfig.authBuiltInDatabase?.saltPosition || "suffix";
+        this.authDraft.httpMethod = this.securityConfig.authHttp?.method || "POST";
         this.authDraft.httpUrl = this.securityConfig.authHttp?.url || "http://127.0.0.1:8080/auth/check";
-        this.authDraft.httpTimeoutMs = Number(this.securityConfig.authHttp?.timeoutMs || 2000);
+        this.authDraft.httpHeaders = this.parseHttpHeaders(this.securityConfig.authHttp?.headersText || "content-type: application/json");
+        this.authDraft.httpTlsEnabled = this.securityConfig.authHttp?.tlsEnabled === true;
+        this.authDraft.httpBodyTemplate = this.securityConfig.authHttp?.bodyTemplate || '{\n  "username": "${username}",\n  "password": "${password}"\n}';
+        this.authDraft.httpPoolSize = Number(this.securityConfig.authHttp?.poolSize || 4);
+        this.authDraft.httpRateLimitPerSecond = Number(this.securityConfig.authHttp?.rateLimitPerSecond || 0);
+        this.authDraft.httpRequestTimeoutMs = Number(this.securityConfig.authHttp?.requestTimeoutMs || 2000);
+        this.authDraft.httpConnectTimeoutMs = Number(this.securityConfig.authHttp?.connectTimeoutMs || 1500);
+        this.authDraft.httpPipelineCount = Number(this.securityConfig.authHttp?.pipelineCount || 2);
         this.authDraft.redisHost = this.securityConfig.authRedis?.host || "127.0.0.1";
         this.authDraft.redisPort = Number(this.securityConfig.authRedis?.port || 6379);
         this.authDraft.redisPassword = this.securityConfig.authRedis?.password || "";
@@ -309,8 +359,16 @@ export const securityPageMethods = {
         }
         if (plugin === "http") {
             this.securityConfig.authHttp = {
+                method: this.authDraft.httpMethod || "POST",
                 url: this.authDraft.httpUrl || "",
-                timeoutMs: Number(this.authDraft.httpTimeoutMs || 2000)
+                headersText: this.serializeHttpHeaders(this.authDraft.httpHeaders),
+                tlsEnabled: this.authDraft.httpTlsEnabled === true,
+                bodyTemplate: this.authDraft.httpBodyTemplate || "",
+                poolSize: Number(this.authDraft.httpPoolSize || 4),
+                rateLimitPerSecond: Number(this.authDraft.httpRateLimitPerSecond || 0),
+                requestTimeoutMs: Number(this.authDraft.httpRequestTimeoutMs || 2000),
+                connectTimeoutMs: Number(this.authDraft.httpConnectTimeoutMs || 1500),
+                pipelineCount: Number(this.authDraft.httpPipelineCount || 2)
             };
             return;
         }
@@ -364,8 +422,16 @@ export const securityPageMethods = {
             authChain: normalizedAuthChain,
             cacheTtlMs: Number(config.cacheTtlMs || 60000),
             authHttp: {
+                method: config.authHttp?.method || "POST",
                 url: config.authHttp?.url || "http://127.0.0.1:8080/auth/check",
-                timeoutMs: Number(config.authHttp?.timeoutMs || 2000)
+                headersText: config.authHttp?.headersText || "content-type: application/json",
+                tlsEnabled: config.authHttp?.tlsEnabled === true,
+                bodyTemplate: config.authHttp?.bodyTemplate || '{\n  "username": "${username}",\n  "password": "${password}"\n}',
+                poolSize: Number(config.authHttp?.poolSize || 4),
+                rateLimitPerSecond: Number(config.authHttp?.rateLimitPerSecond || 0),
+                requestTimeoutMs: Number(config.authHttp?.requestTimeoutMs || config.authHttp?.timeoutMs || 2000),
+                connectTimeoutMs: Number(config.authHttp?.connectTimeoutMs || 1500),
+                pipelineCount: Number(config.authHttp?.pipelineCount || 2)
             },
             authFile: {
                 path: config.authFile?.path || "auth-users.txt"

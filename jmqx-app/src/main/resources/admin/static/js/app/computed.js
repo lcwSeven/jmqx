@@ -31,6 +31,9 @@ export const adminComputed = {
     builtInAccountFieldLabel() {
         return this.builtInUsers.accountType === "clientId" ? "clientId" : "username";
     },
+    adminRoleLabel() {
+        return this.adminSession?.superAdmin ? "超级管理员" : (this.adminSession?.role || "未登录");
+    },
     authStatusText() {
         if (!this.hasAuthRecord()) {
             return "未配置";

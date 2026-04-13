@@ -3,6 +3,27 @@ export function createInitialState() {
         activeMenu: "overview",
         message: "",
         error: "",
+        adminAuthRequired: false,
+        adminAuthenticated: false,
+        adminSession: {
+            authenticated: false,
+            username: "",
+            role: "",
+            superAdmin: false,
+            permissions: []
+        },
+        adminLoginForm: {
+            username: "",
+            password: ""
+        },
+        adminDialogs: {
+            password: false
+        },
+        adminPasswordForm: {
+            currentPassword: "",
+            newPassword: "",
+            confirmPassword: ""
+        },
         currentClusterId: "default",
         mqttStatus: "未连接",
         mqttClient: null,
@@ -38,7 +59,18 @@ export function createInitialState() {
             authEnabled: false,
             authChain: [],
             cacheTtlMs: 60000,
-            authHttp: { url: "http://127.0.0.1:8080/auth/check", timeoutMs: 2000 },
+            authHttp: {
+                method: "POST",
+                url: "http://127.0.0.1:8080/auth/check",
+                headersText: "content-type: application/json",
+                tlsEnabled: false,
+                bodyTemplate: '{\n  "username": "${username}",\n  "password": "${password}"\n}',
+                poolSize: 4,
+                rateLimitPerSecond: 0,
+                requestTimeoutMs: 2000,
+                connectTimeoutMs: 1500,
+                pipelineCount: 2
+            },
             authFile: { path: "auth-users.txt" },
             authBuiltInDatabase: {
                 accountType: "username",
@@ -92,8 +124,16 @@ export function createInitialState() {
             builtInDatabaseAccountType: "username",
             builtInDatabasePasswordHashAlgorithm: "sha256",
             builtInDatabaseSaltPosition: "suffix",
+            httpMethod: "POST",
             httpUrl: "http://127.0.0.1:8080/auth/check",
-            httpTimeoutMs: 2000,
+            httpHeaders: [{ key: "content-type", value: "application/json" }],
+            httpTlsEnabled: false,
+            httpBodyTemplate: '{\n  "username": "${username}",\n  "password": "${password}"\n}',
+            httpPoolSize: 4,
+            httpRateLimitPerSecond: 0,
+            httpRequestTimeoutMs: 2000,
+            httpConnectTimeoutMs: 1500,
+            httpPipelineCount: 2,
             redisHost: "127.0.0.1",
             redisPort: 6379,
             redisPassword: "",

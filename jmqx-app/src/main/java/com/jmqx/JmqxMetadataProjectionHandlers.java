@@ -6,6 +6,7 @@ import com.jmqx.admin.embedded.BuiltInDatabaseUserService;
 import com.jmqx.admin.embedded.EmbeddedAdminStateStore;
 import com.jmqx.cluster.ClusterMetadataCommandApplier;
 import com.jmqx.cluster.MetadataCommand;
+import com.jmqx.protocol.ClientAuthenticator;
 import com.jmqx.router.global.GlobalSubscriptionEvent;
 import com.jmqx.router.global.GlobalSubscriptionRegistry;
 import com.jmqx.session.SessionRegistry;
@@ -26,6 +27,7 @@ import java.util.logging.Logger;
 public class JmqxMetadataProjectionHandlers {
     private static final Logger LOG = Logger.getLogger(JmqxMetadataProjectionHandlers.class.getName());
     private static final String OP_ONLINE = "online";
+    private static final String OP_AUTH_CACHE_EVICT = "auth_cache_evict";
     private static final String OP_RETAINED_UPSERT = "upsert";
     private static final String OP_RETAINED_REMOVE = "remove";
     private static final AttributeKey<Boolean> GRACEFUL_DISCONNECT = AttributeKey.valueOf("jmqx.gracefulDisconnect");
@@ -35,6 +37,7 @@ public class JmqxMetadataProjectionHandlers {
     private final RetainedMessageStore retainedMessageStore;
     private final AdminStateRepository adminStateRepository;
     private final BuiltInDatabaseUserService builtInDatabaseUserService;
+    private final ClientAuthenticator clientAuthenticator;
     private final AdminSecurityConfigApplier adminSecurityConfigApplier;
     private final AdminClusterConfigApplier adminClusterConfigApplier;
 
@@ -44,6 +47,7 @@ public class JmqxMetadataProjectionHandlers {
             RetainedMessageStore retainedMessageStore,
             AdminStateRepository adminStateRepository,
             BuiltInDatabaseUserService builtInDatabaseUserService,
+            ClientAuthenticator clientAuthenticator,
             AdminSecurityConfigApplier adminSecurityConfigApplier,
             AdminClusterConfigApplier adminClusterConfigApplier
     ) {
@@ -52,6 +56,7 @@ public class JmqxMetadataProjectionHandlers {
         this.retainedMessageStore = retainedMessageStore;
         this.adminStateRepository = adminStateRepository;
         this.builtInDatabaseUserService = builtInDatabaseUserService;
+        this.clientAuthenticator = clientAuthenticator;
         this.adminSecurityConfigApplier = adminSecurityConfigApplier;
         this.adminClusterConfigApplier = adminClusterConfigApplier;
     }
@@ -93,6 +98,11 @@ public class JmqxMetadataProjectionHandlers {
             return;
         }
         if (!OP_ONLINE.equals(command.operation())) {
+            if (OP_AUTH_CACHE_EVICT.equals(command.operation())) {
+                if (clientAuthenticator != null) {
+                    clientAuthenticator.evictCache(command.key(), command.value());
+                }
+            }
             return;
         }
         String clientId = command.key();

@@ -37,6 +37,18 @@ public class ChainedAuthProvider implements AuthProvider {
     }
 
     @Override
+    public void evictCache(String clientId, String username) {
+        if (chain == null || chain.isEmpty()) {
+            return;
+        }
+        for (AuthProvider provider : chain) {
+            if (provider != null) {
+                provider.evictCache(clientId, username);
+            }
+        }
+    }
+
+    @Override
     public void close() {
         if (chain == null || chain.isEmpty()) {
             return;

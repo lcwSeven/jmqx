@@ -14,6 +14,8 @@ export const dashboardMethods = {
         const clientId = "admin-" + Math.random().toString(16).slice(2, 10);
         const client = window.mqtt.connect(mqttWsUrl, {
             clientId,
+            username: this.adminLoginForm.username || undefined,
+            password: this.adminLoginForm.password || undefined,
             reconnectPeriod: 2000,
             clean: true,
             connectTimeout: 5000

@@ -1,12 +1,17 @@
 package com.jmqx.admin;
 
+import com.jmqx.admin.embedded.AdminAuthRuntime;
 import com.jmqx.transport.ConnectionMetrics;
+import okhttp3.Dispatcher;
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
 
+import java.io.IOException;
 import java.net.URI;
 import java.net.URLEncoder;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
@@ -27,20 +32,22 @@ import java.util.logging.Logger;
 public class HttpAdminReporter implements AdminReporter {
 
     private static final Logger LOG = Logger.getLogger(HttpAdminReporter.class.getName());
+    private static final MediaType JSON_MEDIA_TYPE = MediaType.get("application/json; charset=utf-8");
 
     private final String baseUrl;
     private final String clusterId;
+    private final AdminAuthRuntime adminAuthRuntime;
     private final String nodeId;
     private final String nodeIp;
     private final ConnectionMetrics connectionMetrics;
     private final long metricsIntervalMs;
-    private final long requestTimeoutMs;
-    private final HttpClient httpClient;
+    private final OkHttpClient httpClient;
     private final ExecutorService requestExecutor;
     private final ScheduledExecutorService scheduler;
 
     public HttpAdminReporter(String baseUrl,
                              String clusterId,
+                             AdminAuthRuntime adminAuthRuntime,
                              String nodeId,
                              String nodeIp,
                              ConnectionMetrics connectionMetrics,
@@ -49,11 +56,12 @@ public class HttpAdminReporter implements AdminReporter {
                              long metricsIntervalMs) {
         this.baseUrl = stripTrailingSlash(Objects.requireNonNull(baseUrl, "baseUrl"));
         this.clusterId = normalize(clusterId, "default");
+        this.adminAuthRuntime = Objects.requireNonNull(adminAuthRuntime, "adminAuthRuntime");
         this.nodeId = normalize(nodeId, "node-1");
         this.nodeIp = normalize(nodeIp, "unknown");
         this.connectionMetrics = Objects.requireNonNull(connectionMetrics, "connectionMetrics");
         this.metricsIntervalMs = Math.max(metricsIntervalMs, 1000);
-        this.requestTimeoutMs = Math.max(requestTimeoutMs, 500);
+        long effectiveRequestTimeoutMs = Math.max(requestTimeoutMs, 500);
         this.requestExecutor = Executors.newSingleThreadExecutor(r -> {
             Thread thread = new Thread(r, "jmqx-admin-reporter");
             thread.setDaemon(true);
@@ -64,9 +72,10 @@ public class HttpAdminReporter implements AdminReporter {
             thread.setDaemon(true);
             return thread;
         });
-        this.httpClient = HttpClient.newBuilder()
+        this.httpClient = new OkHttpClient.Builder()
+                .dispatcher(new Dispatcher(requestExecutor))
                 .connectTimeout(Duration.ofMillis(Math.max(connectTimeoutMs, 500)))
-                .executor(requestExecutor)
+                .callTimeout(Duration.ofMillis(effectiveRequestTimeoutMs))
                 .build();
         scheduler.scheduleWithFixedDelay(this::reportNodeMetricsSafely, 1000, this.metricsIntervalMs, TimeUnit.MILLISECONDS);
     }
@@ -133,6 +142,8 @@ public class HttpAdminReporter implements AdminReporter {
     @Override
     public void shutdown() {
         scheduler.shutdownNow();
+        httpClient.dispatcher().cancelAll();
+        httpClient.connectionPool().evictAll();
         requestExecutor.shutdown();
         try {
             if (!requestExecutor.awaitTermination(2, TimeUnit.SECONDS)) {
@@ -162,27 +173,36 @@ public class HttpAdminReporter implements AdminReporter {
     private void requestAsync(String method, String path, String body) {
         String url = baseUrl + path + "?clusterId=" + url(clusterId);
         try {
-            HttpRequest.Builder builder = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
-                    .timeout(Duration.ofMillis(requestTimeoutMs));
+            Request.Builder builder = new Request.Builder()
+                    .url(URI.create(url).toString());
+            AdminAuthRuntime.Config adminAuthConfig = adminAuthRuntime.current();
+            if (!adminAuthConfig.username().isBlank()) {
+                builder.header("Authorization", okhttp3.Credentials.basic(adminAuthConfig.username(), adminAuthConfig.password()));
+            }
             if ("DELETE".equals(method)) {
-                builder.DELETE();
+                builder.delete();
             } else if (body == null) {
-                builder.method(method, HttpRequest.BodyPublishers.noBody());
+                builder.method(method, null);
             } else {
                 builder.header("Content-Type", "application/json");
-                builder.method(method, HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8));
+                builder.method(method, RequestBody.create(body, JSON_MEDIA_TYPE));
             }
-            httpClient.sendAsync(builder.build(), HttpResponse.BodyHandlers.ofString())
-                    .thenAccept(response -> {
-                        if (response.statusCode() >= 300) {
-                            LOG.warning(() -> "[ADMIN] request failed status=" + response.statusCode() + ", url=" + url + ", body=" + response.body());
+            httpClient.newCall(builder.build()).enqueue(new okhttp3.Callback() {
+                @Override
+                public void onFailure(okhttp3.Call call, java.io.IOException exception) {
+                    LOG.fine(() -> "[ADMIN] request error url=" + url + ", error=" + exception.getMessage());
+                }
+
+                @Override
+                public void onResponse(okhttp3.Call call, Response response) throws IOException {
+                    try (response) {
+                        if (response.code() >= 300) {
+                            String responseBody = response.body() == null ? "" : response.body().string();
+                            LOG.warning(() -> "[ADMIN] request failed status=" + response.code() + ", url=" + url + ", body=" + responseBody);
                         }
-                    })
-                    .exceptionally(exception -> {
-                        LOG.fine(() -> "[ADMIN] request error url=" + url + ", error=" + exception.getMessage());
-                        return null;
-                    });
+                    }
+                }
+            });
         } catch (Exception exception) {
             LOG.fine(() -> "[ADMIN] request build failed url=" + url + ", error=" + exception.getMessage());
         }

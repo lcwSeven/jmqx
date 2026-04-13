@@ -8,6 +8,11 @@ import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -16,9 +21,6 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URLDecoder;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -47,11 +49,13 @@ import java.util.logging.Logger;
 public class AdminPanelServer {
 
     private static final Logger LOG = Logger.getLogger(AdminPanelServer.class.getName());
+    private static final MediaType OCTET_STREAM_MEDIA_TYPE = MediaType.get("application/octet-stream");
 
     private final String host;
     private final int port;
     private final String basePath;
     private final String backendBaseUrl;
+    private final AdminAuthRuntime adminAuthRuntime;
     private final String defaultClusterId;
     private final String nodeId;
     private final String nodeIp;
@@ -64,13 +68,14 @@ public class AdminPanelServer {
     private final SecurityConfigUpdater securityConfigUpdater;
     private final ClusterConfigUpdater clusterConfigUpdater;
     private final BuiltInDatabaseUsersUpdater builtInDatabaseUsersUpdater;
-    private final HttpClient httpClient;
+    private final OkHttpClient httpClient;
     private HttpServer server;
 
     public AdminPanelServer(String host,
                             int port,
                             String basePath,
                             String backendBaseUrl,
+                            AdminAuthRuntime adminAuthRuntime,
                             String defaultClusterId,
                             String nodeId,
                             String nodeIp,
@@ -91,6 +96,7 @@ public class AdminPanelServer {
         this.backendBaseUrl = stripTrailingSlash(backendBaseUrl == null || backendBaseUrl.isBlank()
                 ? "http://127.0.0.1:18080"
                 : backendBaseUrl.trim());
+        this.adminAuthRuntime = adminAuthRuntime == null ? new AdminAuthRuntime(AdminAuthRuntime.Config.defaults()) : adminAuthRuntime;
         this.defaultClusterId = normalize(defaultClusterId, "default");
         this.nodeId = normalize(nodeId, "node-1");
         this.nodeIp = normalize(nodeIp, "unknown");
@@ -100,6 +106,11 @@ public class AdminPanelServer {
         this.connectionMetrics = connectionMetrics;
         this.stateStore = stateStore == null ? new EmbeddedAdminStateStore() : stateStore;
         this.builtInDatabaseUserService = builtInDatabaseUserService == null ? new BuiltInDatabaseUserService() : builtInDatabaseUserService;
+        if (!this.stateStore.hasAdminAuthConfig()) {
+            this.stateStore.setAdminAuthConfig(this.adminAuthRuntime.current());
+        } else {
+            this.adminAuthRuntime.update(this.stateStore.getAdminAuthConfig());
+        }
         this.stateStore.createCluster(this.defaultClusterId, "默认集群", this.nodeIp + ":7800");
         if (initialSecurityConfig != null && !this.stateStore.hasSecurityConfig(this.defaultClusterId)) {
             this.stateStore.setSecurityConfig(this.defaultClusterId, initialSecurityConfig);
@@ -132,8 +143,9 @@ public class AdminPanelServer {
                 AdminPanelServer.this.builtInDatabaseUserService.deleteAllUsers();
             }
         } : builtInDatabaseUsersUpdater;
-        this.httpClient = HttpClient.newBuilder()
+        this.httpClient = new OkHttpClient.Builder()
                 .connectTimeout(Duration.ofSeconds(2))
+                .callTimeout(Duration.ofSeconds(5))
                 .build();
     }
 
@@ -207,12 +219,57 @@ public class AdminPanelServer {
 
     private void handleApi(HttpExchange exchange) throws IOException {
         String path = normalizeApiPath(exchange.getRequestURI().getPath());
+        boolean internalApi = path.startsWith("/api/v1/internal/");
+        AdminPrincipal adminPrincipal = internalApi ? new AdminPrincipal("internal", "super_admin") : resolveAuthorizedPrincipal(exchange);
+        if (!internalApi && isAuthRequired() && adminPrincipal == null) {
+            exchange.getResponseHeaders().set("WWW-Authenticate", "Basic realm=\"JMQX Admin\"");
+            writeJson(exchange, 401, "{\"error\":\"unauthorized\"}");
+            return;
+        }
         String method = exchange.getRequestMethod().toUpperCase();
         Map<String, String> query = parseQuery(exchange.getRequestURI().getRawQuery());
         String clusterId = normalize(query.get("clusterId"), defaultClusterId);
         byte[] requestBody = readAll(exchange.getRequestBody());
         String body = new String(requestBody, StandardCharsets.UTF_8);
 
+        if ("/api/v1/admin/session".equals(path) && "GET".equals(method)) {
+            writeJson(exchange, 200, toAdminSessionJson(adminPrincipal));
+            return;
+        }
+        if ("/api/v1/admin/password".equals(path) && "PUT".equals(method)) {
+            String currentPassword = normalize(extractString(body, "currentPassword"), "");
+            String newPassword = normalize(extractString(body, "newPassword"), "");
+            String confirmPassword = normalize(extractString(body, "confirmPassword"), newPassword);
+            if (!adminAuthRuntime.matches(adminPrincipal.username(), currentPassword)) {
+                writeJson(exchange, 400, "{\"error\":\"当前密码不正确\"}");
+                return;
+            }
+            if (newPassword.length() < 4) {
+                writeJson(exchange, 400, "{\"error\":\"新密码长度至少为 4 位\"}");
+                return;
+            }
+            if (!newPassword.equals(confirmPassword)) {
+                writeJson(exchange, 400, "{\"error\":\"两次输入的新密码不一致\"}");
+                return;
+            }
+            AdminAuthRuntime.Config before = adminAuthRuntime.current();
+            AdminAuthRuntime.Config updated = new AdminAuthRuntime.Config(
+                    before.username(),
+                    newPassword,
+                    before.role()
+            ).normalize();
+            adminAuthRuntime.update(updated);
+            stateStore.setAdminAuthConfig(updated);
+            appendAuditLog(
+                    clusterId,
+                    "admin.password.updated",
+                    resolveAdminSource(exchange, adminPrincipal),
+                    toAdminAuditJson(before),
+                    toAdminAuditJson(updated)
+            );
+            writeJson(exchange, 200, "{\"success\":true}");
+            return;
+        }
         if ("/api/v1/clusters".equals(path) && "GET".equals(method)) {
             writeJson(exchange, 200, toClustersJson(stateStore.listClusters()));
             return;
@@ -390,17 +447,14 @@ public class AdminPanelServer {
             target += "?" + uri.getQuery();
         }
         byte[] requestBody = readAll(exchange.getRequestBody());
-        HttpRequest.Builder builder = HttpRequest.newBuilder()
-                .uri(URI.create(target))
-                .timeout(Duration.ofSeconds(5));
+        Request.Builder builder = new Request.Builder()
+                .url(URI.create(target).toString());
 
         String method = exchange.getRequestMethod();
         if ("GET".equalsIgnoreCase(method)) {
-            builder.GET();
-        } else if ("DELETE".equalsIgnoreCase(method)) {
-            builder.method("DELETE", HttpRequest.BodyPublishers.ofByteArray(requestBody));
+            builder.get();
         } else {
-            builder.method(method, HttpRequest.BodyPublishers.ofByteArray(requestBody));
+            builder.method(method, RequestBody.create(requestBody, OCTET_STREAM_MEDIA_TYPE));
         }
 
         String contentType = exchange.getRequestHeaders().getFirst("Content-Type");
@@ -409,19 +463,17 @@ public class AdminPanelServer {
         }
 
         try {
-            HttpResponse<byte[]> response = httpClient.send(builder.build(), HttpResponse.BodyHandlers.ofByteArray());
-            Headers headers = exchange.getResponseHeaders();
-            for (Map.Entry<String, java.util.List<String>> entry : response.headers().map().entrySet()) {
-                if ("transfer-encoding".equalsIgnoreCase(entry.getKey())) {
-                    continue;
+            try (Response response = httpClient.newCall(builder.build()).execute()) {
+                Headers headers = exchange.getResponseHeaders();
+                for (String name : response.headers().names()) {
+                    if ("transfer-encoding".equalsIgnoreCase(name)) {
+                        continue;
+                    }
+                    headers.put(name, response.headers(name));
                 }
-                headers.put(entry.getKey(), entry.getValue());
+                byte[] responseBody = response.body() == null ? new byte[0] : response.body().bytes();
+                write(exchange, response.code(), headers.getFirst("Content-Type"), responseBody);
             }
-            write(exchange, response.statusCode(), headers.getFirst("Content-Type"), response.body());
-        } catch (InterruptedException exception) {
-            Thread.currentThread().interrupt();
-            write(exchange, 502, "text/plain; charset=UTF-8",
-                    ("Proxy interrupted: " + exception.getMessage()).getBytes(StandardCharsets.UTF_8));
         } catch (Exception exception) {
             write(exchange, 502, "text/plain; charset=UTF-8",
                     ("Proxy failed: " + exception.getMessage()).getBytes(StandardCharsets.UTF_8));
@@ -636,8 +688,16 @@ public class AdminPanelServer {
 
     private static String toAuthHttpJson(EmbeddedAdminStateStore.AuthHttpConfig config) {
         return "{"
+                + "\"method\":\"" + escape(config.method()) + "\","
                 + "\"url\":\"" + escape(config.url()) + "\","
-                + "\"timeoutMs\":" + config.timeoutMs()
+                + "\"headersText\":\"" + escape(config.headersText()) + "\","
+                + "\"tlsEnabled\":" + config.tlsEnabled() + ","
+                + "\"bodyTemplate\":\"" + escape(config.bodyTemplate()) + "\","
+                + "\"poolSize\":" + config.poolSize() + ","
+                + "\"rateLimitPerSecond\":" + config.rateLimitPerSecond() + ","
+                + "\"requestTimeoutMs\":" + config.requestTimeoutMs() + ","
+                + "\"connectTimeoutMs\":" + config.connectTimeoutMs() + ","
+                + "\"pipelineCount\":" + config.pipelineCount()
                 + "}";
     }
 
@@ -736,6 +796,32 @@ public class AdminPanelServer {
         }
         builder.append("]");
         return builder.toString();
+    }
+
+    private static String toAdminSessionJson(AdminPrincipal principal) {
+        if (principal == null) {
+            return "{\"authenticated\":false}";
+        }
+        String permissions = principal.superAdmin()
+                ? "[\"*\"]"
+                : "[]";
+        return "{"
+                + "\"authenticated\":true,"
+                + "\"username\":\"" + escape(principal.username()) + "\","
+                + "\"role\":\"" + escape(principal.role()) + "\","
+                + "\"superAdmin\":" + principal.superAdmin() + ","
+                + "\"permissions\":" + permissions
+                + "}";
+    }
+
+    private static String toAdminAuditJson(AdminAuthRuntime.Config config) {
+        if (config == null) {
+            return "{}";
+        }
+        return "{"
+                + "\"username\":\"" + escape(config.username()) + "\","
+                + "\"role\":\"" + escape(config.role()) + "\""
+                + "}";
     }
 
     private String buildBuiltInUsersJson(String clusterId) {
@@ -900,11 +986,23 @@ public class AdminPanelServer {
     }
 
     private static String extractString(String body, String key) {
-        Matcher matcher = Pattern.compile("\"" + Pattern.quote(key) + "\"\\s*:\\s*\"([^\"]*)\"").matcher(body);
+        Matcher matcher = Pattern.compile("\"" + Pattern.quote(key) + "\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"", Pattern.DOTALL).matcher(body);
         if (matcher.find()) {
-            return matcher.group(1);
+            return unescapeJsonString(matcher.group(1));
         }
         return null;
+    }
+
+    private static String unescapeJsonString(String value) {
+        if (value == null) {
+            return null;
+        }
+        return value
+                .replace("\\n", "\n")
+                .replace("\\r", "\r")
+                .replace("\\t", "\t")
+                .replace("\\\"", "\"")
+                .replace("\\\\", "\\");
     }
 
     private static List<String> extractStringList(String body, String key) {
@@ -974,8 +1072,16 @@ public class AdminPanelServer {
             return current;
         }
         return new EmbeddedAdminStateStore.AuthHttpConfig(
+                normalize(extractString(segment, "method"), current.method()),
                 normalize(extractString(segment, "url"), current.url()),
-                extractInt(segment, "timeoutMs", current.timeoutMs())
+                normalize(extractString(segment, "headersText"), current.headersText()),
+                extractBoolean(segment, "tlsEnabled", current.tlsEnabled()),
+                normalize(extractString(segment, "bodyTemplate"), current.bodyTemplate()),
+                extractInt(segment, "poolSize", current.poolSize()),
+                extractInt(segment, "rateLimitPerSecond", current.rateLimitPerSecond()),
+                extractInt(segment, "requestTimeoutMs", extractInt(segment, "timeoutMs", current.requestTimeoutMs())),
+                extractInt(segment, "connectTimeoutMs", current.connectTimeoutMs()),
+                extractInt(segment, "pipelineCount", current.pipelineCount())
         );
     }
 
@@ -1183,6 +1289,39 @@ public class AdminPanelServer {
         return value;
     }
 
+    private boolean isAuthRequired() {
+        return adminAuthRuntime.isAuthRequired();
+    }
+
+    private AdminPrincipal resolveAuthorizedPrincipal(HttpExchange exchange) {
+        if (!isAuthRequired()) {
+            return new AdminPrincipal("anonymous", "super_admin");
+        }
+        String authorization = exchange.getRequestHeaders().getFirst("Authorization");
+        if (authorization == null || !authorization.regionMatches(true, 0, "Basic ", 0, 6)) {
+            return null;
+        }
+        String encoded = authorization.substring(6).trim();
+        if (encoded.isBlank()) {
+            return null;
+        }
+        try {
+            String decoded = new String(java.util.Base64.getDecoder().decode(encoded), StandardCharsets.UTF_8);
+            int split = decoded.indexOf(':');
+            if (split < 0) {
+                return null;
+            }
+            String username = decoded.substring(0, split);
+            String password = decoded.substring(split + 1);
+            if (adminAuthRuntime.matches(username, password)) {
+                return new AdminPrincipal(username, adminAuthRuntime.current().role());
+            }
+            return null;
+        } catch (IllegalArgumentException ignored) {
+            return null;
+        }
+    }
+
     private void appendAuditLog(String clusterId, String action, String source, String beforeJson, String afterJson) {
         long now = System.currentTimeMillis();
         stateStore.appendAuditLog(clusterId, new EmbeddedAdminStateStore.AuditLogEntry(
@@ -1194,6 +1333,20 @@ public class AdminPanelServer {
                 beforeJson,
                 afterJson
         ));
+    }
+
+    private record AdminPrincipal(
+            String username,
+            String role
+    ) {
+        private boolean superAdmin() {
+            return "super_admin".equalsIgnoreCase(role);
+        }
+    }
+
+    private static String resolveAdminSource(HttpExchange exchange, AdminPrincipal principal) {
+        String username = principal == null ? "anonymous" : normalize(principal.username(), "anonymous");
+        return username + "@" + resolveAuditSource(exchange);
     }
 
     private static String resolveAuditSource(HttpExchange exchange) {
@@ -1212,6 +1365,9 @@ public class AdminPanelServer {
         }
         return value
                 .replace("\\", "\\\\")
+                .replace("\r", "\\r")
+                .replace("\n", "\\n")
+                .replace("\t", "\\t")
                 .replace("\"", "\\\"");
     }
 

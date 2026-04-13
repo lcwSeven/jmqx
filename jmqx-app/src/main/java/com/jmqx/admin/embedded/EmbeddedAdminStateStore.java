@@ -16,9 +16,27 @@ import java.util.concurrent.CopyOnWriteArrayList;
 public class EmbeddedAdminStateStore implements AdminStateRepository {
 
     private final Map<String, ClusterState> clusterStates = new ConcurrentHashMap<>();
+    private volatile AdminAuthRuntime.Config adminAuthConfig = AdminAuthRuntime.Config.defaults();
+    private volatile boolean adminAuthConfigInitialized;
 
     public EmbeddedAdminStateStore() {
         createCluster("default", "默认集群", "127.0.0.1:7800");
+    }
+
+    @Override
+    public AdminAuthRuntime.Config getAdminAuthConfig() {
+        return adminAuthConfig;
+    }
+
+    @Override
+    public void setAdminAuthConfig(AdminAuthRuntime.Config adminAuthConfig) {
+        this.adminAuthConfig = adminAuthConfig == null ? AdminAuthRuntime.Config.defaults() : adminAuthConfig.normalize();
+        this.adminAuthConfigInitialized = true;
+    }
+
+    @Override
+    public boolean hasAdminAuthConfig() {
+        return adminAuthConfigInitialized;
     }
 
     @Override
@@ -218,13 +236,38 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
         }
     }
 
-    public record AuthHttpConfig(String url, int timeoutMs) {
+    public record AuthHttpConfig(
+            String method,
+            String url,
+            String headersText,
+            boolean tlsEnabled,
+            String bodyTemplate,
+            int poolSize,
+            int rateLimitPerSecond,
+            int requestTimeoutMs,
+            int connectTimeoutMs,
+            int pipelineCount
+    ) {
         public AuthHttpConfig {
+            method = normalize(method, "POST");
             url = normalize(url, "");
+            headersText = headersText == null ? "" : headersText.trim();
+            bodyTemplate = bodyTemplate == null ? "" : bodyTemplate;
         }
 
         public static AuthHttpConfig defaults() {
-            return new AuthHttpConfig("http://127.0.0.1:8080/auth/check", 2000);
+            return new AuthHttpConfig(
+                    "POST",
+                    "http://127.0.0.1:8080/auth/check",
+                    "content-type: application/json",
+                    false,
+                    "{\n  \"username\": \"${username}\",\n  \"password\": \"${password}\"\n}",
+                    4,
+                    0,
+                    2000,
+                    1500,
+                    2
+            );
         }
     }
 

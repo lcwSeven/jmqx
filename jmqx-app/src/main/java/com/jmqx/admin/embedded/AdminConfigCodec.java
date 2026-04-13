@@ -86,14 +86,22 @@ public final class AdminConfigCodec {
         try {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             DataOutputStream data = new DataOutputStream(out);
-            data.writeByte(7);
+            data.writeByte(9);
             data.writeBoolean(config.aclEnabled());
             writeStringList(data, config.aclChain());
             data.writeBoolean(config.authEnabled());
             writeStringList(data, config.authChain());
             data.writeLong(config.cacheTtlMs());
+            writeString(data, config.authHttp().method());
             writeString(data, config.authHttp().url());
-            data.writeInt(config.authHttp().timeoutMs());
+            writeString(data, config.authHttp().headersText());
+            data.writeBoolean(config.authHttp().tlsEnabled());
+            writeString(data, config.authHttp().bodyTemplate());
+            data.writeInt(config.authHttp().poolSize());
+            data.writeInt(config.authHttp().rateLimitPerSecond());
+            data.writeInt(config.authHttp().requestTimeoutMs());
+            data.writeInt(config.authHttp().connectTimeoutMs());
+            data.writeInt(config.authHttp().pipelineCount());
             writeString(data, config.authFile().path());
             writeString(data, config.authBuiltInDatabase().accountType());
             writeString(data, config.authBuiltInDatabase().passwordHashAlgorithm());
@@ -133,7 +141,64 @@ public final class AdminConfigCodec {
         try {
             DataInputStream in = new DataInputStream(new ByteArrayInputStream(raw));
             int version = in.readByte();
-            if (version != 7) {
+            if (version == 8) {
+                return new EmbeddedAdminStateStore.SecurityConfig(
+                        in.readBoolean(),
+                        readStringList(in),
+                        in.readBoolean(),
+                        readStringList(in),
+                        in.readLong(),
+                        new EmbeddedAdminStateStore.AuthHttpConfig(
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                in.readBoolean(),
+                                readString(in),
+                                in.readInt(),
+                                0,
+                                in.readInt(),
+                                in.readInt(),
+                                in.readInt()
+                        ),
+                        new EmbeddedAdminStateStore.AuthFileConfig(readString(in)),
+                        new EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig(
+                                readString(in),
+                                readString(in),
+                                readString(in)
+                        ),
+                        new EmbeddedAdminStateStore.AuthRedisConfig(
+                                readString(in),
+                                in.readInt(),
+                                readString(in),
+                                in.readInt(),
+                                readString(in),
+                                in.readInt()
+                        ),
+                        new EmbeddedAdminStateStore.AuthMysqlConfig(
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                in.readInt(),
+                                in.readInt(),
+                                in.readLong(),
+                                in.readLong(),
+                                in.readLong()
+                        ),
+                        new EmbeddedAdminStateStore.AuthPostgresqlConfig(
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                in.readInt(),
+                                in.readInt(),
+                                in.readLong(),
+                                in.readLong(),
+                                in.readLong()
+                        )
+                );
+            }
+            if (version != 9) {
                 return null;
             }
             return new EmbeddedAdminStateStore.SecurityConfig(
@@ -142,7 +207,18 @@ public final class AdminConfigCodec {
                     in.readBoolean(),
                     readStringList(in),
                     in.readLong(),
-                    new EmbeddedAdminStateStore.AuthHttpConfig(readString(in), in.readInt()),
+                    new EmbeddedAdminStateStore.AuthHttpConfig(
+                            readString(in),
+                            readString(in),
+                            readString(in),
+                            in.readBoolean(),
+                            readString(in),
+                            in.readInt(),
+                            in.readInt(),
+                            in.readInt(),
+                            in.readInt(),
+                            in.readInt()
+                    ),
                     new EmbeddedAdminStateStore.AuthFileConfig(readString(in)),
                     new EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig(
                             readString(in),

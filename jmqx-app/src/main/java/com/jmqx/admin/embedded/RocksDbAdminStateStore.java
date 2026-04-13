@@ -37,6 +37,7 @@ public class RocksDbAdminStateStore implements AdminStateRepository {
     private static final byte[] SECURITY_CONFIG_PREFIX = "security-config:".getBytes(StandardCharsets.UTF_8);
     private static final byte[] NODE_METRICS_PREFIX = "node-metrics:".getBytes(StandardCharsets.UTF_8);
     private static final byte[] AUDIT_LOG_PREFIX = "audit-log:".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] ADMIN_AUTH_CONFIG_KEY = "admin-auth-config".getBytes(StandardCharsets.UTF_8);
 
     private final EmbeddedAdminStateStore memoryFallback = new EmbeddedAdminStateStore();
     private final Options options;
@@ -52,6 +53,22 @@ public class RocksDbAdminStateStore implements AdminStateRepository {
         } catch (RocksDBException exception) {
             throw new IllegalStateException("open admin-state rocksdb failed: " + exception.getMessage(), exception);
         }
+    }
+
+    @Override
+    public AdminAuthRuntime.Config getAdminAuthConfig() {
+        return memoryFallback.getAdminAuthConfig();
+    }
+
+    @Override
+    public void setAdminAuthConfig(AdminAuthRuntime.Config adminAuthConfig) {
+        memoryFallback.setAdminAuthConfig(adminAuthConfig);
+        put(ADMIN_AUTH_CONFIG_KEY, encodeAdminAuthConfig(memoryFallback.getAdminAuthConfig()), "setAdminAuthConfig");
+    }
+
+    @Override
+    public boolean hasAdminAuthConfig() {
+        return memoryFallback.hasAdminAuthConfig();
     }
 
     @Override
@@ -194,8 +211,46 @@ public class RocksDbAdminStateStore implements AdminStateRepository {
                     if (entry != null) {
                         memoryFallback.appendAuditLog(clusterId, entry);
                     }
+                    continue;
+                }
+                if (matches(key, ADMIN_AUTH_CONFIG_KEY)) {
+                    AdminAuthRuntime.Config config = decodeAdminAuthConfig(value);
+                    if (config != null) {
+                        memoryFallback.setAdminAuthConfig(config);
+                    }
                 }
             }
+        }
+    }
+
+    private static byte[] encodeAdminAuthConfig(AdminAuthRuntime.Config config) {
+        try {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            DataOutputStream data = new DataOutputStream(out);
+            data.writeByte(1);
+            writeString(data, config.username());
+            writeString(data, config.password());
+            writeString(data, config.role());
+            data.flush();
+            return out.toByteArray();
+        } catch (Exception exception) {
+            throw new IllegalStateException("encode admin auth config failed", exception);
+        }
+    }
+
+    private static AdminAuthRuntime.Config decodeAdminAuthConfig(byte[] raw) {
+        try {
+            DataInputStream in = new DataInputStream(new ByteArrayInputStream(raw));
+            if (in.readByte() != 1) {
+                return null;
+            }
+            return new AdminAuthRuntime.Config(
+                    readString(in),
+                    readString(in),
+                    readString(in)
+            ).normalize();
+        } catch (Exception ignored) {
+            return null;
         }
     }
 
@@ -277,14 +332,22 @@ public class RocksDbAdminStateStore implements AdminStateRepository {
         try {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             DataOutputStream data = new DataOutputStream(out);
-            data.writeByte(7);
+            data.writeByte(9);
             data.writeBoolean(config.aclEnabled());
             writeStringList(data, config.aclChain());
             data.writeBoolean(config.authEnabled());
             writeStringList(data, config.authChain());
             data.writeLong(config.cacheTtlMs());
+            writeString(data, config.authHttp().method());
             writeString(data, config.authHttp().url());
-            data.writeInt(config.authHttp().timeoutMs());
+            writeString(data, config.authHttp().headersText());
+            data.writeBoolean(config.authHttp().tlsEnabled());
+            writeString(data, config.authHttp().bodyTemplate());
+            data.writeInt(config.authHttp().poolSize());
+            data.writeInt(config.authHttp().rateLimitPerSecond());
+            data.writeInt(config.authHttp().requestTimeoutMs());
+            data.writeInt(config.authHttp().connectTimeoutMs());
+            data.writeInt(config.authHttp().pipelineCount());
             writeString(data, config.authFile().path());
             writeString(data, config.authBuiltInDatabase().accountType());
             writeString(data, config.authBuiltInDatabase().passwordHashAlgorithm());
@@ -340,7 +403,7 @@ public class RocksDbAdminStateStore implements AdminStateRepository {
                         in.readBoolean(),
                         readStringList(in),
                         in.readLong(),
-                        new EmbeddedAdminStateStore.AuthHttpConfig(readString(in), in.readInt()),
+                        EmbeddedAdminStateStore.AuthHttpConfig.defaults(),
                         new EmbeddedAdminStateStore.AuthFileConfig(readString(in)),
                         EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig.defaults(),
                         new EmbeddedAdminStateStore.AuthRedisConfig(
@@ -372,7 +435,7 @@ public class RocksDbAdminStateStore implements AdminStateRepository {
                         in.readBoolean(),
                         readStringList(in),
                         in.readLong(),
-                        new EmbeddedAdminStateStore.AuthHttpConfig(readString(in), in.readInt()),
+                        EmbeddedAdminStateStore.AuthHttpConfig.defaults(),
                         new EmbeddedAdminStateStore.AuthFileConfig(readString(in)),
                         EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig.defaults(),
                         new EmbeddedAdminStateStore.AuthRedisConfig(
@@ -404,7 +467,7 @@ public class RocksDbAdminStateStore implements AdminStateRepository {
                         in.readBoolean(),
                         readStringList(in),
                         in.readLong(),
-                        new EmbeddedAdminStateStore.AuthHttpConfig(readString(in), in.readInt()),
+                        EmbeddedAdminStateStore.AuthHttpConfig.defaults(),
                         new EmbeddedAdminStateStore.AuthFileConfig(readString(in)),
                         new EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig("username", "plain", "disable"),
                         new EmbeddedAdminStateStore.AuthRedisConfig(
@@ -436,7 +499,7 @@ public class RocksDbAdminStateStore implements AdminStateRepository {
                         in.readBoolean(),
                         readStringList(in),
                         in.readLong(),
-                        new EmbeddedAdminStateStore.AuthHttpConfig(readString(in), in.readInt()),
+                        EmbeddedAdminStateStore.AuthHttpConfig.defaults(),
                         new EmbeddedAdminStateStore.AuthFileConfig(readString(in)),
                         new EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig(
                                 readString(in),
@@ -472,7 +535,7 @@ public class RocksDbAdminStateStore implements AdminStateRepository {
                         in.readBoolean(),
                         readStringList(in),
                         in.readLong(),
-                        new EmbeddedAdminStateStore.AuthHttpConfig(readString(in), in.readInt()),
+                        EmbeddedAdminStateStore.AuthHttpConfig.defaults(),
                         new EmbeddedAdminStateStore.AuthFileConfig(readString(in)),
                         new EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig(
                                 readString(in),
@@ -501,7 +564,121 @@ public class RocksDbAdminStateStore implements AdminStateRepository {
                         EmbeddedAdminStateStore.AuthPostgresqlConfig.defaults()
                 );
             }
-            if (version != 7) {
+            if (version == 7) {
+                return new EmbeddedAdminStateStore.SecurityConfig(
+                        in.readBoolean(),
+                        readStringList(in),
+                        in.readBoolean(),
+                        readStringList(in),
+                        in.readLong(),
+                        new EmbeddedAdminStateStore.AuthHttpConfig(
+                                "POST",
+                                readString(in),
+                                "content-type: application/json",
+                                false,
+                                "{\n  \"username\": \"${username}\",\n  \"password\": \"${password}\"\n}",
+                                4,
+                                0,
+                                in.readInt(),
+                                1500,
+                                2
+                        ),
+                        new EmbeddedAdminStateStore.AuthFileConfig(readString(in)),
+                        new EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig(
+                                readString(in),
+                                readString(in),
+                                readString(in)
+                        ),
+                        new EmbeddedAdminStateStore.AuthRedisConfig(
+                                readString(in),
+                                in.readInt(),
+                                readString(in),
+                                in.readInt(),
+                                readString(in),
+                                in.readInt()
+                        ),
+                        new EmbeddedAdminStateStore.AuthMysqlConfig(
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                in.readInt(),
+                                in.readInt(),
+                                in.readLong(),
+                                in.readLong(),
+                                in.readLong()
+                        ),
+                        new EmbeddedAdminStateStore.AuthPostgresqlConfig(
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                in.readInt(),
+                                in.readInt(),
+                                in.readLong(),
+                                in.readLong(),
+                                in.readLong()
+                        )
+                );
+            }
+            if (version == 8) {
+                return new EmbeddedAdminStateStore.SecurityConfig(
+                        in.readBoolean(),
+                        readStringList(in),
+                        in.readBoolean(),
+                        readStringList(in),
+                        in.readLong(),
+                        new EmbeddedAdminStateStore.AuthHttpConfig(
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                in.readBoolean(),
+                                readString(in),
+                                in.readInt(),
+                                0,
+                                in.readInt(),
+                                in.readInt(),
+                                in.readInt()
+                        ),
+                        new EmbeddedAdminStateStore.AuthFileConfig(readString(in)),
+                        new EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig(
+                                readString(in),
+                                readString(in),
+                                readString(in)
+                        ),
+                        new EmbeddedAdminStateStore.AuthRedisConfig(
+                                readString(in),
+                                in.readInt(),
+                                readString(in),
+                                in.readInt(),
+                                readString(in),
+                                in.readInt()
+                        ),
+                        new EmbeddedAdminStateStore.AuthMysqlConfig(
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                in.readInt(),
+                                in.readInt(),
+                                in.readLong(),
+                                in.readLong(),
+                                in.readLong()
+                        ),
+                        new EmbeddedAdminStateStore.AuthPostgresqlConfig(
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                in.readInt(),
+                                in.readInt(),
+                                in.readLong(),
+                                in.readLong(),
+                                in.readLong()
+                        )
+                );
+            }
+            if (version != 9) {
                 return null;
             }
             return new EmbeddedAdminStateStore.SecurityConfig(
@@ -510,7 +687,18 @@ public class RocksDbAdminStateStore implements AdminStateRepository {
                     in.readBoolean(),
                     readStringList(in),
                     in.readLong(),
-                    new EmbeddedAdminStateStore.AuthHttpConfig(readString(in), in.readInt()),
+                    new EmbeddedAdminStateStore.AuthHttpConfig(
+                            readString(in),
+                            readString(in),
+                            readString(in),
+                            in.readBoolean(),
+                            readString(in),
+                            in.readInt(),
+                            in.readInt(),
+                            in.readInt(),
+                            in.readInt(),
+                            in.readInt()
+                    ),
                     new EmbeddedAdminStateStore.AuthFileConfig(readString(in)),
                     new EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig(
                             readString(in),
@@ -691,6 +879,18 @@ public class RocksDbAdminStateStore implements AdminStateRepository {
         }
         for (int i = 0; i < prefix.length; i++) {
             if (source[i] != prefix[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean matches(byte[] source, byte[] target) {
+        if (source == null || target == null || source.length != target.length) {
+            return false;
+        }
+        for (int i = 0; i < source.length; i++) {
+            if (source[i] != target[i]) {
                 return false;
             }
         }

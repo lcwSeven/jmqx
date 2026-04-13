@@ -48,6 +48,16 @@ public class CachedAuthProvider implements AuthProvider {
     }
 
     @Override
+    public void evictCache(String clientId, String username) {
+        String normalizedClientId = CacheKey.normalize(clientId);
+        if (normalizedClientId.isEmpty()) {
+            return;
+        }
+        cache.remove(new CacheKey(normalizedClientId));
+        delegate.evictCache(clientId, username);
+    }
+
+    @Override
     public void close() {
         cache.clear();
         delegate.close();
@@ -59,13 +69,13 @@ public class CachedAuthProvider implements AuthProvider {
      */
     private static class CacheKey {
         private final String clientId;
-        private final String username;
-        private final String password;
 
         private CacheKey(AuthRequest request) {
-            this.clientId = normalize(request.getClientId());
-            this.username = normalize(request.getUsername());
-            this.password = normalize(request.getPassword());
+            this(normalize(request.getClientId()));
+        }
+
+        private CacheKey(String clientId) {
+            this.clientId = normalize(clientId);
         }
 
         private static String normalize(String v) {
@@ -80,12 +90,12 @@ public class CachedAuthProvider implements AuthProvider {
             if (!(o instanceof CacheKey cacheKey)) {
                 return false;
             }
-            return Objects.equals(clientId, cacheKey.clientId) && Objects.equals(username, cacheKey.username) && Objects.equals(password, cacheKey.password);
+            return Objects.equals(clientId, cacheKey.clientId);
         }
 
         @Override
         public int hashCode() {
-            return Objects.hash(clientId, username, password);
+            return Objects.hash(clientId);
         }
     }
 

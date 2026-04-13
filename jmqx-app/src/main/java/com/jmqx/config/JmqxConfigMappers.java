@@ -62,8 +62,16 @@ public final class JmqxConfigMappers {
         AuthProperties properties = new AuthProperties();
         properties.setChain(config.getString("jmqx.auth.chain", properties.getChain()));
         properties.setCacheMillis(config.getInt("jmqx.auth.cacheMillis", properties.getCacheMillis()));
+        properties.setHttpMethod(config.getString("jmqx.auth.http.method", properties.getHttpMethod()));
         properties.setHttpUrl(config.getString("jmqx.auth.http.url", properties.getHttpUrl()));
-        properties.setHttpTimeoutMs(config.getInt("jmqx.auth.http.timeoutMs", properties.getHttpTimeoutMs()));
+        properties.setHttpHeaders(config.getString("jmqx.auth.http.headers", properties.getHttpHeaders()));
+        properties.setHttpTlsEnabled(config.getBoolean("jmqx.auth.http.tlsEnabled", properties.isHttpTlsEnabled()));
+        properties.setHttpBodyTemplate(config.getString("jmqx.auth.http.bodyTemplate", properties.getHttpBodyTemplate()));
+        properties.setHttpPoolSize(config.getInt("jmqx.auth.http.poolSize", properties.getHttpPoolSize()));
+        properties.setHttpRateLimitPerSecond(config.getInt("jmqx.auth.http.rateLimitPerSecond", properties.getHttpRateLimitPerSecond()));
+        properties.setHttpRequestTimeoutMs(config.getInt("jmqx.auth.http.requestTimeoutMs", config.getInt("jmqx.auth.http.timeoutMs", properties.getHttpRequestTimeoutMs())));
+        properties.setHttpConnectTimeoutMs(config.getInt("jmqx.auth.http.connectTimeoutMs", properties.getHttpConnectTimeoutMs()));
+        properties.setHttpPipelineCount(config.getInt("jmqx.auth.http.pipelineCount", properties.getHttpPipelineCount()));
         properties.setFilePath(config.getString("jmqx.auth.file.path", properties.getFilePath()));
         properties.setBuiltInDatabaseAccountType(config.getString("jmqx.auth.builtInDatabase.accountType", properties.getBuiltInDatabaseAccountType()));
         properties.setBuiltInDatabasePasswordHashAlgorithm(config.getString("jmqx.auth.builtInDatabase.passwordHashAlgorithm", properties.getBuiltInDatabasePasswordHashAlgorithm()));

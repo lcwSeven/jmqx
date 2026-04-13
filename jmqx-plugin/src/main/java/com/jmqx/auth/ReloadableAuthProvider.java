@@ -27,6 +27,11 @@ public class ReloadableAuthProvider implements AuthProvider {
     }
 
     @Override
+    public void evictCache(String clientId, String username) {
+        delegate.evictCache(clientId, username);
+    }
+
+    @Override
     public void close() {
         AuthProvider current = this.delegate;
         this.delegate = new AllowAllAuthProvider();

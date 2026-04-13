@@ -165,13 +165,69 @@ export const securityPageTemplate = `
           </el-select>
         </label>
         <label class="field" v-if="authDraft.datasource==='http'">
+          <span class="field-label">请求方式</span>
+          <el-select v-model="authDraft.httpMethod">
+            <el-option value="POST" label="POST"></el-option>
+            <el-option value="GET" label="GET"></el-option>
+            <el-option value="PUT" label="PUT"></el-option>
+          </el-select>
+        </label>
+        <label class="field" v-if="authDraft.datasource==='http'">
           <span class="field-label">HTTP 认证地址</span>
           <el-input v-model="authDraft.httpUrl" placeholder="http://host:port/auth/check"/>
         </label>
         <label class="field" v-if="authDraft.datasource==='http'">
-          <span class="field-label">HTTP 超时（毫秒）</span>
-          <el-input-number v-model="authDraft.httpTimeoutMs" :min="0" controls-position="right" />
+          <span class="field-label">启用 TLS</span>
+          <el-switch v-model="authDraft.httpTlsEnabled" active-text="是" inactive-text="否"></el-switch>
         </label>
+        <div class="field auth-http-header-field" v-if="authDraft.datasource==='http'">
+          <span class="field-label">请求头</span>
+          <div class="auth-http-headers">
+            <div class="auth-http-header-row auth-http-header-head">
+              <span>键</span>
+              <span>值</span>
+              <el-button text type="primary" @click="addHttpHeaderRow">添加</el-button>
+            </div>
+            <div class="auth-http-header-row" v-for="(header, index) in authDraft.httpHeaders" :key="'http-header-' + index">
+              <el-input v-model="header.key" placeholder="content-type"/>
+              <el-input v-model="header.value" placeholder="application/json"/>
+              <el-button text type="danger" @click="removeHttpHeaderRow(index)">删除</el-button>
+            </div>
+          </div>
+        </div>
+        <label class="field" v-if="authDraft.datasource==='http'">
+          <span class="field-label">请求体</span>
+          <el-input
+              v-model="authDraft.httpBodyTemplate"
+              type="textarea"
+              :rows="8"
+              placeholder='{"username":"\${username}","password":"\${password}"}'/>
+        </label>
+        <details class="advanced-block" v-if="authDraft.datasource==='http'">
+          <summary class="advanced-summary">高级配置：HTTP 连接池与超时</summary>
+          <div class="advanced-fields">
+            <label class="field">
+              <span class="field-label">连接池大小</span>
+              <el-input-number v-model="authDraft.httpPoolSize" :min="1" controls-position="right" />
+            </label>
+            <label class="field">
+              <span class="field-label">限流（次/秒）</span>
+              <el-input-number v-model="authDraft.httpRateLimitPerSecond" :min="0" controls-position="right" />
+            </label>
+            <label class="field">
+              <span class="field-label">请求超时时间（毫秒）</span>
+              <el-input-number v-model="authDraft.httpRequestTimeoutMs" :min="200" controls-position="right" />
+            </label>
+            <label class="field">
+              <span class="field-label">连接超时时间（毫秒）</span>
+              <el-input-number v-model="authDraft.httpConnectTimeoutMs" :min="200" controls-position="right" />
+            </label>
+            <label class="field">
+              <span class="field-label">HTTP 管道数量</span>
+              <el-input-number v-model="authDraft.httpPipelineCount" :min="1" controls-position="right" />
+            </label>
+          </div>
+        </details>
         <label class="field" v-if="authDraft.datasource==='redis'">
           <span class="field-label">Redis Host</span>
           <el-input v-model="authDraft.redisHost" placeholder="127.0.0.1"/>

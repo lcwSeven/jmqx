@@ -9,6 +9,7 @@ import { builtInUsersPageMethods } from "./pages/built-in-users.js";
 import { clusterPageMethods } from "./pages/cluster.js";
 import { auditPageMethods } from "./pages/audit.js";
 import { adminTemplate } from "./template.js";
+import { getStoredAdminAuth } from "../api.js";
 
 const { createApp } = Vue;
 
@@ -17,8 +18,18 @@ export function createAdminApp() {
         data: createInitialState,
         computed: adminComputed,
         async mounted() {
-            await this.reloadCurrentClusterData();
-            this.connectDashboardStream();
+            const auth = getStoredAdminAuth();
+            this.adminLoginForm.username = auth.username || "";
+            this.adminLoginForm.password = auth.password || "";
+            try {
+                await this.reloadCurrentClusterData();
+            } finally {
+                if (this.adminAuthenticated) {
+                    this.connectDashboardStream();
+                } else {
+                    this.disconnectDashboardStream();
+                }
+            }
         },
         beforeUnmount() {
             this.disconnectDashboardStream();

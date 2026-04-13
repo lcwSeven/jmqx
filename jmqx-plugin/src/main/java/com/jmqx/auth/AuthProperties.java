@@ -8,8 +8,16 @@ public class AuthProperties {
     private String chain = "";
     private int cacheMillis = 60_000;
 
+    private String httpMethod = "POST";
     private String httpUrl = "";
-    private int httpTimeoutMs = 2000;
+    private String httpHeaders = "content-type: application/json";
+    private boolean httpTlsEnabled = false;
+    private String httpBodyTemplate = "{\n  \"username\": \"${username}\",\n  \"password\": \"${password}\"\n}";
+    private int httpPoolSize = 4;
+    private int httpRateLimitPerSecond = 0;
+    private int httpRequestTimeoutMs = 2000;
+    private int httpConnectTimeoutMs = 1500;
+    private int httpPipelineCount = 2;
 
     private String filePath = "auth-users.txt";
 
@@ -62,6 +70,14 @@ public class AuthProperties {
         this.cacheMillis = cacheMillis;
     }
 
+    public String getHttpMethod() {
+        return httpMethod;
+    }
+
+    public void setHttpMethod(String httpMethod) {
+        this.httpMethod = httpMethod;
+    }
+
     public String getHttpUrl() {
         return httpUrl;
     }
@@ -70,12 +86,76 @@ public class AuthProperties {
         this.httpUrl = httpUrl;
     }
 
+    public String getHttpHeaders() {
+        return httpHeaders;
+    }
+
+    public void setHttpHeaders(String httpHeaders) {
+        this.httpHeaders = httpHeaders;
+    }
+
+    public boolean isHttpTlsEnabled() {
+        return httpTlsEnabled;
+    }
+
+    public void setHttpTlsEnabled(boolean httpTlsEnabled) {
+        this.httpTlsEnabled = httpTlsEnabled;
+    }
+
+    public String getHttpBodyTemplate() {
+        return httpBodyTemplate;
+    }
+
+    public void setHttpBodyTemplate(String httpBodyTemplate) {
+        this.httpBodyTemplate = httpBodyTemplate;
+    }
+
+    public int getHttpPoolSize() {
+        return httpPoolSize;
+    }
+
+    public void setHttpPoolSize(int httpPoolSize) {
+        this.httpPoolSize = httpPoolSize;
+    }
+
+    public int getHttpRequestTimeoutMs() {
+        return httpRequestTimeoutMs;
+    }
+
+    public int getHttpRateLimitPerSecond() {
+        return httpRateLimitPerSecond;
+    }
+
+    public void setHttpRateLimitPerSecond(int httpRateLimitPerSecond) {
+        this.httpRateLimitPerSecond = httpRateLimitPerSecond;
+    }
+
+    public void setHttpRequestTimeoutMs(int httpRequestTimeoutMs) {
+        this.httpRequestTimeoutMs = httpRequestTimeoutMs;
+    }
+
+    public int getHttpConnectTimeoutMs() {
+        return httpConnectTimeoutMs;
+    }
+
+    public void setHttpConnectTimeoutMs(int httpConnectTimeoutMs) {
+        this.httpConnectTimeoutMs = httpConnectTimeoutMs;
+    }
+
+    public int getHttpPipelineCount() {
+        return httpPipelineCount;
+    }
+
+    public void setHttpPipelineCount(int httpPipelineCount) {
+        this.httpPipelineCount = httpPipelineCount;
+    }
+
     public int getHttpTimeoutMs() {
-        return httpTimeoutMs;
+        return httpRequestTimeoutMs;
     }
 
     public void setHttpTimeoutMs(int httpTimeoutMs) {
-        this.httpTimeoutMs = httpTimeoutMs;
+        this.httpRequestTimeoutMs = httpTimeoutMs;
     }
 
     public String getFilePath() {
