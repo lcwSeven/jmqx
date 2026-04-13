@@ -52,6 +52,54 @@ createApp({
             }
         };
     },
+    computed: {
+        activeMenuLabel() {
+            const labels = {
+                overview: "集群概览",
+                clients: this.selectedClient ? "客户端详情" : "客户端列表",
+                acl: "ACL 鉴权",
+                auth: this.authCreateMode ? "创建认证" : "连接鉴权",
+                cluster: "集群配置"
+            };
+            return labels[this.activeMenu] || "JMQX Admin";
+        },
+        activeMenuDescription() {
+            const descriptions = {
+                overview: "实时查看节点负载、流量和运行态变化。",
+                clients: "搜索在线客户端，快速定位连接和订阅信息。",
+                acl: "维护主题访问策略与鉴权缓存设置。",
+                auth: "统一管理客户端接入认证与数据源配置。",
+                cluster: "调整节点角色、共享订阅容量和集群行为。"
+            };
+            return descriptions[this.activeMenu] || "";
+        },
+        authStatusText() {
+            if (!this.hasAuthRecord()) {
+                return "未配置";
+            }
+            return this.securityConfig.authEnabled ? "已启用" : "已停用";
+        },
+        authStatusClass() {
+            if (!this.hasAuthRecord()) {
+                return "is-idle";
+            }
+            return this.securityConfig.authEnabled ? "is-up" : "is-down";
+        },
+        aclStatusText() {
+            return this.securityConfig.aclEnabled ? "已启用" : "已停用";
+        },
+        aclStatusClass() {
+            return this.securityConfig.aclEnabled ? "is-up" : "is-down";
+        },
+        totalNodes() {
+            return Array.isArray(this.overview.nodes) ? this.overview.nodes.length : 0;
+        },
+        clientsSummaryText() {
+            const total = Number(this.clients.total || 0);
+            const keyword = [this.search.clientId, this.search.userName].filter(Boolean).join(" / ");
+            return keyword ? `共 ${total} 条结果，筛选条件：${keyword}` : `共 ${total} 个在线客户端`;
+        }
+    },
     async mounted() {
         await this.reloadCurrentClusterData();
         this.connectDashboardStream();
@@ -415,6 +463,24 @@ createApp({
                 return "-";
             }
             return new Date(timestamp).toLocaleString(undefined, { hour12: false });
+        },
+        formatNumber(value) {
+            const num = Number(value || 0);
+            return Number.isFinite(num) ? num.toLocaleString() : "0";
+        },
+        nodeHealthLabel(node) {
+            const ts = Number(node?.lastReportTime || 0);
+            if (!ts) {
+                return "未知";
+            }
+            return Date.now() - ts <= 15000 ? "在线" : "延迟";
+        },
+        nodeHealthClass(node) {
+            const ts = Number(node?.lastReportTime || 0);
+            if (!ts) {
+                return "is-idle";
+            }
+            return Date.now() - ts <= 15000 ? "is-up" : "is-warn";
         }
     },
     template: `
@@ -432,29 +498,86 @@ createApp({
           <button class="menu-item" :class="{active: activeMenu==='auth'}" @click="setMenu('auth')">连接鉴权</button>
           <div class="menu-title">系统配置</div>
           <button class="menu-item" :class="{active: activeMenu==='cluster'}" @click="setMenu('cluster')">集群配置</button>
+          <div class="sidebar-footer">
+            <div class="sidebar-foot-label">Cluster</div>
+            <div class="sidebar-foot-value">{{ currentClusterId }}</div>
+            <div class="sidebar-foot-label">Realtime</div>
+            <div class="sidebar-status">{{ mqttStatus }}</div>
+          </div>
         </aside>
         <main class="content">
+          <section class="hero panel">
+            <div>
+              <div class="eyebrow">JMQX Control Surface</div>
+              <h1 class="hero-title">{{ activeMenuLabel }}</h1>
+              <p class="hero-desc">{{ activeMenuDescription }}</p>
+            </div>
+            <div class="hero-metrics">
+              <div class="hero-pill">
+                <span class="hero-pill-label">Cluster</span>
+                <strong>{{ currentClusterId }}</strong>
+              </div>
+              <div class="hero-pill">
+                <span class="hero-pill-label">Dashboard</span>
+                <strong>{{ mqttStatus }}</strong>
+              </div>
+              <div class="hero-pill">
+                <span class="hero-pill-label">Nodes</span>
+                <strong>{{ totalNodes }}</strong>
+              </div>
+            </div>
+          </section>
+
           <div v-if="message" class="success">{{ message }}</div>
           <div v-if="error" class="error">{{ error }}</div>
 
           <section class="panel" v-if="activeMenu==='overview'">
-            <h2 class="title">集群概览</h2>
-            <div class="toolbar">
+            <div class="section-head">
+              <div>
+                <h2 class="title">集群概览</h2>
+                <div class="section-subtitle">总览卡片聚合全节点实时数据，下面保留逐节点明细。</div>
+              </div>
               <button class="btn" @click="refreshOverview">刷新</button>
             </div>
             <div class="stats">
               <div class="stat">
                 <div class="label">总连接数</div>
-                <div class="value">{{ overview.totalConnections }}</div>
+                <div class="value">{{ formatNumber(overview.totalConnections) }}</div>
               </div>
               <div class="stat">
                 <div class="label">总入流量 (Bytes)</div>
-                <div class="value">{{ overview.totalInboundBytes }}</div>
+                <div class="value">{{ formatNumber(overview.totalInboundBytes) }}</div>
               </div>
               <div class="stat">
                 <div class="label">总出流量 (Bytes)</div>
-                <div class="value">{{ overview.totalOutboundBytes }}</div>
+                <div class="value">{{ formatNumber(overview.totalOutboundBytes) }}</div>
               </div>
+            </div>
+            <div class="node-grid" v-if="overview.nodes && overview.nodes.length">
+              <article class="node-card" v-for="node in overview.nodes" :key="node.nodeId">
+                <div class="node-card-head">
+                  <div>
+                    <div class="node-name">{{ node.nodeId }}</div>
+                    <div class="node-meta">{{ node.role || '-' }} · {{ node.nodeIp }}</div>
+                  </div>
+                  <span class="status-badge" :class="nodeHealthClass(node)">{{ nodeHealthLabel(node) }}</span>
+                </div>
+                <div class="node-card-stats">
+                  <div>
+                    <span>连接数</span>
+                    <strong>{{ formatNumber(node.connectedClients) }}</strong>
+                  </div>
+                  <div>
+                    <span>入流量</span>
+                    <strong>{{ formatNumber(node.inboundBytes) }}</strong>
+                  </div>
+                  <div>
+                    <span>出流量</span>
+                    <strong>{{ formatNumber(node.outboundBytes) }}</strong>
+                  </div>
+                </div>
+                <div class="node-card-foot">最后上报 {{ formatDateTime(node.lastReportTime) }}</div>
+              </article>
             </div>
             <table class="data-table">
               <thead>
@@ -473,9 +596,9 @@ createApp({
                 <td>{{ node.nodeId }}</td>
                 <td>{{ node.role || '-' }}</td>
                 <td>{{ node.nodeIp }}</td>
-                <td>{{ node.connectedClients }}</td>
-                <td>{{ node.inboundBytes }}</td>
-                <td>{{ node.outboundBytes }}</td>
+                <td>{{ formatNumber(node.connectedClients) }}</td>
+                <td>{{ formatNumber(node.inboundBytes) }}</td>
+                <td>{{ formatNumber(node.outboundBytes) }}</td>
                 <td>{{ formatDateTime(node.lastReportTime) }}</td>
               </tr>
               </tbody>
@@ -483,12 +606,22 @@ createApp({
           </section>
 
           <section class="panel" v-if="activeMenu==='clients' && !selectedClient">
-            <h2 class="title">客户端列表</h2>
+            <div class="section-head">
+              <div>
+                <h2 class="title">客户端列表</h2>
+                <div class="section-subtitle">{{ clientsSummaryText }}</div>
+              </div>
+            </div>
             <div class="toolbar">
               <input v-model="search.clientId" placeholder="客户端 ID"/>
               <input v-model="search.userName" placeholder="用户名"/>
               <button class="btn" @click="queryClients">查询</button>
               <button class="btn secondary" @click="search={clientId:'',userName:'',pageNo:1,pageSize:20};queryClients()">重置</button>
+            </div>
+            <div class="chips toolbar-chips">
+              <span class="chip">页面容量 {{ clients.pageSize }}</span>
+              <span class="chip">实时刷新已启用</span>
+              <span class="chip">点击行查看详情</span>
             </div>
             <table class="data-table">
               <thead>
@@ -514,11 +647,16 @@ createApp({
               </tr>
               </tbody>
             </table>
-            <div class="hint">总记录: {{ clients.total }}，点击行查看详情</div>
+            <div class="hint">总记录: {{ clients.total }}，列表会在连接事件后自动刷新。</div>
           </section>
 
           <section class="panel" v-if="activeMenu==='clients' && selectedClient">
-            <h2 class="title">客户端详情</h2>
+            <div class="section-head">
+              <div>
+                <h2 class="title">客户端详情</h2>
+                <div class="section-subtitle">查看连接属性、会话信息和当前订阅主题。</div>
+              </div>
+            </div>
             <div class="toolbar">
               <button class="btn secondary" @click="selectedClient=null">返回列表</button>
             </div>
@@ -541,7 +679,13 @@ createApp({
           </section>
 
           <section class="panel" v-if="activeMenu==='acl'">
-            <h2 class="title">ACL 鉴权配置</h2>
+            <div class="section-head">
+              <div>
+                <h2 class="title">ACL 鉴权配置</h2>
+                <div class="section-subtitle">控制主题发布与订阅的访问链路。</div>
+              </div>
+              <span class="status-badge" :class="aclStatusClass">{{ aclStatusText }}</span>
+            </div>
             <div class="form-grid">
               <label class="field checkbox-field">
                 <input type="checkbox" v-model="securityConfig.aclEnabled"/>
@@ -563,7 +707,10 @@ createApp({
 
           <section class="panel auth-surface" v-if="activeMenu==='auth' && !authCreateMode">
             <div class="auth-list-toolbar">
-              <h2 class="title auth-title">客户端认证</h2>
+              <div>
+                <h2 class="title auth-title">客户端认证</h2>
+                <div class="section-subtitle">统一管理接入认证、状态和数据源。</div>
+              </div>
               <button class="btn auth-create-btn" @click="openAuthCreate">+ 创建</button>
             </div>
             <table class="data-table auth-table">
@@ -584,8 +731,8 @@ createApp({
                   </div>
                 </td>
                 <td>
-                  <span class="auth-status" :class="{'is-up': securityConfig.authEnabled}">
-                    {{ securityConfig.authEnabled ? '已连接' : '未启用' }}
+                  <span class="auth-status" :class="authStatusClass">
+                    {{ authStatusText }}
                   </span>
                 </td>
                 <td>
@@ -706,7 +853,12 @@ createApp({
           </section>
 
           <section class="panel" v-if="activeMenu==='cluster'">
-            <h2 class="title">集群配置</h2>
+            <div class="section-head">
+              <div>
+                <h2 class="title">集群配置</h2>
+                <div class="section-subtitle">调整节点列表、接入策略和共享订阅容量。</div>
+              </div>
+            </div>
             <div class="hint">Core 节点（每行一个 host:port）</div>
             <textarea :value="joinLine(clusterConfig.coreNodes)" @input="clusterConfig.coreNodes=$event.target.value"></textarea>
             <div class="hint">Replicant 节点（每行一个 host:port）</div>
