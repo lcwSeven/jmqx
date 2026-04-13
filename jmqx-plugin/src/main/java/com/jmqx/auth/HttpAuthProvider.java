@@ -1,5 +1,7 @@
 package com.jmqx.auth;
 
+import com.jmqx.protocol.AuthResult;
+
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -27,12 +29,7 @@ public class HttpAuthProvider implements AuthProvider {
     }
 
     @Override
-    public boolean authenticate(AuthRequest request) {
-        return authenticateDecision(request) == AuthDecision.ALLOW;
-    }
-
-    @Override
-    public AuthDecision authenticateDecision(AuthRequest request) {
+    public AuthResult authenticateResult(AuthRequest request) {
         try {
             String body = "{"
                 + "\"clientId\":\"" + escape(request.getClientId()) + "\","
@@ -47,24 +44,24 @@ public class HttpAuthProvider implements AuthProvider {
             HttpResponse<String> response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString());
             String responseBody = response.body() == null ? "" : response.body().trim().toLowerCase();
             if (responseBody.contains("\"allow\":true") || "allow".equals(responseBody) || "true".equals(responseBody)) {
-                return AuthDecision.ALLOW;
+                return AuthResult.allow();
             }
             if (responseBody.contains("\"notfound\":true")
                 || responseBody.contains("\"not_found\":true")
                 || "not_found".equals(responseBody)
                 || "notfound".equals(responseBody)) {
-                return AuthDecision.NOT_FOUND;
+                return AuthResult.notFound();
             }
-            return AuthDecision.DENY;
+            return AuthResult.deny();
         } catch (IOException | InterruptedException e) {
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
             LOG.log(Level.WARNING, "HTTP auth request failed: " + e.getMessage(), e);
-            return AuthDecision.DENY;
+            return AuthResult.deny();
         } catch (RuntimeException e) {
             LOG.log(Level.WARNING, "HTTP auth runtime error: " + e.getMessage(), e);
-            return AuthDecision.DENY;
+            return AuthResult.deny();
         }
     }
 

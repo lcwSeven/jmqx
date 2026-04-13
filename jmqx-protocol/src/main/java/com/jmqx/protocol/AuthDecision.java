@@ -1,8 +1,8 @@
-package com.jmqx.auth;
+package com.jmqx.protocol;
 
 /**
  * @author liucaiwen
- * @date 2026/4/7
+ * @date 2026/4/13
  */
 public enum AuthDecision {
     ALLOW,

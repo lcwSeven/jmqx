@@ -13,22 +13,34 @@ public class ClusterMetadataCommandApplier {
     public static final String SUBSCRIPTION_NAMESPACE = "route.subscription";
     public static final String SESSION_NAMESPACE = "session.client";
     public static final String RETAINED_NAMESPACE = "retained.message";
+    public static final String ADMIN_SECURITY_NAMESPACE = "admin.security.config";
+    public static final String ADMIN_CLUSTER_NAMESPACE = "admin.cluster.config";
+    public static final String ADMIN_BUILT_IN_USER_NAMESPACE = "admin.auth.built-in-user";
 
     private final String localNodeId;
     private final RouteSubscriptionCommandHandler routeHandler;
     private final ClientOnlineCommandHandler clientOnlineHandler;
     private final RetainedCommandHandler retainedCommandHandler;
+    private final AdminSecurityConfigCommandHandler adminSecurityConfigHandler;
+    private final AdminClusterConfigCommandHandler adminClusterConfigHandler;
+    private final AdminBuiltInUserCommandHandler adminBuiltInUserCommandHandler;
 
     public ClusterMetadataCommandApplier(
             String localNodeId,
             RouteSubscriptionCommandHandler routeHandler,
             ClientOnlineCommandHandler clientOnlineHandler,
-            RetainedCommandHandler retainedCommandHandler
+            RetainedCommandHandler retainedCommandHandler,
+            AdminSecurityConfigCommandHandler adminSecurityConfigHandler,
+            AdminClusterConfigCommandHandler adminClusterConfigHandler,
+            AdminBuiltInUserCommandHandler adminBuiltInUserCommandHandler
     ) {
         this.localNodeId = localNodeId;
         this.routeHandler = Objects.requireNonNull(routeHandler, "routeHandler");
         this.clientOnlineHandler = Objects.requireNonNull(clientOnlineHandler, "clientOnlineHandler");
         this.retainedCommandHandler = Objects.requireNonNull(retainedCommandHandler, "retainedCommandHandler");
+        this.adminSecurityConfigHandler = Objects.requireNonNull(adminSecurityConfigHandler, "adminSecurityConfigHandler");
+        this.adminClusterConfigHandler = Objects.requireNonNull(adminClusterConfigHandler, "adminClusterConfigHandler");
+        this.adminBuiltInUserCommandHandler = Objects.requireNonNull(adminBuiltInUserCommandHandler, "adminBuiltInUserCommandHandler");
     }
 
     /**
@@ -48,6 +60,18 @@ public class ClusterMetadataCommandApplier {
         }
         if (RETAINED_NAMESPACE.equals(command.namespace())) {
             retainedCommandHandler.apply(logIndex, localNodeId, command);
+            return;
+        }
+        if (ADMIN_SECURITY_NAMESPACE.equals(command.namespace())) {
+            adminSecurityConfigHandler.apply(localNodeId, command);
+            return;
+        }
+        if (ADMIN_CLUSTER_NAMESPACE.equals(command.namespace())) {
+            adminClusterConfigHandler.apply(localNodeId, command);
+            return;
+        }
+        if (ADMIN_BUILT_IN_USER_NAMESPACE.equals(command.namespace())) {
+            adminBuiltInUserCommandHandler.apply(localNodeId, command);
         }
     }
 
@@ -73,5 +97,20 @@ public class ClusterMetadataCommandApplier {
     @FunctionalInterface
     public interface RetainedCommandHandler {
         void apply(long logIndex, String localNodeId, MetadataCommand command);
+    }
+
+    @FunctionalInterface
+    public interface AdminSecurityConfigCommandHandler {
+        void apply(String localNodeId, MetadataCommand command);
+    }
+
+    @FunctionalInterface
+    public interface AdminClusterConfigCommandHandler {
+        void apply(String localNodeId, MetadataCommand command);
+    }
+
+    @FunctionalInterface
+    public interface AdminBuiltInUserCommandHandler {
+        void apply(String localNodeId, MetadataCommand command);
     }
 }

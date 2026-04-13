@@ -1,5 +1,7 @@
 package com.jmqx.auth;
 
+import com.jmqx.protocol.AuthResult;
+
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.IOException;
@@ -33,15 +35,10 @@ public class RedisAuthProvider implements AuthProvider {
     }
 
     @Override
-    public boolean authenticate(AuthRequest request) {
-        return authenticateDecision(request) == AuthDecision.ALLOW;
-    }
-
-    @Override
-    public AuthDecision authenticateDecision(AuthRequest request) {
+    public AuthResult authenticateResult(AuthRequest request) {
         String username = request.getUsername();
         if (username == null || username.isBlank()) {
-            return AuthDecision.DENY;
+            return AuthResult.deny();
         }
         try (Socket socket = new Socket()) {
             socket.connect(new InetSocketAddress(host, port), timeoutMs);
@@ -60,12 +57,12 @@ public class RedisAuthProvider implements AuthProvider {
             writeCommand(out, "GET", keyPrefix + ":" + username);
             String expected = readReply(in);
             if (expected == null) {
-                return AuthDecision.NOT_FOUND;
+                return AuthResult.notFound();
             }
-            return expected.equals(request.getPassword()) ? AuthDecision.ALLOW : AuthDecision.DENY;
+            return expected.equals(request.getPassword()) ? AuthResult.allow() : AuthResult.deny();
         } catch (IOException e) {
             LOG.log(Level.WARNING, "Redis auth request failed: " + e.getMessage(), e);
-            return AuthDecision.DENY;
+            return AuthResult.deny();
         }
     }
 

@@ -83,6 +83,11 @@ public class RocksDbAdminStateStore implements AdminStateRepository {
     }
 
     @Override
+    public boolean hasClusterConfig(String clusterId) {
+        return memoryFallback.hasClusterConfig(clusterId);
+    }
+
+    @Override
     public EmbeddedAdminStateStore.SecurityConfig getSecurityConfig(String clusterId) {
         return memoryFallback.getSecurityConfig(clusterId);
     }
@@ -91,6 +96,11 @@ public class RocksDbAdminStateStore implements AdminStateRepository {
     public void setSecurityConfig(String clusterId, EmbeddedAdminStateStore.SecurityConfig securityConfig) {
         memoryFallback.setSecurityConfig(clusterId, securityConfig);
         put(key(SECURITY_CONFIG_PREFIX, normalize(clusterId)), encodeSecurityConfig(securityConfig), "setSecurityConfig");
+    }
+
+    @Override
+    public boolean hasSecurityConfig(String clusterId) {
+        return memoryFallback.hasSecurityConfig(clusterId);
     }
 
     @Override
@@ -267,12 +277,42 @@ public class RocksDbAdminStateStore implements AdminStateRepository {
         try {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             DataOutputStream data = new DataOutputStream(out);
-            data.writeByte(1);
+            data.writeByte(7);
             data.writeBoolean(config.aclEnabled());
             writeStringList(data, config.aclChain());
             data.writeBoolean(config.authEnabled());
             writeStringList(data, config.authChain());
             data.writeLong(config.cacheTtlMs());
+            writeString(data, config.authHttp().url());
+            data.writeInt(config.authHttp().timeoutMs());
+            writeString(data, config.authFile().path());
+            writeString(data, config.authBuiltInDatabase().accountType());
+            writeString(data, config.authBuiltInDatabase().passwordHashAlgorithm());
+            writeString(data, config.authBuiltInDatabase().saltPosition());
+            writeString(data, config.authRedis().host());
+            data.writeInt(config.authRedis().port());
+            writeString(data, config.authRedis().password());
+            data.writeInt(config.authRedis().db());
+            writeString(data, config.authRedis().keyPrefix());
+            data.writeInt(config.authRedis().timeoutMs());
+            writeString(data, config.authMysql().url());
+            writeString(data, config.authMysql().user());
+            writeString(data, config.authMysql().password());
+            writeString(data, config.authMysql().query());
+            data.writeInt(config.authMysql().poolMinIdle());
+            data.writeInt(config.authMysql().poolMaxSize());
+            data.writeLong(config.authMysql().poolConnectionTimeoutMs());
+            data.writeLong(config.authMysql().poolIdleTimeoutMs());
+            data.writeLong(config.authMysql().poolMaxLifetimeMs());
+            writeString(data, config.authPostgresql().url());
+            writeString(data, config.authPostgresql().user());
+            writeString(data, config.authPostgresql().password());
+            writeString(data, config.authPostgresql().query());
+            data.writeInt(config.authPostgresql().poolMinIdle());
+            data.writeInt(config.authPostgresql().poolMaxSize());
+            data.writeLong(config.authPostgresql().poolConnectionTimeoutMs());
+            data.writeLong(config.authPostgresql().poolIdleTimeoutMs());
+            data.writeLong(config.authPostgresql().poolMaxLifetimeMs());
             data.flush();
             return out.toByteArray();
         } catch (Exception exception) {
@@ -283,7 +323,185 @@ public class RocksDbAdminStateStore implements AdminStateRepository {
     private static EmbeddedAdminStateStore.SecurityConfig decodeSecurityConfig(byte[] raw) {
         try {
             DataInputStream in = new DataInputStream(new ByteArrayInputStream(raw));
-            if (in.readByte() != 1) {
+            int version = in.readByte();
+            if (version == 1) {
+                return new EmbeddedAdminStateStore.SecurityConfig(
+                        in.readBoolean(),
+                        readStringList(in),
+                        in.readBoolean(),
+                        readStringList(in),
+                        in.readLong()
+                );
+            }
+            if (version == 2) {
+                return new EmbeddedAdminStateStore.SecurityConfig(
+                        in.readBoolean(),
+                        readStringList(in),
+                        in.readBoolean(),
+                        readStringList(in),
+                        in.readLong(),
+                        new EmbeddedAdminStateStore.AuthHttpConfig(readString(in), in.readInt()),
+                        new EmbeddedAdminStateStore.AuthFileConfig(readString(in)),
+                        EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig.defaults(),
+                        new EmbeddedAdminStateStore.AuthRedisConfig(
+                                readString(in),
+                                in.readInt(),
+                                readString(in),
+                                in.readInt(),
+                                readString(in),
+                                in.readInt()
+                        ),
+                        new EmbeddedAdminStateStore.AuthMysqlConfig(
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                1,
+                                8,
+                                3000,
+                                60_000,
+                                600_000
+                        ),
+                        EmbeddedAdminStateStore.AuthPostgresqlConfig.defaults()
+                );
+            }
+            if (version == 3) {
+                return new EmbeddedAdminStateStore.SecurityConfig(
+                        in.readBoolean(),
+                        readStringList(in),
+                        in.readBoolean(),
+                        readStringList(in),
+                        in.readLong(),
+                        new EmbeddedAdminStateStore.AuthHttpConfig(readString(in), in.readInt()),
+                        new EmbeddedAdminStateStore.AuthFileConfig(readString(in)),
+                        EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig.defaults(),
+                        new EmbeddedAdminStateStore.AuthRedisConfig(
+                                readString(in),
+                                in.readInt(),
+                                readString(in),
+                                in.readInt(),
+                                readString(in),
+                                in.readInt()
+                        ),
+                        new EmbeddedAdminStateStore.AuthMysqlConfig(
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                1,
+                                8,
+                                3000,
+                                60_000,
+                                600_000
+                        ),
+                        EmbeddedAdminStateStore.AuthPostgresqlConfig.defaults()
+                );
+            }
+            if (version == 4) {
+                return new EmbeddedAdminStateStore.SecurityConfig(
+                        in.readBoolean(),
+                        readStringList(in),
+                        in.readBoolean(),
+                        readStringList(in),
+                        in.readLong(),
+                        new EmbeddedAdminStateStore.AuthHttpConfig(readString(in), in.readInt()),
+                        new EmbeddedAdminStateStore.AuthFileConfig(readString(in)),
+                        new EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig("username", "plain", "disable"),
+                        new EmbeddedAdminStateStore.AuthRedisConfig(
+                                readString(in),
+                                in.readInt(),
+                                readString(in),
+                                in.readInt(),
+                                readString(in),
+                                in.readInt()
+                        ),
+                        new EmbeddedAdminStateStore.AuthMysqlConfig(
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                1,
+                                8,
+                                3000,
+                                60_000,
+                                600_000
+                        ),
+                        EmbeddedAdminStateStore.AuthPostgresqlConfig.defaults()
+                );
+            }
+            if (version == 5) {
+                return new EmbeddedAdminStateStore.SecurityConfig(
+                        in.readBoolean(),
+                        readStringList(in),
+                        in.readBoolean(),
+                        readStringList(in),
+                        in.readLong(),
+                        new EmbeddedAdminStateStore.AuthHttpConfig(readString(in), in.readInt()),
+                        new EmbeddedAdminStateStore.AuthFileConfig(readString(in)),
+                        new EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig(
+                                readString(in),
+                                readString(in),
+                                readString(in)
+                        ),
+                        new EmbeddedAdminStateStore.AuthRedisConfig(
+                                readString(in),
+                                in.readInt(),
+                                readString(in),
+                                in.readInt(),
+                                readString(in),
+                                in.readInt()
+                        ),
+                        new EmbeddedAdminStateStore.AuthMysqlConfig(
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                1,
+                                8,
+                                3000,
+                                60_000,
+                                600_000
+                        ),
+                        EmbeddedAdminStateStore.AuthPostgresqlConfig.defaults()
+                );
+            }
+            if (version == 6) {
+                return new EmbeddedAdminStateStore.SecurityConfig(
+                        in.readBoolean(),
+                        readStringList(in),
+                        in.readBoolean(),
+                        readStringList(in),
+                        in.readLong(),
+                        new EmbeddedAdminStateStore.AuthHttpConfig(readString(in), in.readInt()),
+                        new EmbeddedAdminStateStore.AuthFileConfig(readString(in)),
+                        new EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig(
+                                readString(in),
+                                readString(in),
+                                readString(in)
+                        ),
+                        new EmbeddedAdminStateStore.AuthRedisConfig(
+                                readString(in),
+                                in.readInt(),
+                                readString(in),
+                                in.readInt(),
+                                readString(in),
+                                in.readInt()
+                        ),
+                        new EmbeddedAdminStateStore.AuthMysqlConfig(
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                1,
+                                8,
+                                3000,
+                                60_000,
+                                600_000
+                        ),
+                        EmbeddedAdminStateStore.AuthPostgresqlConfig.defaults()
+                );
+            }
+            if (version != 7) {
                 return null;
             }
             return new EmbeddedAdminStateStore.SecurityConfig(
@@ -291,7 +509,44 @@ public class RocksDbAdminStateStore implements AdminStateRepository {
                     readStringList(in),
                     in.readBoolean(),
                     readStringList(in),
-                    in.readLong()
+                    in.readLong(),
+                    new EmbeddedAdminStateStore.AuthHttpConfig(readString(in), in.readInt()),
+                    new EmbeddedAdminStateStore.AuthFileConfig(readString(in)),
+                    new EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig(
+                            readString(in),
+                            readString(in),
+                            readString(in)
+                    ),
+                    new EmbeddedAdminStateStore.AuthRedisConfig(
+                            readString(in),
+                            in.readInt(),
+                            readString(in),
+                            in.readInt(),
+                            readString(in),
+                            in.readInt()
+                    ),
+                    new EmbeddedAdminStateStore.AuthMysqlConfig(
+                            readString(in),
+                            readString(in),
+                            readString(in),
+                            readString(in),
+                            in.readInt(),
+                            in.readInt(),
+                            in.readLong(),
+                            in.readLong(),
+                            in.readLong()
+                    ),
+                    new EmbeddedAdminStateStore.AuthPostgresqlConfig(
+                            readString(in),
+                            readString(in),
+                            readString(in),
+                            readString(in),
+                            in.readInt(),
+                            in.readInt(),
+                            in.readLong(),
+                            in.readLong(),
+                            in.readLong()
+                    )
             );
         } catch (Exception ignored) {
             return null;

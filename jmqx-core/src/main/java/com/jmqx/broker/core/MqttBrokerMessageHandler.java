@@ -16,6 +16,8 @@ import com.jmqx.cluster.MetadataCommand;
 import com.jmqx.cluster.MetadataCommandGateway;
 import com.jmqx.common.SharedSubscription;
 import com.jmqx.protocol.BrokerMessageHandler;
+import com.jmqx.protocol.AuthDecision;
+import com.jmqx.protocol.AuthResult;
 import com.jmqx.protocol.ClientAuthenticator;
 import com.jmqx.router.SharedSubscriptionManager;
 import com.jmqx.router.SubscriptionRegistry;
@@ -351,7 +353,8 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
                 : new String(message.payload().passwordInBytes(), StandardCharsets.UTF_8);
 
         // 第三步：执行连接鉴权（AUTH 插件链），失败时返回标准 CONNACK 错误码并终止流程。
-        if (!clientAuthenticator.authenticate(clientId, username, password)) {
+        AuthResult authResult = clientAuthenticator.authenticateResult(clientId, username, password);
+        if (authResult.decision() != AuthDecision.ALLOW) {
             LOG.warning("[CONNECT] auth failed clientId=" + clientId + ", username=" + username);
             rejectConnection(
                 ctx,
@@ -425,6 +428,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             username,
             serviceNodeIp,
             keepAliveSeconds,
+            authResult.superuser(),
             connectedAt
         ));
         applyGlobalClientOnlineAfterLocalConnect(clientId, connectedAt.toEpochMilli());
@@ -1334,7 +1338,11 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     private boolean isDenied(String clientId, String topic, AclAction action) {
-        String username = clientId == null ? null : sessionRegistry.get(clientId).map(ClientSession::username).orElse(null);
+        Optional<ClientSession> session = clientId == null ? Optional.empty() : sessionRegistry.get(clientId);
+        if (session.map(ClientSession::superuser).orElse(false)) {
+            return false;
+        }
+        String username = session.map(ClientSession::username).orElse(null);
         return !aclAuthorizer.isAllowed(new AclRequest(clientId, username, topic, action));
     }
 

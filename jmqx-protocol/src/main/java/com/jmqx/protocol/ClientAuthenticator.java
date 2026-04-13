@@ -6,7 +6,11 @@ package com.jmqx.protocol;
  */
 public interface ClientAuthenticator {
 
-    boolean authenticate(String clientId, String username, String password);
+    default boolean authenticate(String clientId, String username, String password) {
+        return authenticateResult(clientId, username, password).decision() == AuthDecision.ALLOW;
+    }
 
-    ClientAuthenticator ALLOW_ALL = (clientId, username, password) -> true;
+    AuthResult authenticateResult(String clientId, String username, String password);
+
+    ClientAuthenticator ALLOW_ALL = (clientId, username, password) -> AuthResult.allow();
 }

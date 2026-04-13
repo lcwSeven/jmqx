@@ -1,9 +1,7 @@
 # Client AUTH plugin chain and backend data source settings.
 jmqx:
   auth:
-    # Primary auth mode. Typical values: allow_all/http/file/redis/db.
-    type: allow_all
-    # Ordered auth chain. Empty means use type only.
+    # Ordered auth chain. Empty means no auth provider, which allows all.
     chain: ""
     # Positive/negative auth cache ttl in milliseconds.
     cacheMillis: 60000
@@ -14,6 +12,11 @@ jmqx:
     # File auth backend.
     file:
       path: auth-users.txt
+    # Built-in database auth backend.
+    builtInDatabase:
+      accountType: username
+      passwordHashAlgorithm: sha256
+      saltPosition: suffix
     # Redis auth backend.
     redis:
       host: 127.0.0.1
@@ -22,10 +25,27 @@ jmqx:
       db: 0
       keyPrefix: jmqx:auth
       timeoutMs: 2000
-    # JDBC auth backend.
-    db:
-      driver: ""
+    # MySQL auth backend.
+    mysql:
       url: jdbc:mysql://127.0.0.1:3306/jmqx
       user: root
       password: ""
       query: "SELECT password FROM mqtt_user WHERE username = ?"
+      pool:
+        minIdle: 1
+        maxSize: 8
+        connectionTimeoutMs: 3000
+        idleTimeoutMs: 60000
+        maxLifetimeMs: 600000
+    # PostgreSQL auth backend.
+    postgresql:
+      url: jdbc:postgresql://127.0.0.1:5432/jmqx
+      user: postgres
+      password: ""
+      query: "SELECT password FROM mqtt_user WHERE username = ?"
+      pool:
+        minIdle: 1
+        maxSize: 8
+        connectionTimeoutMs: 3000
+        idleTimeoutMs: 60000
+        maxLifetimeMs: 600000

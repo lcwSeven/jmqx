@@ -1,5 +1,7 @@
 package com.jmqx.auth;
 
+import com.jmqx.protocol.AuthResult;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -24,21 +26,16 @@ public class FileAuthProvider implements AuthProvider {
     }
 
     @Override
-    public boolean authenticate(AuthRequest request) {
-        return authenticateDecision(request) == AuthDecision.ALLOW;
-    }
-
-    @Override
-    public AuthDecision authenticateDecision(AuthRequest request) {
+    public AuthResult authenticateResult(AuthRequest request) {
         String username = request.getUsername();
         if (username == null || username.isBlank()) {
-            return AuthDecision.DENY;
+            return AuthResult.deny();
         }
         String expected = userPasswordMap.get(username);
         if (expected == null) {
-            return AuthDecision.NOT_FOUND;
+            return AuthResult.notFound();
         }
-        return expected.equals(request.getPassword()) ? AuthDecision.ALLOW : AuthDecision.DENY;
+        return expected.equals(request.getPassword()) ? AuthResult.allow() : AuthResult.deny();
     }
 
     private Map<String, String> loadUsers(Path path) {

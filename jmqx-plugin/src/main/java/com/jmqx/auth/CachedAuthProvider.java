@@ -1,5 +1,7 @@
 package com.jmqx.auth;
 
+import com.jmqx.protocol.AuthResult;
+
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -21,33 +23,34 @@ public class CachedAuthProvider implements AuthProvider {
     }
 
     @Override
-    public boolean authenticate(AuthRequest request) {
-        return authenticateDecision(request) == AuthDecision.ALLOW;
-    }
-
-    @Override
-    public AuthDecision authenticateDecision(AuthRequest request) {
+    public AuthResult authenticateResult(AuthRequest request) {
         if (ttlMillis <= 0) {
-            return delegate.authenticateDecision(request);
+            return delegate.authenticateResult(request);
         }
         long now = System.currentTimeMillis();
         CacheKey key = new CacheKey(request);
         CacheValue hit = cache.get(key);
         if (hit != null && hit.expireAt >= now) {
-            return hit.decision;
+            return hit.result;
         }
 
-        AuthDecision decision = delegate.authenticateDecision(request);
-        cache.put(key, new CacheValue(decision, now + ttlMillis));
+        AuthResult result = delegate.authenticateResult(request);
+        cache.put(key, new CacheValue(result, now + ttlMillis));
 
         if ((accessCounter.incrementAndGet() & 0xFF) == 0) {
             cleanup(now);
         }
-        return decision;
+        return result;
     }
 
     private void cleanup(long now) {
         cache.entrySet().removeIf(entry -> entry.getValue().expireAt < now);
+    }
+
+    @Override
+    public void close() {
+        cache.clear();
+        delegate.close();
     }
 
     /**
@@ -91,11 +94,11 @@ public class CachedAuthProvider implements AuthProvider {
      * @date 2026/4/4
      */
     private static class CacheValue {
-        private final AuthDecision decision;
+        private final AuthResult result;
         private final long expireAt;
 
-        private CacheValue(AuthDecision decision, long expireAt) {
-            this.decision = decision;
+        private CacheValue(AuthResult result, long expireAt) {
+            this.result = result;
             this.expireAt = expireAt;
         }
     }

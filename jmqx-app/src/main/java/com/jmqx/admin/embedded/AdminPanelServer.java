@@ -20,6 +20,9 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.time.Instant;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -57,8 +60,10 @@ public class AdminPanelServer {
     private final SubscriptionRegistry subscriptionRegistry;
     private final ConnectionMetrics connectionMetrics;
     private final AdminStateRepository stateStore;
+    private final BuiltInDatabaseUserService builtInDatabaseUserService;
     private final SecurityConfigUpdater securityConfigUpdater;
     private final ClusterConfigUpdater clusterConfigUpdater;
+    private final BuiltInDatabaseUsersUpdater builtInDatabaseUsersUpdater;
     private final HttpClient httpClient;
     private HttpServer server;
 
@@ -77,7 +82,9 @@ public class AdminPanelServer {
                             EmbeddedAdminStateStore.SecurityConfig initialSecurityConfig,
                             EmbeddedAdminStateStore.ClusterConfig initialClusterConfig,
                             SecurityConfigUpdater securityConfigUpdater,
-                            ClusterConfigUpdater clusterConfigUpdater) {
+                            ClusterConfigUpdater clusterConfigUpdater,
+                            BuiltInDatabaseUsersUpdater builtInDatabaseUsersUpdater,
+                            BuiltInDatabaseUserService builtInDatabaseUserService) {
         this.host = (host == null || host.isBlank()) ? "0.0.0.0" : host.trim();
         this.port = port <= 0 ? 18081 : port;
         this.basePath = normalizeBasePath(basePath);
@@ -92,17 +99,39 @@ public class AdminPanelServer {
         this.subscriptionRegistry = subscriptionRegistry;
         this.connectionMetrics = connectionMetrics;
         this.stateStore = stateStore == null ? new EmbeddedAdminStateStore() : stateStore;
+        this.builtInDatabaseUserService = builtInDatabaseUserService == null ? new BuiltInDatabaseUserService() : builtInDatabaseUserService;
         this.stateStore.createCluster(this.defaultClusterId, "默认集群", this.nodeIp + ":7800");
-        if (initialSecurityConfig != null) {
+        if (initialSecurityConfig != null && !this.stateStore.hasSecurityConfig(this.defaultClusterId)) {
             this.stateStore.setSecurityConfig(this.defaultClusterId, initialSecurityConfig);
         }
-        if (initialClusterConfig != null) {
+        if (initialClusterConfig != null && !this.stateStore.hasClusterConfig(this.defaultClusterId)) {
             this.stateStore.setClusterConfig(this.defaultClusterId, initialClusterConfig);
         }
         this.securityConfigUpdater = securityConfigUpdater == null ? (clusterId, config) -> {
         } : securityConfigUpdater;
         this.clusterConfigUpdater = clusterConfigUpdater == null ? (clusterId, config) -> {
         } : clusterConfigUpdater;
+        this.builtInDatabaseUsersUpdater = builtInDatabaseUsersUpdater == null ? new BuiltInDatabaseUsersUpdater() {
+            @Override
+            public void upsert(String clusterId, EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig config, String userId, String password, boolean superuser) {
+                AdminPanelServer.this.builtInDatabaseUserService.upsertUser(config, userId, password, superuser);
+            }
+
+            @Override
+            public int importUsers(String clusterId, EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig config, List<BuiltInDatabaseUserService.UserInput> users) {
+                return AdminPanelServer.this.builtInDatabaseUserService.importUsers(config, users);
+            }
+
+            @Override
+            public void delete(String clusterId, String userId) {
+                AdminPanelServer.this.builtInDatabaseUserService.deleteUser(userId);
+            }
+
+            @Override
+            public void deleteAll(String clusterId) {
+                AdminPanelServer.this.builtInDatabaseUserService.deleteAllUsers();
+            }
+        } : builtInDatabaseUsersUpdater;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(2))
                 .build();
@@ -137,16 +166,16 @@ public class AdminPanelServer {
         public void handle(HttpExchange exchange) throws IOException {
             try {
                 String path = exchange.getRequestURI().getPath();
+                if (isApiPath(path)) {
+                    handleApi(exchange);
+                    return;
+                }
                 if ("/".equals(path)) {
                     redirect(exchange, basePath + "/");
                     return;
                 }
                 if (path.startsWith(basePath)) {
                     serveStatic(exchange, path);
-                    return;
-                }
-                if (path.startsWith("/api/v1/")) {
-                    handleApi(exchange);
                     return;
                 }
                 if (path.startsWith("/webjars/")) {
@@ -177,7 +206,7 @@ public class AdminPanelServer {
     }
 
     private void handleApi(HttpExchange exchange) throws IOException {
-        String path = exchange.getRequestURI().getPath();
+        String path = normalizeApiPath(exchange.getRequestURI().getPath());
         String method = exchange.getRequestMethod().toUpperCase();
         Map<String, String> query = parseQuery(exchange.getRequestURI().getRawQuery());
         String clusterId = normalize(query.get("clusterId"), defaultClusterId);
@@ -243,9 +272,64 @@ public class AdminPanelServer {
             writeJson(exchange, 200, toSecurityConfigJson(stateStore.getSecurityConfig(clusterId)));
             return;
         }
+        if ("/api/v1/auth/built-in/users".equals(path) && "GET".equals(method)) {
+            writeJson(exchange, 200, buildBuiltInUsersJson(clusterId));
+            return;
+        }
+        if ("/api/v1/auth/built-in/users".equals(path) && "DELETE".equals(method)) {
+            builtInDatabaseUsersUpdater.deleteAll(clusterId);
+            writeJson(exchange, 200, buildBuiltInUsersJson(clusterId));
+            return;
+        }
+        if ("/api/v1/auth/built-in/users".equals(path) && "POST".equals(method)) {
+            EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig config = stateStore.getSecurityConfig(clusterId).authBuiltInDatabase();
+            String userId = normalize(extractString(body, "userId"), "");
+            String password = normalize(extractString(body, "password"), "");
+            boolean superuser = extractBoolean(body, "superuser", false);
+            if (userId.isBlank() || password.isBlank()) {
+                writeJson(exchange, 400, "{\"error\":\"userId and password are required\"}");
+                return;
+            }
+            builtInDatabaseUsersUpdater.upsert(clusterId, config, userId, password, superuser);
+            writeJson(exchange, 200, buildBuiltInUsersJson(clusterId));
+            return;
+        }
+        if ("/api/v1/auth/built-in/users/import".equals(path) && "POST".equals(method)) {
+            EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig config = stateStore.getSecurityConfig(clusterId).authBuiltInDatabase();
+            List<String> lines = extractStringList(body, "lines");
+            List<BuiltInDatabaseUserService.UserInput> users = new ArrayList<>();
+            for (String line : lines) {
+                if (line == null || line.isBlank()) {
+                    continue;
+                }
+                String[] parts = line.split(",", 3);
+                if (parts.length < 2) {
+                    continue;
+                }
+                users.add(new BuiltInDatabaseUserService.UserInput(
+                        parts[0].trim(),
+                        parts[1].trim(),
+                        parts.length >= 3 && Boolean.parseBoolean(parts[2].trim())
+                ));
+            }
+            int imported = builtInDatabaseUsersUpdater.importUsers(clusterId, config, users);
+            writeJson(exchange, 200, "{\"imported\":" + imported + ",\"data\":" + buildBuiltInUsersJson(clusterId) + "}");
+            return;
+        }
+        if (path.startsWith("/api/v1/auth/built-in/users/") && "DELETE".equals(method)) {
+            String userId = decode(path.substring("/api/v1/auth/built-in/users/".length()));
+            builtInDatabaseUsersUpdater.delete(clusterId, userId);
+            writeJson(exchange, 200, buildBuiltInUsersJson(clusterId));
+            return;
+        }
         if ("/api/v1/security/config".equals(path) && "PUT".equals(method)) {
             EmbeddedAdminStateStore.SecurityConfig before = stateStore.getSecurityConfig(clusterId);
             EmbeddedAdminStateStore.SecurityConfig config = parseSecurityConfig(body, before);
+            String validationError = validateSecurityConfig(config);
+            if (validationError != null) {
+                writeJson(exchange, 400, "{\"error\":\"" + escape(validationError) + "\"}");
+                return;
+            }
             securityConfigUpdater.apply(clusterId, config);
             stateStore.setSecurityConfig(clusterId, config);
             appendAuditLog(
@@ -273,6 +357,30 @@ public class AdminPanelServer {
             return;
         }
         writeJson(exchange, 404, "{\"error\":\"not found\"}");
+    }
+
+    private boolean isApiPath(String path) {
+        if (path == null || path.isBlank()) {
+            return false;
+        }
+        return path.startsWith("/api/v1/")
+                || "/api/v1".equals(path)
+                || path.startsWith(basePath + "/api/v1/")
+                || (basePath + "/api/v1").equals(path);
+    }
+
+    private String normalizeApiPath(String path) {
+        if (path == null || path.isBlank()) {
+            return path;
+        }
+        String prefixedApiPath = basePath + "/api/v1";
+        if (path.equals(prefixedApiPath)) {
+            return "/api/v1";
+        }
+        if (path.startsWith(prefixedApiPath + "/")) {
+            return path.substring(basePath.length());
+        }
+        return path;
     }
 
     private void proxy(HttpExchange exchange) throws IOException {
@@ -516,7 +624,73 @@ public class AdminPanelServer {
                 + "\"aclChain\":" + toStringArray(config.aclChain()) + ","
                 + "\"authEnabled\":" + config.authEnabled() + ","
                 + "\"authChain\":" + toStringArray(config.authChain()) + ","
-                + "\"cacheTtlMs\":" + config.cacheTtlMs()
+                + "\"cacheTtlMs\":" + config.cacheTtlMs() + ","
+                + "\"authHttp\":" + toAuthHttpJson(config.authHttp()) + ","
+                + "\"authFile\":" + toAuthFileJson(config.authFile()) + ","
+                + "\"authBuiltInDatabase\":" + toAuthBuiltInDatabaseJson(config.authBuiltInDatabase()) + ","
+                + "\"authRedis\":" + toAuthRedisJson(config.authRedis()) + ","
+                + "\"authMysql\":" + toAuthMysqlJson(config.authMysql()) + ","
+                + "\"authPostgresql\":" + toAuthPostgresqlJson(config.authPostgresql())
+                + "}";
+    }
+
+    private static String toAuthHttpJson(EmbeddedAdminStateStore.AuthHttpConfig config) {
+        return "{"
+                + "\"url\":\"" + escape(config.url()) + "\","
+                + "\"timeoutMs\":" + config.timeoutMs()
+                + "}";
+    }
+
+    private static String toAuthFileJson(EmbeddedAdminStateStore.AuthFileConfig config) {
+        return "{"
+                + "\"path\":\"" + escape(config.path()) + "\""
+                + "}";
+    }
+
+    private static String toAuthBuiltInDatabaseJson(EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig config) {
+        return "{"
+                + "\"accountType\":\"" + escape(config.accountType()) + "\","
+                + "\"passwordHashAlgorithm\":\"" + escape(config.passwordHashAlgorithm()) + "\","
+                + "\"saltPosition\":\"" + escape(config.saltPosition()) + "\""
+                + "}";
+    }
+
+    private static String toAuthRedisJson(EmbeddedAdminStateStore.AuthRedisConfig config) {
+        return "{"
+                + "\"host\":\"" + escape(config.host()) + "\","
+                + "\"port\":" + config.port() + ","
+                + "\"password\":\"" + escape(config.password()) + "\","
+                + "\"db\":" + config.db() + ","
+                + "\"keyPrefix\":\"" + escape(config.keyPrefix()) + "\","
+                + "\"timeoutMs\":" + config.timeoutMs()
+                + "}";
+    }
+
+    private static String toAuthMysqlJson(EmbeddedAdminStateStore.AuthMysqlConfig config) {
+        return "{"
+                + "\"url\":\"" + escape(config.url()) + "\","
+                + "\"user\":\"" + escape(config.user()) + "\","
+                + "\"password\":\"" + escape(config.password()) + "\","
+                + "\"query\":\"" + escape(config.query()) + "\","
+                + "\"poolMinIdle\":" + config.poolMinIdle() + ","
+                + "\"poolMaxSize\":" + config.poolMaxSize() + ","
+                + "\"poolConnectionTimeoutMs\":" + config.poolConnectionTimeoutMs() + ","
+                + "\"poolIdleTimeoutMs\":" + config.poolIdleTimeoutMs() + ","
+                + "\"poolMaxLifetimeMs\":" + config.poolMaxLifetimeMs()
+                + "}";
+    }
+
+    private static String toAuthPostgresqlJson(EmbeddedAdminStateStore.AuthPostgresqlConfig config) {
+        return "{"
+                + "\"url\":\"" + escape(config.url()) + "\","
+                + "\"user\":\"" + escape(config.user()) + "\","
+                + "\"password\":\"" + escape(config.password()) + "\","
+                + "\"query\":\"" + escape(config.query()) + "\","
+                + "\"poolMinIdle\":" + config.poolMinIdle() + ","
+                + "\"poolMaxSize\":" + config.poolMaxSize() + ","
+                + "\"poolConnectionTimeoutMs\":" + config.poolConnectionTimeoutMs() + ","
+                + "\"poolIdleTimeoutMs\":" + config.poolIdleTimeoutMs() + ","
+                + "\"poolMaxLifetimeMs\":" + config.poolMaxLifetimeMs()
                 + "}";
     }
 
@@ -564,6 +738,31 @@ public class AdminPanelServer {
         return builder.toString();
     }
 
+    private String buildBuiltInUsersJson(String clusterId) {
+        EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig config = stateStore.getSecurityConfig(clusterId).authBuiltInDatabase();
+        List<BuiltInDatabaseUserService.UserRecord> users = builtInDatabaseUserService.listUsers();
+        StringBuilder builder = new StringBuilder("[");
+        for (int i = 0; i < users.size(); i++) {
+            if (i > 0) {
+                builder.append(",");
+            }
+            BuiltInDatabaseUserService.UserRecord record = users.get(i);
+            builder.append("{")
+                    .append("\"userId\":\"").append(escape(record.userId())).append("\",")
+                    .append("\"salted\":").append(record.salted()).append(",")
+                    .append("\"iterations\":").append(record.iterations()).append(",")
+                    .append("\"superuser\":").append(record.superuser())
+                    .append("}");
+        }
+        builder.append("]");
+        return "{"
+                + "\"accountType\":\"" + escape(config.accountType()) + "\","
+                + "\"passwordHashAlgorithm\":\"" + escape(config.passwordHashAlgorithm()) + "\","
+                + "\"saltPosition\":\"" + escape(config.saltPosition()) + "\","
+                + "\"records\":" + builder
+                + "}";
+    }
+
     private static String toStringArray(List<String> values) {
         StringBuilder builder = new StringBuilder("[");
         for (int i = 0; i < values.size(); i++) {
@@ -599,7 +798,25 @@ public class AdminPanelServer {
         if (authChain.isEmpty()) {
             authChain = current.authChain();
         }
-        return new EmbeddedAdminStateStore.SecurityConfig(aclEnabled, aclChain, authEnabled, authChain, cacheTtlMs);
+        EmbeddedAdminStateStore.AuthHttpConfig authHttp = parseAuthHttpConfig(body, current.authHttp());
+        EmbeddedAdminStateStore.AuthFileConfig authFile = parseAuthFileConfig(body, current.authFile());
+        EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig authBuiltInDatabase = parseAuthBuiltInDatabaseConfig(body, current.authBuiltInDatabase());
+        EmbeddedAdminStateStore.AuthRedisConfig authRedis = parseAuthRedisConfig(body, current.authRedis());
+        EmbeddedAdminStateStore.AuthMysqlConfig authMysql = parseAuthMysqlConfig(body, current.authMysql());
+        EmbeddedAdminStateStore.AuthPostgresqlConfig authPostgresql = parseAuthPostgresqlConfig(body, current.authPostgresql());
+        return new EmbeddedAdminStateStore.SecurityConfig(
+                aclEnabled,
+                aclChain,
+                authEnabled,
+                authChain,
+                cacheTtlMs,
+                authHttp,
+                authFile,
+                authBuiltInDatabase,
+                authRedis,
+                authMysql,
+                authPostgresql
+        );
     }
 
     private EmbeddedAdminStateStore.NodeMetrics parseNodeMetrics(String reportedNodeId, String body, String clusterId) {
@@ -748,6 +965,186 @@ public class AdminPanelServer {
         return defaultValue;
     }
 
+    private static EmbeddedAdminStateStore.AuthHttpConfig parseAuthHttpConfig(
+            String body,
+            EmbeddedAdminStateStore.AuthHttpConfig current
+    ) {
+        String segment = extractObject(body, "authHttp");
+        if (segment == null) {
+            return current;
+        }
+        return new EmbeddedAdminStateStore.AuthHttpConfig(
+                normalize(extractString(segment, "url"), current.url()),
+                extractInt(segment, "timeoutMs", current.timeoutMs())
+        );
+    }
+
+    private static EmbeddedAdminStateStore.AuthFileConfig parseAuthFileConfig(
+            String body,
+            EmbeddedAdminStateStore.AuthFileConfig current
+    ) {
+        String segment = extractObject(body, "authFile");
+        if (segment == null) {
+            return current;
+        }
+        return new EmbeddedAdminStateStore.AuthFileConfig(
+                normalize(extractString(segment, "path"), current.path())
+        );
+    }
+
+    private static EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig parseAuthBuiltInDatabaseConfig(
+            String body,
+            EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig current
+    ) {
+        String segment = extractObject(body, "authBuiltInDatabase");
+        if (segment == null) {
+            return current;
+        }
+        return new EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig(
+                normalize(extractString(segment, "accountType"), current.accountType()),
+                normalize(extractString(segment, "passwordHashAlgorithm"), current.passwordHashAlgorithm()),
+                normalize(extractString(segment, "saltPosition"), current.saltPosition())
+        );
+    }
+
+    private static EmbeddedAdminStateStore.AuthRedisConfig parseAuthRedisConfig(
+            String body,
+            EmbeddedAdminStateStore.AuthRedisConfig current
+    ) {
+        String segment = extractObject(body, "authRedis");
+        if (segment == null) {
+            return current;
+        }
+        return new EmbeddedAdminStateStore.AuthRedisConfig(
+                normalize(extractString(segment, "host"), current.host()),
+                extractInt(segment, "port", current.port()),
+                extractString(segment, "password") == null ? current.password() : extractString(segment, "password"),
+                extractInt(segment, "db", current.db()),
+                normalize(extractString(segment, "keyPrefix"), current.keyPrefix()),
+                extractInt(segment, "timeoutMs", current.timeoutMs())
+        );
+    }
+
+    private static EmbeddedAdminStateStore.AuthMysqlConfig parseAuthMysqlConfig(
+            String body,
+            EmbeddedAdminStateStore.AuthMysqlConfig current
+    ) {
+        String segment = extractObject(body, "authMysql");
+        if (segment == null) {
+            return current;
+        }
+        return new EmbeddedAdminStateStore.AuthMysqlConfig(
+                normalize(extractString(segment, "url"), current.url()),
+                normalize(extractString(segment, "user"), current.user()),
+                extractString(segment, "password") == null ? current.password() : extractString(segment, "password"),
+                normalize(extractString(segment, "query"), current.query()),
+                extractInt(segment, "poolMinIdle", current.poolMinIdle()),
+                extractInt(segment, "poolMaxSize", current.poolMaxSize()),
+                extractLong(segment, "poolConnectionTimeoutMs", current.poolConnectionTimeoutMs()),
+                extractLong(segment, "poolIdleTimeoutMs", current.poolIdleTimeoutMs()),
+                extractLong(segment, "poolMaxLifetimeMs", current.poolMaxLifetimeMs())
+        );
+    }
+
+    private static EmbeddedAdminStateStore.AuthPostgresqlConfig parseAuthPostgresqlConfig(
+            String body,
+            EmbeddedAdminStateStore.AuthPostgresqlConfig current
+    ) {
+        String segment = extractObject(body, "authPostgresql");
+        if (segment == null) {
+            return current;
+        }
+        return new EmbeddedAdminStateStore.AuthPostgresqlConfig(
+                normalize(extractString(segment, "url"), current.url()),
+                normalize(extractString(segment, "user"), current.user()),
+                extractString(segment, "password") == null ? current.password() : extractString(segment, "password"),
+                normalize(extractString(segment, "query"), current.query()),
+                extractInt(segment, "poolMinIdle", current.poolMinIdle()),
+                extractInt(segment, "poolMaxSize", current.poolMaxSize()),
+                extractLong(segment, "poolConnectionTimeoutMs", current.poolConnectionTimeoutMs()),
+                extractLong(segment, "poolIdleTimeoutMs", current.poolIdleTimeoutMs()),
+                extractLong(segment, "poolMaxLifetimeMs", current.poolMaxLifetimeMs())
+        );
+    }
+
+    private static String validateSecurityConfig(EmbeddedAdminStateStore.SecurityConfig config) {
+        if (config == null || !config.authEnabled() || config.authChain().isEmpty()) {
+            return null;
+        }
+        for (String rawPlugin : config.authChain()) {
+            String plugin = normalize(rawPlugin, "").toLowerCase();
+            if ("mysql".equals(plugin)) {
+                String error = validateJdbcConfig(
+                        "MySQL",
+                        "com.mysql.cj.jdbc.Driver",
+                        config.authMysql().url(),
+                        config.authMysql().user(),
+                        config.authMysql().password(),
+                        config.authMysql().query()
+                );
+                if (error != null) {
+                    return error;
+                }
+            }
+            if ("postgresql".equals(plugin)) {
+                String error = validateJdbcConfig(
+                        "PostgreSQL",
+                        "org.postgresql.Driver",
+                        config.authPostgresql().url(),
+                        config.authPostgresql().user(),
+                        config.authPostgresql().password(),
+                        config.authPostgresql().query()
+                );
+                if (error != null) {
+                    return error;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static String validateJdbcConfig(
+            String databaseType,
+            String driverClassName,
+            String url,
+            String user,
+            String password,
+            String query
+    ) {
+        try {
+            Class.forName(driverClassName);
+        } catch (ClassNotFoundException exception) {
+            return databaseType + " 驱动未找到";
+        }
+        try (Connection connection = DriverManager.getConnection(url, user, password);
+             PreparedStatement ignored = connection.prepareStatement(query)) {
+            return null;
+        } catch (Exception exception) {
+            return databaseType + " 连接验证失败: " + normalize(exception.getMessage(), exception.getClass().getSimpleName());
+        }
+    }
+
+    private static String extractObject(String body, String key) {
+        Matcher matcher = Pattern.compile("\"" + Pattern.quote(key) + "\"\\s*:\\s*\\{", Pattern.DOTALL).matcher(body);
+        if (!matcher.find()) {
+            return null;
+        }
+        int start = matcher.end() - 1;
+        int depth = 0;
+        for (int i = start; i < body.length(); i++) {
+            char current = body.charAt(i);
+            if (current == '{') {
+                depth++;
+            } else if (current == '}') {
+                depth--;
+                if (depth == 0) {
+                    return body.substring(start, i + 1);
+                }
+            }
+        }
+        return null;
+    }
+
     private static void writeJson(HttpExchange exchange, int code, String json) throws IOException {
         write(exchange, code, "application/json; charset=UTF-8", json.getBytes(StandardCharsets.UTF_8));
     }
@@ -826,5 +1223,20 @@ public class AdminPanelServer {
     @FunctionalInterface
     public interface ClusterConfigUpdater {
         void apply(String clusterId, EmbeddedAdminStateStore.ClusterConfig config);
+    }
+
+    public interface BuiltInDatabaseUsersUpdater {
+        default void upsert(String clusterId, EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig config, String userId, String password, boolean superuser) {
+        }
+
+        default int importUsers(String clusterId, EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig config, List<BuiltInDatabaseUserService.UserInput> users) {
+            return 0;
+        }
+
+        default void delete(String clusterId, String userId) {
+        }
+
+        default void deleteAll(String clusterId) {
+        }
     }
 }

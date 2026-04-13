@@ -47,7 +47,7 @@ public final class AuthProviderFactory {
                 .collect(Collectors.toList());
             return new ChainedAuthProvider(chain);
         }
-        return resolvePlugin(plugins, normalizeType(properties.getType())).create(properties);
+        return plugins.get("allow_all").create(properties);
     }
 
     private static List<String> parseChain(String chainRaw) {
@@ -60,35 +60,21 @@ public final class AuthProviderFactory {
             .collect(Collectors.toList());
     }
 
-    private static AuthProviderPlugin resolvePlugin(Map<String, AuthProviderPlugin> plugins, String type) {
-        AuthProviderPlugin plugin = plugins.get(type);
-        if (plugin != null) {
-            return plugin;
-        }
-        // 未识别类型兜底为 allow_all，避免启动期因为配置错误直接崩溃。
-        return plugins.get("allow_all");
-    }
-
     private static void registerBuiltins(Map<String, AuthProviderPlugin> plugins) {
         plugins.put("allow_all", new NamedPlugin("allow_all", p -> new AllowAllAuthProvider()));
+        plugins.put("built_in_database", new NamedPlugin("built_in_database", BuiltInDatabaseAuthProvider::new));
         plugins.put("http", new NamedPlugin("http", HttpAuthProvider::new));
         plugins.put("file", new NamedPlugin("file", FileAuthProvider::new));
         plugins.put("redis", new NamedPlugin("redis", RedisAuthProvider::new));
-        plugins.put("db", new NamedPlugin("db", DbAuthProvider::new));
+        plugins.put("mysql", new NamedPlugin("mysql", JdbcAuthProvider::mysql));
+        plugins.put("postgresql", new NamedPlugin("postgresql", JdbcAuthProvider::postgresql));
     }
 
     private static void loadExtensions(Map<String, AuthProviderPlugin> plugins) {
         ServiceLoader<AuthProviderPlugin> loader = ServiceLoader.load(AuthProviderPlugin.class);
         for (AuthProviderPlugin plugin : loader) {
-            plugins.put(normalizeType(plugin.type()), plugin);
+            plugins.put(normalizeChainType(plugin.type()), plugin);
         }
-    }
-
-    private static String normalizeType(String type) {
-        if (type == null || type.isBlank()) {
-            return "allow_all";
-        }
-        return type.trim().toLowerCase(Locale.ROOT);
     }
 
     private static String normalizeChainType(String type) {

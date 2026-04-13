@@ -16,5 +16,6 @@ public record ClientSession(String clientId,
                             String username,
                             String serviceNodeIp,
                             int keepAliveSeconds,
+                            boolean superuser,
                             Instant connectedAt) {
 }

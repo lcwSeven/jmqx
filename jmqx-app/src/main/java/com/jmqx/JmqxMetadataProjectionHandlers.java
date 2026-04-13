@@ -1,5 +1,9 @@
 package com.jmqx;
 
+import com.jmqx.admin.embedded.AdminConfigCodec;
+import com.jmqx.admin.embedded.AdminStateRepository;
+import com.jmqx.admin.embedded.BuiltInDatabaseUserService;
+import com.jmqx.admin.embedded.EmbeddedAdminStateStore;
 import com.jmqx.cluster.ClusterMetadataCommandApplier;
 import com.jmqx.cluster.MetadataCommand;
 import com.jmqx.router.global.GlobalSubscriptionEvent;
@@ -29,15 +33,27 @@ public class JmqxMetadataProjectionHandlers {
     private final GlobalSubscriptionRegistry globalSubscriptionRegistry;
     private final SessionRegistry sessionRegistry;
     private final RetainedMessageStore retainedMessageStore;
+    private final AdminStateRepository adminStateRepository;
+    private final BuiltInDatabaseUserService builtInDatabaseUserService;
+    private final AdminSecurityConfigApplier adminSecurityConfigApplier;
+    private final AdminClusterConfigApplier adminClusterConfigApplier;
 
     public JmqxMetadataProjectionHandlers(
             GlobalSubscriptionRegistry globalSubscriptionRegistry,
             SessionRegistry sessionRegistry,
-            RetainedMessageStore retainedMessageStore
+            RetainedMessageStore retainedMessageStore,
+            AdminStateRepository adminStateRepository,
+            BuiltInDatabaseUserService builtInDatabaseUserService,
+            AdminSecurityConfigApplier adminSecurityConfigApplier,
+            AdminClusterConfigApplier adminClusterConfigApplier
     ) {
         this.globalSubscriptionRegistry = globalSubscriptionRegistry;
         this.sessionRegistry = sessionRegistry;
         this.retainedMessageStore = retainedMessageStore;
+        this.adminStateRepository = adminStateRepository;
+        this.builtInDatabaseUserService = builtInDatabaseUserService;
+        this.adminSecurityConfigApplier = adminSecurityConfigApplier;
+        this.adminClusterConfigApplier = adminClusterConfigApplier;
     }
 
     /**
@@ -146,6 +162,70 @@ public class JmqxMetadataProjectionHandlers {
         retainedMessageStore.saveOrRemove(new RetainedMessage(topic, payload, qos, true));
     }
 
+    public void applyAdminSecurityConfigCommand(String localNodeId, MetadataCommand command) {
+        if (adminStateRepository == null || adminSecurityConfigApplier == null || command == null) {
+            return;
+        }
+        if (!ClusterMetadataCommandApplier.ADMIN_SECURITY_NAMESPACE.equals(command.namespace())) {
+            return;
+        }
+        String clusterId = command.key();
+        if (clusterId == null || clusterId.isBlank()) {
+            return;
+        }
+        EmbeddedAdminStateStore.SecurityConfig config = AdminConfigCodec.decodeSecurityConfigFromString(command.value());
+        if (config == null) {
+            return;
+        }
+        adminStateRepository.setSecurityConfig(clusterId, config);
+        adminSecurityConfigApplier.apply(clusterId, config);
+    }
+
+    public void applyAdminClusterConfigCommand(String localNodeId, MetadataCommand command) {
+        if (adminStateRepository == null || adminClusterConfigApplier == null || command == null) {
+            return;
+        }
+        if (!ClusterMetadataCommandApplier.ADMIN_CLUSTER_NAMESPACE.equals(command.namespace())) {
+            return;
+        }
+        String clusterId = command.key();
+        if (clusterId == null || clusterId.isBlank()) {
+            return;
+        }
+        EmbeddedAdminStateStore.ClusterConfig config = AdminConfigCodec.decodeClusterConfigFromString(command.value());
+        if (config == null) {
+            return;
+        }
+        adminStateRepository.setClusterConfig(clusterId, config);
+        adminClusterConfigApplier.apply(clusterId, config);
+    }
+
+    public void applyBuiltInUserCommand(String localNodeId, MetadataCommand command) {
+        if (builtInDatabaseUserService == null || command == null) {
+            return;
+        }
+        if (!ClusterMetadataCommandApplier.ADMIN_BUILT_IN_USER_NAMESPACE.equals(command.namespace())) {
+            return;
+        }
+        String operation = command.operation();
+        if ("upsert".equals(operation)) {
+            String userId = command.key();
+            String encodedCredential = command.value();
+            if (userId == null || userId.isBlank() || encodedCredential == null || encodedCredential.isBlank()) {
+                return;
+            }
+            builtInDatabaseUserService.upsertEncodedUser(userId, encodedCredential);
+            return;
+        }
+        if ("delete".equals(operation)) {
+            builtInDatabaseUserService.deleteUser(command.key());
+            return;
+        }
+        if ("clear".equals(operation)) {
+            builtInDatabaseUserService.deleteAllUsers();
+        }
+    }
+
     private static long parseLong(String value, long defaultValue) {
         if (value == null || value.isBlank()) {
             return defaultValue;
@@ -155,5 +235,15 @@ public class JmqxMetadataProjectionHandlers {
         } catch (NumberFormatException ignore) {
             return defaultValue;
         }
+    }
+
+    @FunctionalInterface
+    public interface AdminSecurityConfigApplier {
+        void apply(String clusterId, EmbeddedAdminStateStore.SecurityConfig config);
+    }
+
+    @FunctionalInterface
+    public interface AdminClusterConfigApplier {
+        void apply(String clusterId, EmbeddedAdminStateStore.ClusterConfig config);
     }
 }

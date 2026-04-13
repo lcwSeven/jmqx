@@ -2,8 +2,10 @@ package com.jmqx;
 
 import com.jmqx.admin.AdminReporter;
 import com.jmqx.admin.HttpAdminReporter;
+import com.jmqx.admin.embedded.AdminConfigCodec;
 import com.jmqx.admin.embedded.AdminStateRepository;
 import com.jmqx.admin.embedded.AdminPanelServer;
+import com.jmqx.admin.embedded.BuiltInDatabaseUserService;
 import com.jmqx.admin.embedded.EmbeddedAdminStateStore;
 import com.jmqx.admin.embedded.RocksDbAdminStateStore;
 import com.jmqx.acl.AclAuthorizerFactory;
@@ -186,13 +188,35 @@ public class JmqxApplication {
         Qos1InflightStore qos1InflightStore = buildQos1InflightStore(context, sharedAsyncStoreExecutor);
         Qos2InflightStore qos2InflightStore = buildQos2InflightStore(context, sharedAsyncStoreExecutor);
         WillMessageStore willMessageStore = buildWillMessageStore(context, sharedAsyncStoreExecutor);
+        SharedSubscriptionManager sharedSubscriptionManager = new SharedSubscriptionManager(
+                context.sharedMaxSubscribers(),
+                context.sharedSlowThreshold()
+        );
+        ReloadableAuthProvider authProvider = new ReloadableAuthProvider(AuthProviderFactory.create(context.authProperties()));
+        ReloadableAclAuthorizer aclAuthorizer = new ReloadableAclAuthorizer(AclAuthorizerFactory.create(context.aclProperties()));
 
         // 1) 构建并启动元数据运行时（CORE 负责写入与复制，REPLICANT 负责追平日志）。
+        AdminStateRepository adminStateRepository = buildAdminStateRepository(context.adminPanelSettings());
+        BuiltInDatabaseUserService builtInDatabaseUserService = new BuiltInDatabaseUserService();
         MetadataRuntime metadataRuntime = buildMetadataRuntime(
                 context.clusterRoleProvider(),
                 context.globalSubscriptionRegistry(),
                 context.sessionRegistry(),
                 retainedMessageStore,
+                adminStateRepository,
+                builtInDatabaseUserService,
+                (clusterId, securityConfig) -> applyRuntimeSecurityConfig(
+                        context.authProperties(),
+                        context.aclProperties(),
+                        authProvider,
+                        aclAuthorizer,
+                        securityConfig
+                ),
+                (clusterId, clusterConfig) -> applyRuntimeClusterConfig(
+                        sharedSubscriptionManager,
+                        context.sharedSlowThreshold(),
+                        clusterConfig
+                ),
                 context.clusterSettings().coreBindHost(),
                 context.clusterSettings().coreBindPort(),
                 context.clusterSettings().clusterRequestTimeoutMs(),
@@ -250,14 +274,8 @@ public class JmqxApplication {
         }
 
         // 3) 组装 Broker 依赖：共享订阅、保留消息、AUTH/ACL、桥接、连接指标、管理上报。
-        SharedSubscriptionManager sharedSubscriptionManager = new SharedSubscriptionManager(
-                context.sharedMaxSubscribers(),
-                context.sharedSlowThreshold()
-        );
-        ReloadableAuthProvider authProvider = new ReloadableAuthProvider(AuthProviderFactory.create(context.authProperties()));
         ClientAuthenticator clientAuthenticator = (clientId, username, password) ->
-                authProvider.authenticate(new AuthRequest(clientId, username, password));
-        ReloadableAclAuthorizer aclAuthorizer = new ReloadableAclAuthorizer(AclAuthorizerFactory.create(context.aclProperties()));
+                authProvider.authenticateResult(new AuthRequest(clientId, username, password));
         MessageBridge messageBridge = MessageBridgeFactory.create(context.bridgeProperties());
         ConnectionMetrics connectionMetrics = new ConnectionMetrics();
         AdminReporter adminReporter = buildAdminReporter(
@@ -329,20 +347,75 @@ public class JmqxApplication {
                 context.sessionRegistry(),
                 context.subscriptionRegistry(),
                 connectionMetrics,
+                adminStateRepository,
+                builtInDatabaseUserService,
                 buildInitialSecurityConfig(context.authProperties(), context.aclProperties()),
                 buildInitialClusterConfig(context),
-                (clusterId, securityConfig) -> applyRuntimeSecurityConfig(
-                        context.authProperties(),
-                        context.aclProperties(),
-                        authProvider,
-                        aclAuthorizer,
-                        securityConfig
-                ),
-                (clusterId, clusterConfig) -> applyRuntimeClusterConfig(
-                        sharedSubscriptionManager,
-                        context.sharedSlowThreshold(),
-                        clusterConfig
-                )
+                (clusterId, securityConfig) -> metadataRuntime.gateway().submit(new MetadataCommand(
+                        ClusterMetadataCommandApplier.ADMIN_SECURITY_NAMESPACE,
+                        "upsert",
+                        clusterId,
+                        AdminConfigCodec.encodeSecurityConfigToString(securityConfig),
+                        context.clusterRoleProvider().nodeId()
+                )),
+                (clusterId, clusterConfig) -> metadataRuntime.gateway().submit(new MetadataCommand(
+                        ClusterMetadataCommandApplier.ADMIN_CLUSTER_NAMESPACE,
+                        "upsert",
+                        clusterId,
+                        AdminConfigCodec.encodeClusterConfigToString(clusterConfig),
+                        context.clusterRoleProvider().nodeId()
+                )),
+                new AdminPanelServer.BuiltInDatabaseUsersUpdater() {
+                    @Override
+                    public void upsert(String clusterId, EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig config, String userId, String password, boolean superuser) {
+                        String encodedCredential = builtInDatabaseUserService.encodeUserCredential(config, password, superuser);
+                        metadataRuntime.gateway().submit(new MetadataCommand(
+                                ClusterMetadataCommandApplier.ADMIN_BUILT_IN_USER_NAMESPACE,
+                                "upsert",
+                                userId,
+                                encodedCredential,
+                                context.clusterRoleProvider().nodeId()
+                        ));
+                    }
+
+                    @Override
+                    public int importUsers(String clusterId, EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig config, List<BuiltInDatabaseUserService.UserInput> users) {
+                        int count = 0;
+                        if (users == null) {
+                            return 0;
+                        }
+                        for (BuiltInDatabaseUserService.UserInput user : users) {
+                            if (user == null || user.userId() == null || user.userId().isBlank() || user.password() == null || user.password().isBlank()) {
+                                continue;
+                            }
+                            upsert(clusterId, config, user.userId(), user.password(), user.superuser());
+                            count++;
+                        }
+                        return count;
+                    }
+
+                    @Override
+                    public void delete(String clusterId, String userId) {
+                        metadataRuntime.gateway().submit(new MetadataCommand(
+                                ClusterMetadataCommandApplier.ADMIN_BUILT_IN_USER_NAMESPACE,
+                                "delete",
+                                userId,
+                                "",
+                                context.clusterRoleProvider().nodeId()
+                        ));
+                    }
+
+                    @Override
+                    public void deleteAll(String clusterId) {
+                        metadataRuntime.gateway().submit(new MetadataCommand(
+                                ClusterMetadataCommandApplier.ADMIN_BUILT_IN_USER_NAMESPACE,
+                                "clear",
+                                "",
+                                "",
+                                context.clusterRoleProvider().nodeId()
+                        ));
+                    }
+                }
         );
 
         // 7) 启动 MQTT/MQTTS/WS/WSS 监听端点。
@@ -355,6 +428,7 @@ public class JmqxApplication {
                 clusterMessageTransport,
                 clusterMessageDispatcherCloser,
                 sharedAsyncStoreExecutor,
+                authProvider,
                 brokerMessageHandler,
                 retainedMessageStore,
                 willMessageStore,
@@ -445,6 +519,7 @@ public class JmqxApplication {
             runtimeComponents.adminPanelServer().stop();
             runtimeComponents.dashboardPublisher().shutdownNow();
             runtimeComponents.brokerMessageHandler().shutdown();
+            runtimeComponents.authProvider().close();
             runtimeComponents.retainedMessageStore().close();
             runtimeComponents.willMessageStore().close();
             closeQuietly(runtimeComponents.storageAsyncExecutorCloser());
@@ -478,7 +553,7 @@ public class JmqxApplication {
             String wssPath = normalizeWebsocketPath(brokerProperties.getWssPath());
             System.out.println("JMQX wss: wss://" + wssHost + ":" + brokerProperties.getWssPort() + wssPath);
         }
-        System.out.println("AUTH plugin: " + context.authProperties().getType());
+        System.out.println("AUTH chain: " + context.authProperties().getChain());
         System.out.println("ACL plugin: " + context.aclProperties().getType());
         System.out.println("BRIDGE enabled=" + context.bridgeProperties().isEnabled()
                 + ", types=" + context.bridgeProperties().getTypes()
@@ -685,13 +760,15 @@ public class JmqxApplication {
             SessionRegistry sessionRegistry,
             SubscriptionRegistry subscriptionRegistry,
             ConnectionMetrics connectionMetrics,
+            AdminStateRepository stateRepository,
+            BuiltInDatabaseUserService builtInDatabaseUserService,
             EmbeddedAdminStateStore.SecurityConfig initialSecurityConfig,
             EmbeddedAdminStateStore.ClusterConfig initialClusterConfig,
             AdminPanelServer.SecurityConfigUpdater securityConfigUpdater,
-            AdminPanelServer.ClusterConfigUpdater clusterConfigUpdater
+            AdminPanelServer.ClusterConfigUpdater clusterConfigUpdater,
+            AdminPanelServer.BuiltInDatabaseUsersUpdater builtInDatabaseUsersUpdater
     ) {
         String panelNodeIp = resolveLocalNodeIp();
-        AdminStateRepository stateRepository = buildAdminStateRepository(settings);
         AdminPanelServer server = new AdminPanelServer(
                 settings.host(),
                 settings.port(),
@@ -708,7 +785,9 @@ public class JmqxApplication {
                 initialSecurityConfig,
                 initialClusterConfig,
                 securityConfigUpdater,
-                clusterConfigUpdater
+                clusterConfigUpdater,
+                builtInDatabaseUsersUpdater,
+                builtInDatabaseUserService
         );
         if (settings.enabled()) {
             server.start();
@@ -728,6 +807,10 @@ public class JmqxApplication {
             GlobalSubscriptionRegistry globalSubscriptionRegistry,
             SessionRegistry sessionRegistry,
             RetainedMessageStore retainedMessageStore,
+            AdminStateRepository adminStateRepository,
+            BuiltInDatabaseUserService builtInDatabaseUserService,
+            JmqxMetadataProjectionHandlers.AdminSecurityConfigApplier adminSecurityConfigApplier,
+            JmqxMetadataProjectionHandlers.AdminClusterConfigApplier adminClusterConfigApplier,
             String coreBindHost,
             int coreBindPort,
             int clusterRequestTimeoutMs,
@@ -748,13 +831,20 @@ public class JmqxApplication {
         JmqxMetadataProjectionHandlers handlers = new JmqxMetadataProjectionHandlers(
                 globalSubscriptionRegistry,
                 sessionRegistry,
-                retainedMessageStore
+                retainedMessageStore,
+                adminStateRepository,
+                builtInDatabaseUserService,
+                adminSecurityConfigApplier,
+                adminClusterConfigApplier
         );
         ClusterMetadataCommandApplier commandApplier = new ClusterMetadataCommandApplier(
                 clusterRoleProvider.nodeId(),
                 handlers::applyRouteSubscriptionCommand,
                 handlers::applyClientOnlineCommand,
-                handlers::applyRetainedCommand
+                handlers::applyRetainedCommand,
+                handlers::applyAdminSecurityConfigCommand,
+                handlers::applyAdminClusterConfigCommand,
+                handlers::applyBuiltInUserCommand
         );
         if (clusterRoleProvider.role() == NodeRole.CORE) {
             SofaJraftMetadataCommandGateway raftGateway = new SofaJraftMetadataCommandGateway(
@@ -857,7 +947,49 @@ public class JmqxApplication {
                 aclChain,
                 authEnabled,
                 authChain,
-                Math.max(cacheTtlMs, 0)
+                Math.max(cacheTtlMs, 0),
+                new EmbeddedAdminStateStore.AuthHttpConfig(
+                        authProperties.getHttpUrl(),
+                        authProperties.getHttpTimeoutMs()
+                ),
+                new EmbeddedAdminStateStore.AuthFileConfig(
+                        authProperties.getFilePath()
+                ),
+                new EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig(
+                        authProperties.getBuiltInDatabaseAccountType(),
+                        authProperties.getBuiltInDatabasePasswordHashAlgorithm(),
+                        authProperties.getBuiltInDatabaseSaltPosition()
+                ),
+                new EmbeddedAdminStateStore.AuthRedisConfig(
+                        authProperties.getRedisHost(),
+                        authProperties.getRedisPort(),
+                        authProperties.getRedisPassword(),
+                        authProperties.getRedisDb(),
+                        authProperties.getRedisKeyPrefix(),
+                        authProperties.getRedisTimeoutMs()
+                ),
+                new EmbeddedAdminStateStore.AuthMysqlConfig(
+                        authProperties.getMysqlUrl(),
+                        authProperties.getMysqlUser(),
+                        authProperties.getMysqlPassword(),
+                        authProperties.getMysqlQuery(),
+                        authProperties.getMysqlPoolMinIdle(),
+                        authProperties.getMysqlPoolMaxSize(),
+                        authProperties.getMysqlPoolConnectionTimeoutMs(),
+                        authProperties.getMysqlPoolIdleTimeoutMs(),
+                        authProperties.getMysqlPoolMaxLifetimeMs()
+                ),
+                new EmbeddedAdminStateStore.AuthPostgresqlConfig(
+                        authProperties.getPostgresqlUrl(),
+                        authProperties.getPostgresqlUser(),
+                        authProperties.getPostgresqlPassword(),
+                        authProperties.getPostgresqlQuery(),
+                        authProperties.getPostgresqlPoolMinIdle(),
+                        authProperties.getPostgresqlPoolMaxSize(),
+                        authProperties.getPostgresqlPoolConnectionTimeoutMs(),
+                        authProperties.getPostgresqlPoolIdleTimeoutMs(),
+                        authProperties.getPostgresqlPoolMaxLifetimeMs()
+                )
         );
     }
 
@@ -891,15 +1023,44 @@ public class JmqxApplication {
 
             List<String> authChain = normalizePluginList(securityConfig.authChain());
             if (!securityConfig.authEnabled()) {
-                authProperties.setType("allow_all");
                 authProperties.setChain("");
             } else {
                 if (authChain.isEmpty()) {
                     authChain = List.of("file");
                 }
-                authProperties.setType(JmqxConfigMappers.firstOrEmpty(authChain));
                 authProperties.setChain(String.join(",", authChain));
             }
+            authProperties.setHttpUrl(securityConfig.authHttp().url());
+            authProperties.setHttpTimeoutMs(securityConfig.authHttp().timeoutMs());
+            authProperties.setFilePath(securityConfig.authFile().path());
+            authProperties.setBuiltInDatabaseAccountType(securityConfig.authBuiltInDatabase().accountType());
+            authProperties.setBuiltInDatabasePasswordHashAlgorithm(securityConfig.authBuiltInDatabase().passwordHashAlgorithm());
+            authProperties.setBuiltInDatabaseSaltPosition(securityConfig.authBuiltInDatabase().saltPosition());
+            authProperties.setRedisHost(securityConfig.authRedis().host());
+            authProperties.setRedisPort(securityConfig.authRedis().port());
+            authProperties.setRedisPassword(securityConfig.authRedis().password());
+            authProperties.setRedisDb(securityConfig.authRedis().db());
+            authProperties.setRedisKeyPrefix(securityConfig.authRedis().keyPrefix());
+            authProperties.setRedisTimeoutMs(securityConfig.authRedis().timeoutMs());
+            authProperties.setMysqlUrl(securityConfig.authMysql().url());
+            authProperties.setMysqlUser(securityConfig.authMysql().user());
+            authProperties.setMysqlPassword(securityConfig.authMysql().password());
+            authProperties.setMysqlQuery(securityConfig.authMysql().query());
+            authProperties.setMysqlPoolMinIdle(securityConfig.authMysql().poolMinIdle());
+            authProperties.setMysqlPoolMaxSize(securityConfig.authMysql().poolMaxSize());
+            authProperties.setMysqlPoolConnectionTimeoutMs(securityConfig.authMysql().poolConnectionTimeoutMs());
+            authProperties.setMysqlPoolIdleTimeoutMs(securityConfig.authMysql().poolIdleTimeoutMs());
+            authProperties.setMysqlPoolMaxLifetimeMs(securityConfig.authMysql().poolMaxLifetimeMs());
+
+            authProperties.setPostgresqlUrl(securityConfig.authPostgresql().url());
+            authProperties.setPostgresqlUser(securityConfig.authPostgresql().user());
+            authProperties.setPostgresqlPassword(securityConfig.authPostgresql().password());
+            authProperties.setPostgresqlQuery(securityConfig.authPostgresql().query());
+            authProperties.setPostgresqlPoolMinIdle(securityConfig.authPostgresql().poolMinIdle());
+            authProperties.setPostgresqlPoolMaxSize(securityConfig.authPostgresql().poolMaxSize());
+            authProperties.setPostgresqlPoolConnectionTimeoutMs(securityConfig.authPostgresql().poolConnectionTimeoutMs());
+            authProperties.setPostgresqlPoolIdleTimeoutMs(securityConfig.authPostgresql().poolIdleTimeoutMs());
+            authProperties.setPostgresqlPoolMaxLifetimeMs(securityConfig.authPostgresql().poolMaxLifetimeMs());
 
             List<String> aclChain = normalizePluginList(securityConfig.aclChain());
             if (!securityConfig.aclEnabled()) {
@@ -1150,6 +1311,7 @@ public class JmqxApplication {
             NettyClusterMessageTransport clusterMessageTransport,
             AutoCloseable clusterMessageDispatcherCloser,
             AutoCloseable storageAsyncExecutorCloser,
+            ReloadableAuthProvider authProvider,
             MqttBrokerMessageHandler brokerMessageHandler,
             RetainedMessageStore retainedMessageStore,
             WillMessageStore willMessageStore,

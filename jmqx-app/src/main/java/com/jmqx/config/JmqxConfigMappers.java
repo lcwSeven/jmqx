@@ -60,23 +60,38 @@ public final class JmqxConfigMappers {
 
     public static AuthProperties loadAuthProperties(JmqxConfig config) {
         AuthProperties properties = new AuthProperties();
-        properties.setType(config.getString("jmqx.auth.type", properties.getType()));
         properties.setChain(config.getString("jmqx.auth.chain", properties.getChain()));
         properties.setCacheMillis(config.getInt("jmqx.auth.cacheMillis", properties.getCacheMillis()));
         properties.setHttpUrl(config.getString("jmqx.auth.http.url", properties.getHttpUrl()));
         properties.setHttpTimeoutMs(config.getInt("jmqx.auth.http.timeoutMs", properties.getHttpTimeoutMs()));
         properties.setFilePath(config.getString("jmqx.auth.file.path", properties.getFilePath()));
+        properties.setBuiltInDatabaseAccountType(config.getString("jmqx.auth.builtInDatabase.accountType", properties.getBuiltInDatabaseAccountType()));
+        properties.setBuiltInDatabasePasswordHashAlgorithm(config.getString("jmqx.auth.builtInDatabase.passwordHashAlgorithm", properties.getBuiltInDatabasePasswordHashAlgorithm()));
+        properties.setBuiltInDatabaseSaltPosition(config.getString("jmqx.auth.builtInDatabase.saltPosition", properties.getBuiltInDatabaseSaltPosition()));
         properties.setRedisHost(config.getString("jmqx.auth.redis.host", properties.getRedisHost()));
         properties.setRedisPort(config.getInt("jmqx.auth.redis.port", properties.getRedisPort()));
         properties.setRedisPassword(config.getString("jmqx.auth.redis.password", properties.getRedisPassword()));
         properties.setRedisDb(config.getInt("jmqx.auth.redis.db", properties.getRedisDb()));
         properties.setRedisKeyPrefix(config.getString("jmqx.auth.redis.keyPrefix", properties.getRedisKeyPrefix()));
         properties.setRedisTimeoutMs(config.getInt("jmqx.auth.redis.timeoutMs", properties.getRedisTimeoutMs()));
-        properties.setDbDriver(config.getString("jmqx.auth.db.driver", properties.getDbDriver()));
-        properties.setDbUrl(config.getString("jmqx.auth.db.url", properties.getDbUrl()));
-        properties.setDbUser(config.getString("jmqx.auth.db.user", properties.getDbUser()));
-        properties.setDbPassword(config.getString("jmqx.auth.db.password", properties.getDbPassword()));
-        properties.setDbQuery(config.getString("jmqx.auth.db.query", properties.getDbQuery()));
+        properties.setMysqlUrl(config.getString("jmqx.auth.mysql.url", properties.getMysqlUrl()));
+        properties.setMysqlUser(config.getString("jmqx.auth.mysql.user", properties.getMysqlUser()));
+        properties.setMysqlPassword(config.getString("jmqx.auth.mysql.password", properties.getMysqlPassword()));
+        properties.setMysqlQuery(config.getString("jmqx.auth.mysql.query", properties.getMysqlQuery()));
+        properties.setMysqlPoolMinIdle(config.getInt("jmqx.auth.mysql.pool.minIdle", properties.getMysqlPoolMinIdle()));
+        properties.setMysqlPoolMaxSize(config.getInt("jmqx.auth.mysql.pool.maxSize", properties.getMysqlPoolMaxSize()));
+        properties.setMysqlPoolConnectionTimeoutMs(config.getLong("jmqx.auth.mysql.pool.connectionTimeoutMs", properties.getMysqlPoolConnectionTimeoutMs()));
+        properties.setMysqlPoolIdleTimeoutMs(config.getLong("jmqx.auth.mysql.pool.idleTimeoutMs", properties.getMysqlPoolIdleTimeoutMs()));
+        properties.setMysqlPoolMaxLifetimeMs(config.getLong("jmqx.auth.mysql.pool.maxLifetimeMs", properties.getMysqlPoolMaxLifetimeMs()));
+        properties.setPostgresqlUrl(config.getString("jmqx.auth.postgresql.url", properties.getPostgresqlUrl()));
+        properties.setPostgresqlUser(config.getString("jmqx.auth.postgresql.user", properties.getPostgresqlUser()));
+        properties.setPostgresqlPassword(config.getString("jmqx.auth.postgresql.password", properties.getPostgresqlPassword()));
+        properties.setPostgresqlQuery(config.getString("jmqx.auth.postgresql.query", properties.getPostgresqlQuery()));
+        properties.setPostgresqlPoolMinIdle(config.getInt("jmqx.auth.postgresql.pool.minIdle", properties.getPostgresqlPoolMinIdle()));
+        properties.setPostgresqlPoolMaxSize(config.getInt("jmqx.auth.postgresql.pool.maxSize", properties.getPostgresqlPoolMaxSize()));
+        properties.setPostgresqlPoolConnectionTimeoutMs(config.getLong("jmqx.auth.postgresql.pool.connectionTimeoutMs", properties.getPostgresqlPoolConnectionTimeoutMs()));
+        properties.setPostgresqlPoolIdleTimeoutMs(config.getLong("jmqx.auth.postgresql.pool.idleTimeoutMs", properties.getPostgresqlPoolIdleTimeoutMs()));
+        properties.setPostgresqlPoolMaxLifetimeMs(config.getLong("jmqx.auth.postgresql.pool.maxLifetimeMs", properties.getPostgresqlPoolMaxLifetimeMs()));
         return properties;
     }
 
@@ -170,14 +185,7 @@ public final class JmqxConfigMappers {
 
     public static List<String> resolveAuthChain(AuthProperties authProperties) {
         List<String> fromChain = normalizePluginList(splitCommaList(authProperties.getChain()));
-        if (!fromChain.isEmpty()) {
-            return fromChain;
-        }
-        String type = authProperties.getType();
-        if (type == null || type.isBlank()) {
-            return List.of();
-        }
-        return normalizePluginList(List.of(type));
+        return filterAllowAll(fromChain);
     }
 
     public static List<String> resolveAclChain(AclProperties aclProperties) {
@@ -220,6 +228,20 @@ public final class JmqxConfigMappers {
                 continue;
             }
             result.add(item.trim().toLowerCase());
+        }
+        return result;
+    }
+
+    private static List<String> filterAllowAll(List<String> values) {
+        if (values == null || values.isEmpty()) {
+            return List.of();
+        }
+        List<String> result = new ArrayList<>();
+        for (String value : values) {
+            if ("allow_all".equalsIgnoreCase(value)) {
+                continue;
+            }
+            result.add(value);
         }
         return result;
     }

@@ -1,5 +1,8 @@
 package com.jmqx.auth;
 
+import com.jmqx.protocol.AuthDecision;
+import com.jmqx.protocol.AuthResult;
+
 import java.util.List;
 
 /**
@@ -14,27 +17,34 @@ public class ChainedAuthProvider implements AuthProvider {
     }
 
     @Override
-    public boolean authenticate(AuthRequest request) {
-        return authenticateDecision(request) == AuthDecision.ALLOW;
-    }
-
-    @Override
-    public AuthDecision authenticateDecision(AuthRequest request) {
+    public AuthResult authenticateResult(AuthRequest request) {
         if (chain == null || chain.isEmpty()) {
-            return AuthDecision.DENY;
+            return AuthResult.deny();
         }
         for (AuthProvider provider : chain) {
             if (provider == null) {
                 continue;
             }
-            AuthDecision decision = provider.authenticateDecision(request);
-            if (decision == AuthDecision.ALLOW) {
-                return AuthDecision.ALLOW;
+            AuthResult result = provider.authenticateResult(request);
+            if (result.decision() == AuthDecision.ALLOW) {
+                return result;
             }
-            if (decision == AuthDecision.DENY) {
-                return AuthDecision.DENY;
+            if (result.decision() == AuthDecision.DENY) {
+                return AuthResult.deny();
             }
         }
-        return AuthDecision.DENY;
+        return AuthResult.deny();
+    }
+
+    @Override
+    public void close() {
+        if (chain == null || chain.isEmpty()) {
+            return;
+        }
+        for (AuthProvider provider : chain) {
+            if (provider != null) {
+                provider.close();
+            }
+        }
     }
 }

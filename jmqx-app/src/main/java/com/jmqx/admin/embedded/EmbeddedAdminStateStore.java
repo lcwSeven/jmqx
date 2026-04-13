@@ -27,7 +27,7 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
         ClusterState state = clusterStates.computeIfAbsent(id, ignored -> new ClusterState(
                 new ClusterSummary(id, normalize(displayName, id), normalize(seedCoreNode, "unknown"), System.currentTimeMillis()),
                 new ClusterConfig(List.of(normalize(seedCoreNode, "unknown")), List.of(), true, 10_000),
-                new SecurityConfig(true, List.of("file"), true, List.of("file"), 60_000)
+                SecurityConfig.defaultConfig()
         ));
         return state.summary;
     }
@@ -54,7 +54,14 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
 
     @Override
     public void setClusterConfig(String clusterId, ClusterConfig clusterConfig) {
-        getOrCreate(clusterId).clusterConfig = clusterConfig;
+        ClusterState state = getOrCreate(clusterId);
+        state.clusterConfig = clusterConfig;
+        state.clusterConfigInitialized = true;
+    }
+
+    @Override
+    public boolean hasClusterConfig(String clusterId) {
+        return getOrCreate(clusterId).clusterConfigInitialized;
     }
 
     @Override
@@ -64,7 +71,14 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
 
     @Override
     public void setSecurityConfig(String clusterId, SecurityConfig securityConfig) {
-        getOrCreate(clusterId).securityConfig = securityConfig;
+        ClusterState state = getOrCreate(clusterId);
+        state.securityConfig = securityConfig;
+        state.securityConfigInitialized = true;
+    }
+
+    @Override
+    public boolean hasSecurityConfig(String clusterId) {
+        return getOrCreate(clusterId).securityConfigInitialized;
     }
 
     @Override
@@ -112,7 +126,7 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
         return clusterStates.computeIfAbsent(id, ignored -> new ClusterState(
                 new ClusterSummary(id, "集群-" + id, "unknown", System.currentTimeMillis()),
                 new ClusterConfig(List.of(), List.of(), true, 10_000),
-                new SecurityConfig(true, List.of("file"), true, List.of("file"), 60_000)
+                SecurityConfig.defaultConfig()
         ));
     }
 
@@ -148,8 +162,188 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
             List<String> aclChain,
             boolean authEnabled,
             List<String> authChain,
-            long cacheTtlMs
+            long cacheTtlMs,
+            AuthHttpConfig authHttp,
+            AuthFileConfig authFile,
+            AuthBuiltInDatabaseConfig authBuiltInDatabase,
+            AuthRedisConfig authRedis,
+            AuthMysqlConfig authMysql,
+            AuthPostgresqlConfig authPostgresql
     ) {
+        public SecurityConfig(boolean aclEnabled,
+                              List<String> aclChain,
+                              boolean authEnabled,
+                              List<String> authChain,
+                              long cacheTtlMs) {
+            this(
+                    aclEnabled,
+                    aclChain,
+                    authEnabled,
+                    authChain,
+                    cacheTtlMs,
+                    AuthHttpConfig.defaults(),
+                    AuthFileConfig.defaults(),
+                    AuthBuiltInDatabaseConfig.defaults(),
+                    AuthRedisConfig.defaults(),
+                    AuthMysqlConfig.defaults(),
+                    AuthPostgresqlConfig.defaults()
+            );
+        }
+
+        public SecurityConfig {
+            aclChain = normalizeList(aclChain);
+            authChain = normalizeList(authChain);
+            authHttp = authHttp == null ? AuthHttpConfig.defaults() : authHttp;
+            authFile = authFile == null ? AuthFileConfig.defaults() : authFile;
+            authBuiltInDatabase = authBuiltInDatabase == null ? AuthBuiltInDatabaseConfig.defaults() : authBuiltInDatabase;
+            authRedis = authRedis == null ? AuthRedisConfig.defaults() : authRedis;
+            authMysql = authMysql == null ? AuthMysqlConfig.defaults() : authMysql;
+            authPostgresql = authPostgresql == null ? AuthPostgresqlConfig.defaults() : authPostgresql;
+        }
+
+        public static SecurityConfig defaultConfig() {
+            return new SecurityConfig(
+                    true,
+                    List.of("file"),
+                    false,
+                    List.of(),
+                    60_000,
+                    AuthHttpConfig.defaults(),
+                    AuthFileConfig.defaults(),
+                    AuthBuiltInDatabaseConfig.defaults(),
+                    AuthRedisConfig.defaults(),
+                    AuthMysqlConfig.defaults(),
+                    AuthPostgresqlConfig.defaults()
+            );
+        }
+    }
+
+    public record AuthHttpConfig(String url, int timeoutMs) {
+        public AuthHttpConfig {
+            url = normalize(url, "");
+        }
+
+        public static AuthHttpConfig defaults() {
+            return new AuthHttpConfig("http://127.0.0.1:8080/auth/check", 2000);
+        }
+    }
+
+    public record AuthFileConfig(String path) {
+        public AuthFileConfig {
+            path = normalize(path, "auth-users.txt");
+        }
+
+        public static AuthFileConfig defaults() {
+            return new AuthFileConfig("auth-users.txt");
+        }
+    }
+
+    public record AuthBuiltInDatabaseConfig(
+            String accountType,
+            String passwordHashAlgorithm,
+            String saltPosition
+    ) {
+        public AuthBuiltInDatabaseConfig {
+            accountType = normalize(accountType, "username");
+            passwordHashAlgorithm = normalize(passwordHashAlgorithm, "sha256");
+            saltPosition = normalize(saltPosition, "suffix");
+        }
+
+        public static AuthBuiltInDatabaseConfig defaults() {
+            return new AuthBuiltInDatabaseConfig(
+                    "username",
+                    "sha256",
+                    "suffix"
+            );
+        }
+    }
+
+    public record AuthRedisConfig(String host, int port, String password, int db, String keyPrefix, int timeoutMs) {
+        public AuthRedisConfig {
+            host = normalize(host, "127.0.0.1");
+            password = password == null ? "" : password;
+            keyPrefix = normalize(keyPrefix, "jmqx:auth");
+        }
+
+        public static AuthRedisConfig defaults() {
+            return new AuthRedisConfig("127.0.0.1", 6379, "", 0, "jmqx:auth", 2000);
+        }
+    }
+
+    public record AuthMysqlConfig(
+            String url,
+            String user,
+            String password,
+            String query,
+            int poolMinIdle,
+            int poolMaxSize,
+            long poolConnectionTimeoutMs,
+            long poolIdleTimeoutMs,
+            long poolMaxLifetimeMs
+    ) {
+        public AuthMysqlConfig {
+            url = normalize(url, "jdbc:mysql://127.0.0.1:3306/jmqx");
+            user = normalize(user, "root");
+            password = password == null ? "" : password;
+            query = normalize(query, "SELECT password FROM mqtt_user WHERE username = ?");
+            poolMinIdle = Math.max(0, poolMinIdle);
+            poolMaxSize = Math.max(1, poolMaxSize);
+            poolConnectionTimeoutMs = Math.max(250L, poolConnectionTimeoutMs);
+            poolIdleTimeoutMs = Math.max(10_000L, poolIdleTimeoutMs);
+            poolMaxLifetimeMs = Math.max(30_000L, poolMaxLifetimeMs);
+        }
+
+        public static AuthMysqlConfig defaults() {
+            return new AuthMysqlConfig(
+                    "jdbc:mysql://127.0.0.1:3306/jmqx",
+                    "root",
+                    "",
+                    "SELECT password FROM mqtt_user WHERE username = ?",
+                    1,
+                    8,
+                    3000,
+                    60_000,
+                    600_000
+            );
+        }
+    }
+
+    public record AuthPostgresqlConfig(
+            String url,
+            String user,
+            String password,
+            String query,
+            int poolMinIdle,
+            int poolMaxSize,
+            long poolConnectionTimeoutMs,
+            long poolIdleTimeoutMs,
+            long poolMaxLifetimeMs
+    ) {
+        public AuthPostgresqlConfig {
+            url = normalize(url, "jdbc:postgresql://127.0.0.1:5432/jmqx");
+            user = normalize(user, "postgres");
+            password = password == null ? "" : password;
+            query = normalize(query, "SELECT password FROM mqtt_user WHERE username = ?");
+            poolMinIdle = Math.max(0, poolMinIdle);
+            poolMaxSize = Math.max(1, poolMaxSize);
+            poolConnectionTimeoutMs = Math.max(250L, poolConnectionTimeoutMs);
+            poolIdleTimeoutMs = Math.max(10_000L, poolIdleTimeoutMs);
+            poolMaxLifetimeMs = Math.max(30_000L, poolMaxLifetimeMs);
+        }
+
+        public static AuthPostgresqlConfig defaults() {
+            return new AuthPostgresqlConfig(
+                    "jdbc:postgresql://127.0.0.1:5432/jmqx",
+                    "postgres",
+                    "",
+                    "SELECT password FROM mqtt_user WHERE username = ?",
+                    1,
+                    8,
+                    3000,
+                    60_000,
+                    600_000
+            );
+        }
     }
 
     /**
@@ -190,6 +384,8 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
         private final ClusterSummary summary;
         private volatile ClusterConfig clusterConfig;
         private volatile SecurityConfig securityConfig;
+        private volatile boolean clusterConfigInitialized;
+        private volatile boolean securityConfigInitialized;
         private final Map<String, NodeMetrics> nodeMetrics = new ConcurrentHashMap<>();
         private final List<AuditLogEntry> auditLogs = new CopyOnWriteArrayList<>();
 
@@ -197,6 +393,29 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
             this.summary = summary;
             this.clusterConfig = clusterConfig;
             this.securityConfig = securityConfig;
+            this.clusterConfigInitialized = false;
+            this.securityConfigInitialized = false;
         }
+    }
+
+    private static List<String> normalizeList(List<String> values) {
+        if (values == null || values.isEmpty()) {
+            return List.of();
+        }
+        List<String> result = new ArrayList<>();
+        for (String value : values) {
+            String normalized = normalize(value, null);
+            if (normalized != null) {
+                result.add(normalized);
+            }
+        }
+        return result;
+    }
+
+    private static String firstOrDefault(List<String> values, String defaultValue) {
+        if (values == null || values.isEmpty()) {
+            return defaultValue;
+        }
+        return normalize(values.get(0), defaultValue);
     }
 }

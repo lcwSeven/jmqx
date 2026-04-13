@@ -5,7 +5,6 @@ package com.jmqx.auth;
  * @date 2026/4/4
  */
 public class AuthProperties {
-    private String type = "allow_all";
     private String chain = "";
     private int cacheMillis = 60_000;
 
@@ -14,6 +13,12 @@ public class AuthProperties {
 
     private String filePath = "auth-users.txt";
 
+    private static final String BUILT_IN_DATABASE_PATH = "data/auth-built-in-rocksdb";
+
+    private String builtInDatabaseAccountType = "username";
+    private String builtInDatabasePasswordHashAlgorithm = "sha256";
+    private String builtInDatabaseSaltPosition = "suffix";
+
     private String redisHost = "127.0.0.1";
     private int redisPort = 6379;
     private String redisPassword = "";
@@ -21,19 +26,25 @@ public class AuthProperties {
     private String redisKeyPrefix = "jmqx:auth";
     private int redisTimeoutMs = 2000;
 
-    private String dbDriver = "";
-    private String dbUrl = "jdbc:mysql://127.0.0.1:3306/jmqx";
-    private String dbUser = "root";
-    private String dbPassword = "";
-    private String dbQuery = "SELECT password FROM mqtt_user WHERE username = ?";
+    private String mysqlUrl = "jdbc:mysql://127.0.0.1:3306/jmqx";
+    private String mysqlUser = "root";
+    private String mysqlPassword = "";
+    private String mysqlQuery = "SELECT password FROM mqtt_user WHERE username = ?";
+    private int mysqlPoolMinIdle = 1;
+    private int mysqlPoolMaxSize = 8;
+    private long mysqlPoolConnectionTimeoutMs = 3000;
+    private long mysqlPoolIdleTimeoutMs = 60_000;
+    private long mysqlPoolMaxLifetimeMs = 600_000;
 
-    public String getType() {
-        return type;
-    }
-
-    public void setType(String type) {
-        this.type = type;
-    }
+    private String postgresqlUrl = "jdbc:postgresql://127.0.0.1:5432/jmqx";
+    private String postgresqlUser = "postgres";
+    private String postgresqlPassword = "";
+    private String postgresqlQuery = "SELECT password FROM mqtt_user WHERE username = ?";
+    private int postgresqlPoolMinIdle = 1;
+    private int postgresqlPoolMaxSize = 8;
+    private long postgresqlPoolConnectionTimeoutMs = 3000;
+    private long postgresqlPoolIdleTimeoutMs = 60_000;
+    private long postgresqlPoolMaxLifetimeMs = 600_000;
 
     public String getChain() {
         return chain;
@@ -73,6 +84,34 @@ public class AuthProperties {
 
     public void setFilePath(String filePath) {
         this.filePath = filePath;
+    }
+
+    public String getBuiltInDatabasePath() {
+        return BUILT_IN_DATABASE_PATH;
+    }
+
+    public String getBuiltInDatabaseAccountType() {
+        return builtInDatabaseAccountType;
+    }
+
+    public void setBuiltInDatabaseAccountType(String builtInDatabaseAccountType) {
+        this.builtInDatabaseAccountType = builtInDatabaseAccountType;
+    }
+
+    public String getBuiltInDatabasePasswordHashAlgorithm() {
+        return builtInDatabasePasswordHashAlgorithm;
+    }
+
+    public void setBuiltInDatabasePasswordHashAlgorithm(String builtInDatabasePasswordHashAlgorithm) {
+        this.builtInDatabasePasswordHashAlgorithm = builtInDatabasePasswordHashAlgorithm;
+    }
+
+    public String getBuiltInDatabaseSaltPosition() {
+        return builtInDatabaseSaltPosition;
+    }
+
+    public void setBuiltInDatabaseSaltPosition(String builtInDatabaseSaltPosition) {
+        this.builtInDatabaseSaltPosition = builtInDatabaseSaltPosition;
     }
 
     public String getRedisHost() {
@@ -123,43 +162,147 @@ public class AuthProperties {
         this.redisTimeoutMs = redisTimeoutMs;
     }
 
-    public String getDbDriver() {
-        return dbDriver;
+    public String getMysqlUrl() {
+        return mysqlUrl;
     }
 
-    public void setDbDriver(String dbDriver) {
-        this.dbDriver = dbDriver;
+    public void setMysqlUrl(String mysqlUrl) {
+        this.mysqlUrl = mysqlUrl;
     }
 
-    public String getDbUrl() {
-        return dbUrl;
+    public String getMysqlUser() {
+        return mysqlUser;
     }
 
-    public void setDbUrl(String dbUrl) {
-        this.dbUrl = dbUrl;
+    public void setMysqlUser(String mysqlUser) {
+        this.mysqlUser = mysqlUser;
     }
 
-    public String getDbUser() {
-        return dbUser;
+    public String getMysqlPassword() {
+        return mysqlPassword;
     }
 
-    public void setDbUser(String dbUser) {
-        this.dbUser = dbUser;
+    public void setMysqlPassword(String mysqlPassword) {
+        this.mysqlPassword = mysqlPassword;
     }
 
-    public String getDbPassword() {
-        return dbPassword;
+    public String getMysqlQuery() {
+        return mysqlQuery;
     }
 
-    public void setDbPassword(String dbPassword) {
-        this.dbPassword = dbPassword;
+    public void setMysqlQuery(String mysqlQuery) {
+        this.mysqlQuery = mysqlQuery;
     }
 
-    public String getDbQuery() {
-        return dbQuery;
+    public int getMysqlPoolMinIdle() {
+        return mysqlPoolMinIdle;
     }
 
-    public void setDbQuery(String dbQuery) {
-        this.dbQuery = dbQuery;
+    public void setMysqlPoolMinIdle(int mysqlPoolMinIdle) {
+        this.mysqlPoolMinIdle = mysqlPoolMinIdle;
+    }
+
+    public int getMysqlPoolMaxSize() {
+        return mysqlPoolMaxSize;
+    }
+
+    public void setMysqlPoolMaxSize(int mysqlPoolMaxSize) {
+        this.mysqlPoolMaxSize = mysqlPoolMaxSize;
+    }
+
+    public long getMysqlPoolConnectionTimeoutMs() {
+        return mysqlPoolConnectionTimeoutMs;
+    }
+
+    public void setMysqlPoolConnectionTimeoutMs(long mysqlPoolConnectionTimeoutMs) {
+        this.mysqlPoolConnectionTimeoutMs = mysqlPoolConnectionTimeoutMs;
+    }
+
+    public long getMysqlPoolIdleTimeoutMs() {
+        return mysqlPoolIdleTimeoutMs;
+    }
+
+    public void setMysqlPoolIdleTimeoutMs(long mysqlPoolIdleTimeoutMs) {
+        this.mysqlPoolIdleTimeoutMs = mysqlPoolIdleTimeoutMs;
+    }
+
+    public long getMysqlPoolMaxLifetimeMs() {
+        return mysqlPoolMaxLifetimeMs;
+    }
+
+    public void setMysqlPoolMaxLifetimeMs(long mysqlPoolMaxLifetimeMs) {
+        this.mysqlPoolMaxLifetimeMs = mysqlPoolMaxLifetimeMs;
+    }
+
+    public String getPostgresqlUrl() {
+        return postgresqlUrl;
+    }
+
+    public void setPostgresqlUrl(String postgresqlUrl) {
+        this.postgresqlUrl = postgresqlUrl;
+    }
+
+    public String getPostgresqlUser() {
+        return postgresqlUser;
+    }
+
+    public void setPostgresqlUser(String postgresqlUser) {
+        this.postgresqlUser = postgresqlUser;
+    }
+
+    public String getPostgresqlPassword() {
+        return postgresqlPassword;
+    }
+
+    public void setPostgresqlPassword(String postgresqlPassword) {
+        this.postgresqlPassword = postgresqlPassword;
+    }
+
+    public String getPostgresqlQuery() {
+        return postgresqlQuery;
+    }
+
+    public void setPostgresqlQuery(String postgresqlQuery) {
+        this.postgresqlQuery = postgresqlQuery;
+    }
+
+    public int getPostgresqlPoolMinIdle() {
+        return postgresqlPoolMinIdle;
+    }
+
+    public void setPostgresqlPoolMinIdle(int postgresqlPoolMinIdle) {
+        this.postgresqlPoolMinIdle = postgresqlPoolMinIdle;
+    }
+
+    public int getPostgresqlPoolMaxSize() {
+        return postgresqlPoolMaxSize;
+    }
+
+    public void setPostgresqlPoolMaxSize(int postgresqlPoolMaxSize) {
+        this.postgresqlPoolMaxSize = postgresqlPoolMaxSize;
+    }
+
+    public long getPostgresqlPoolConnectionTimeoutMs() {
+        return postgresqlPoolConnectionTimeoutMs;
+    }
+
+    public void setPostgresqlPoolConnectionTimeoutMs(long postgresqlPoolConnectionTimeoutMs) {
+        this.postgresqlPoolConnectionTimeoutMs = postgresqlPoolConnectionTimeoutMs;
+    }
+
+    public long getPostgresqlPoolIdleTimeoutMs() {
+        return postgresqlPoolIdleTimeoutMs;
+    }
+
+    public void setPostgresqlPoolIdleTimeoutMs(long postgresqlPoolIdleTimeoutMs) {
+        this.postgresqlPoolIdleTimeoutMs = postgresqlPoolIdleTimeoutMs;
+    }
+
+    public long getPostgresqlPoolMaxLifetimeMs() {
+        return postgresqlPoolMaxLifetimeMs;
+    }
+
+    public void setPostgresqlPoolMaxLifetimeMs(long postgresqlPoolMaxLifetimeMs) {
+        this.postgresqlPoolMaxLifetimeMs = postgresqlPoolMaxLifetimeMs;
     }
 }

@@ -1,5 +1,7 @@
 package com.jmqx.auth;
 
+import com.jmqx.protocol.AuthResult;
+
 /**
  * @author liucaiwen
  * @date 2026/4/5
@@ -12,16 +14,24 @@ public class ReloadableAuthProvider implements AuthProvider {
     }
 
     public void setDelegate(AuthProvider delegate) {
+        AuthProvider previous = this.delegate;
         this.delegate = delegate;
+        if (previous != null && previous != delegate) {
+            previous.close();
+        }
     }
 
     @Override
-    public boolean authenticate(AuthRequest request) {
-        return delegate.authenticate(request);
+    public AuthResult authenticateResult(AuthRequest request) {
+        return delegate.authenticateResult(request);
     }
 
     @Override
-    public AuthDecision authenticateDecision(AuthRequest request) {
-        return delegate.authenticateDecision(request);
+    public void close() {
+        AuthProvider current = this.delegate;
+        this.delegate = new AllowAllAuthProvider();
+        if (current != null) {
+            current.close();
+        }
     }
 }
