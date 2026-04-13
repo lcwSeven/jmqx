@@ -11,6 +11,7 @@ import com.jmqx.auth.AuthProperties;
 import com.jmqx.auth.AuthProviderFactory;
 import com.jmqx.auth.AuthRequest;
 import com.jmqx.auth.ReloadableAuthProvider;
+import com.jmqx.broker.core.AsyncClusterMessageDispatcher;
 import com.jmqx.broker.core.ClusterMessageDispatcher;
 import com.jmqx.broker.core.MqttBrokerMessageHandler;
 import com.jmqx.broker.ratelimit.BrokerRateLimitConfig;
@@ -119,6 +120,12 @@ public class JmqxApplication {
         AdminPanelSettings adminPanelSettings = loadAdminPanelSettings(config);
         int sharedMaxSubscribers = getIntProperty(config, "jmqx.shared.maxSubscribersPerGroup", 1000);
         int sharedSlowThreshold = getIntProperty(config, "jmqx.shared.slowConsumerStrikeThreshold", 3);
+        ClusterDispatchAsyncSettings clusterDispatchAsyncSettings = new ClusterDispatchAsyncSettings(
+                getBooleanProperty(config, "jmqx.cluster.dispatch.async.enabled", true),
+                getIntProperty(config, "jmqx.cluster.dispatch.async.queueCapacity", 20000),
+                getIntProperty(config, "jmqx.cluster.dispatch.async.workerCount", 2),
+                getIntProperty(config, "jmqx.cluster.dispatch.async.enqueueTimeoutMs", 2)
+        );
         String nodeId = getStringProperty(config, "jmqx.node.id", "node-1");
         NodeRole nodeRole = NodeRole.from(getStringProperty(config, "jmqx.cluster.role", "core"), NodeRole.CORE);
         Set<String> coreEndpoints = getStringSetProperty(config, "jmqx.cluster.coreEndpoints");
@@ -139,6 +146,7 @@ public class JmqxApplication {
                 willRocksdbPath,
                 sharedMaxSubscribers,
                 sharedSlowThreshold,
+                clusterDispatchAsyncSettings,
                 clusterRoleProvider,
                 sessionRegistry,
                 subscriptionRegistry,
@@ -192,7 +200,7 @@ public class JmqxApplication {
                 context.clusterSettings().clusterNodeEndpoints()
         );
         // 将“按目标节点分发”映射到 Netty 集群传输层。
-        ClusterMessageDispatcher clusterMessageDispatcher = (topic, payload, publishQos, targetPlans) -> {
+        ClusterMessageDispatcher syncClusterMessageDispatcher = (topic, payload, publishQos, targetPlans) -> {
             if (targetPlans == null || targetPlans.isEmpty()) {
                 return;
             }
@@ -205,6 +213,20 @@ public class JmqxApplication {
                     target.sharedGroups()
             ));
         };
+        AutoCloseable clusterMessageDispatcherCloser = null;
+        ClusterMessageDispatcher clusterMessageDispatcher;
+        if (context.clusterDispatchAsyncSettings().enabled()) {
+            AsyncClusterMessageDispatcher asyncDispatcher = new AsyncClusterMessageDispatcher(
+                    syncClusterMessageDispatcher,
+                    context.clusterDispatchAsyncSettings().queueCapacity(),
+                    context.clusterDispatchAsyncSettings().workerCount(),
+                    context.clusterDispatchAsyncSettings().enqueueTimeoutMs()
+            );
+            clusterMessageDispatcher = asyncDispatcher;
+            clusterMessageDispatcherCloser = asyncDispatcher;
+        } else {
+            clusterMessageDispatcher = syncClusterMessageDispatcher;
+        }
 
         // 3) 组装 Broker 依赖：共享订阅、保留消息、AUTH/ACL、桥接、连接指标、管理上报。
         SharedSubscriptionManager sharedSubscriptionManager = new SharedSubscriptionManager(
@@ -309,6 +331,7 @@ public class JmqxApplication {
                 context,
                 metadataRuntime,
                 clusterMessageTransport,
+                clusterMessageDispatcherCloser,
                 brokerMessageHandler,
                 retainedMessageStore,
                 willMessageStore,
@@ -402,6 +425,7 @@ public class JmqxApplication {
             runtimeComponents.retainedMessageStore().close();
             runtimeComponents.willMessageStore().close();
             runtimeComponents.messageBridge().close();
+            closeQuietly(runtimeComponents.clusterMessageDispatcherCloser());
             runtimeComponents.clusterMessageTransport().stop();
             runtimeComponents.metadataRuntime().replicator().stop();
             runtimeComponents.endpointServers().mqttWssServer().stop();
@@ -457,6 +481,10 @@ public class JmqxApplication {
                 + ", rocksdbPath=" + context.willRocksdbPath());
         System.out.println("SHARED maxSubscribersPerGroup=" + context.sharedMaxSubscribers()
                 + ", slowConsumerStrikeThreshold=" + context.sharedSlowThreshold());
+        System.out.println("CLUSTER-DISPATCH asyncEnabled=" + context.clusterDispatchAsyncSettings().enabled()
+                + ", queueCapacity=" + context.clusterDispatchAsyncSettings().queueCapacity()
+                + ", workerCount=" + context.clusterDispatchAsyncSettings().workerCount()
+                + ", enqueueTimeoutMs=" + context.clusterDispatchAsyncSettings().enqueueTimeoutMs());
         System.out.println("ADMIN-SYNC enabled=" + context.adminSyncSettings().enabled()
                 + ", url=" + context.adminSyncSettings().url()
                 + ", clusterId=" + context.adminSyncSettings().clusterId()
@@ -916,6 +944,16 @@ public class JmqxApplication {
                 .replace("\"", "\\\"");
     }
 
+    private static void closeQuietly(AutoCloseable closeable) {
+        if (closeable == null) {
+            return;
+        }
+        try {
+            closeable.close();
+        } catch (Exception ignored) {
+        }
+    }
+
     private static Set<String> getStringSetProperty(JmqxConfig config, String key) {
         return config.getStringSet(key);
     }
@@ -938,6 +976,7 @@ public class JmqxApplication {
             String willRocksdbPath,
             int sharedMaxSubscribers,
             int sharedSlowThreshold,
+            ClusterDispatchAsyncSettings clusterDispatchAsyncSettings,
             ClusterRoleProvider clusterRoleProvider,
             SessionRegistry sessionRegistry,
             SubscriptionRegistry subscriptionRegistry,
@@ -945,6 +984,20 @@ public class JmqxApplication {
             ClusterSettings clusterSettings,
             AdminSyncSettings adminSyncSettings,
             AdminPanelSettings adminPanelSettings
+    ) {
+    }
+
+    /**
+     * 集群消息异步分发配置。
+     *
+     * @author liucaiwen
+     * @date 2026/4/13
+     */
+    private record ClusterDispatchAsyncSettings(
+            boolean enabled,
+            int queueCapacity,
+            int workerCount,
+            int enqueueTimeoutMs
     ) {
     }
 
@@ -1005,6 +1058,7 @@ public class JmqxApplication {
             StartupContext startupContext,
             MetadataRuntime metadataRuntime,
             NettyClusterMessageTransport clusterMessageTransport,
+            AutoCloseable clusterMessageDispatcherCloser,
             MqttBrokerMessageHandler brokerMessageHandler,
             RetainedMessageStore retainedMessageStore,
             WillMessageStore willMessageStore,

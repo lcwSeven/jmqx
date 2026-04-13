@@ -101,6 +101,10 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     private static final long SESSION_EXPIRY_PERSISTENT = Long.MAX_VALUE;
     private static final long RETAINED_RETRY_INTERVAL_MS = 2000L;
     private static final long METADATA_COMMAND_RETRY_INTERVAL_MS = 2000L;
+    private static final long GLOBAL_MATCH_CACHE_TTL_MS = 200L;
+    private static final int GLOBAL_MATCH_CACHE_MAX_TOPICS = 16_384;
+    private static final GlobalSubscriptionMatch EMPTY_GLOBAL_MATCH =
+        new GlobalSubscriptionMatch(Collections.emptySet(), Collections.emptyMap());
 
     private final SessionRegistry sessionRegistry;
     private final SubscriptionRegistry subscriptionRegistry;
@@ -124,6 +128,8 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     private final int maxWillPayloadBytes;
     private final ConcurrentMap<String, AtomicLong> sharedGroupNodeRoundRobin = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, SharedGroupNodeOrderSnapshot> sharedGroupNodeOrderSnapshots = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, CachedGlobalMatch> globalMatchCache = new ConcurrentHashMap<>();
+    private final ThreadLocal<RouteScratch> routeScratchHolder = ThreadLocal.withInitial(RouteScratch::new);
     private final RetainedCommandReplicator retainedCommandReplicator;
     private final BrokerRateLimiter rateLimiter;
     private final ScheduledExecutorService qos1RetryExecutor;
@@ -772,34 +778,69 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     private void routeMessage(String topic, byte[] payload, int publishQos) {
-        GlobalSubscriptionMatch globalMatch = globalSubscriptionRegistry == null
-            ? new GlobalSubscriptionMatch(Collections.emptySet(), Collections.emptyMap())
-            : globalSubscriptionRegistry.match(topic);
+        GlobalSubscriptionMatch globalMatch = resolveGlobalMatch(topic);
+        RouteScratch routeScratch = routeScratchHolder.get();
+        Set<String> localSubscribers = routeScratch.localSubscribers();
+        Map<String, ClusterMessageDispatcher.DispatchTarget> remoteTargetPlans = routeScratch.remoteTargetPlans();
+        localSubscribers.clear();
+        remoteTargetPlans.clear();
         // 始终基于本地订阅表进行一次匹配，避免本地订阅已生效但全局路由尚未传播时漏投递。
         SubscriptionMatchResult localMatch = subscriptionRegistry.findSubscriptionMatch(topic);
-        Set<String> localSubscribers = new LinkedHashSet<>(localMatch.getDirectSubscribers());
-        Map<String, ClusterMessageDispatcher.DispatchTarget> remoteTargetPlans = buildRemoteNormalTargetPlans(globalMatch);
+        localSubscribers.addAll(localMatch.getDirectSubscribers());
+        buildRemoteNormalTargetPlans(globalMatch, remoteTargetPlans);
         selectSharedDeliveryTargets(localMatch, globalMatch, localSubscribers, remoteTargetPlans);
 
         deliverToLocalSubscribers(topic, payload, localSubscribers, publishQos);
         if (!remoteTargetPlans.isEmpty()) {
-            clusterMessageDispatcher.dispatch(topic, payload.clone(), publishQos, remoteTargetPlans);
+            // payload 在路由链路内按只读使用，跨节点分发无需额外 clone，减少大消息拷贝开销。
+            clusterMessageDispatcher.dispatch(topic, payload, publishQos, remoteTargetPlans);
             LOG.fine(() -> "[ROUTE][CLUSTER] topic=" + topic + ", remoteTargets=" + remoteTargetPlans.keySet());
         }
+        localSubscribers.clear();
+        remoteTargetPlans.clear();
     }
 
-    private Map<String, ClusterMessageDispatcher.DispatchTarget> buildRemoteNormalTargetPlans(GlobalSubscriptionMatch globalMatch) {
-        if (globalMatch == null || globalMatch.normalNodes().isEmpty()) {
-            return new HashMap<>();
+    /**
+     * 解析全局路由匹配结果（短 TTL + appliedLogIndex 一致性门控）。
+     * 命中条件：
+     * 1. 同 topic 存在缓存；
+     * 2. 缓存尚未过期；
+     * 3. 全局路由 appliedLogIndex 未变化。
+     */
+    private GlobalSubscriptionMatch resolveGlobalMatch(String topic) {
+        if (topic == null || topic.isBlank() || globalSubscriptionRegistry == null) {
+            return EMPTY_GLOBAL_MATCH;
         }
-        Map<String, ClusterMessageDispatcher.DispatchTarget> plans = new HashMap<>();
+        long now = System.currentTimeMillis();
+        long currentLogIndex = globalSubscriptionRegistry.appliedLogIndex();
+        CachedGlobalMatch cached = globalMatchCache.get(topic);
+        if (cached != null && cached.matches(currentLogIndex, now)) {
+            return cached.match();
+        }
+        GlobalSubscriptionMatch fresh = globalSubscriptionRegistry.match(topic);
+        if (fresh == null) {
+            fresh = EMPTY_GLOBAL_MATCH;
+        }
+        if (cached == null && globalMatchCache.size() >= GLOBAL_MATCH_CACHE_MAX_TOPICS) {
+            globalMatchCache.clear();
+        }
+        globalMatchCache.put(topic, new CachedGlobalMatch(fresh, currentLogIndex, now + GLOBAL_MATCH_CACHE_TTL_MS));
+        return fresh;
+    }
+
+    private void buildRemoteNormalTargetPlans(
+        GlobalSubscriptionMatch globalMatch,
+        Map<String, ClusterMessageDispatcher.DispatchTarget> plans
+    ) {
+        if (globalMatch == null || globalMatch.normalNodes().isEmpty()) {
+            return;
+        }
         for (String targetNodeId : globalMatch.normalNodes()) {
             if (targetNodeId == null || targetNodeId.isBlank() || targetNodeId.equals(nodeId)) {
                 continue;
             }
             plans.put(targetNodeId, ClusterMessageDispatcher.DispatchTarget.normalOnly());
         }
-        return plans;
     }
 
 
@@ -854,6 +895,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
      */
     private void deliverToLocalSubscribers(String topic, byte[] payload, Set<String> subscribers, int publishQos) {
         LOG.fine(() -> "[ROUTE][LOCAL] topic=" + topic + ", subscribers=" + subscribers.size());
+        Set<Channel> channelsToFlush = new LinkedHashSet<>();
         for (String subscriber : subscribers) {
             Optional<ClientSession> sessionOptional = sessionRegistry.get(subscriber);
             if (sessionOptional.isEmpty()) {
@@ -871,22 +913,30 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
                     : MqttQoS.AT_MOST_ONCE.value());
             outboundQos = capByMaxQos(outboundQos);
             if (outboundQos == MqttQoS.AT_MOST_ONCE.value()) {
-                channel.writeAndFlush(MqttMessageBuilders.publish()
+                channel.write(MqttMessageBuilders.publish()
                         .topicName(topic)
                         .retained(false)
                         .qos(MqttQoS.AT_MOST_ONCE)
                         .payload(Unpooled.wrappedBuffer(payload))
                 .build());
+                channelsToFlush.add(channel);
                 continue;
             }
             int packetId = inflightManager.nextOutboundPacketId(subscriber);
             if (outboundQos == MqttQoS.AT_LEAST_ONCE.value()) {
-                channel.writeAndFlush(MqttPacketFactory.buildQos1PublishMessage(topic, payload, packetId, false));
+                channel.write(MqttPacketFactory.buildQos1PublishMessage(topic, payload, packetId, false));
                 inflightManager.trackInflightQos1(subscriber, packetId, topic, payload);
+                channelsToFlush.add(channel);
                 continue;
             }
-            channel.writeAndFlush(MqttPacketFactory.buildQos2PublishMessage(topic, payload, packetId, false));
+            channel.write(MqttPacketFactory.buildQos2PublishMessage(topic, payload, packetId, false));
             inflightManager.trackInflightQos2(subscriber, packetId, topic, payload);
+            channelsToFlush.add(channel);
+        }
+        for (Channel channel : channelsToFlush) {
+            if (channel != null && channel.isActive()) {
+                channel.flush();
+            }
         }
     }
 
@@ -1397,6 +1447,35 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     ) {
         private boolean matches(int currentSize, int currentHash) {
             return this.size == currentSize && this.hash == currentHash;
+        }
+    }
+
+    /**
+     * topic -> 全局匹配缓存快照。
+     */
+    private record CachedGlobalMatch(
+        GlobalSubscriptionMatch match,
+        long appliedLogIndex,
+        long expireAtMs
+    ) {
+        private boolean matches(long currentLogIndex, long now) {
+            return this.appliedLogIndex == currentLogIndex && this.expireAtMs > now;
+        }
+    }
+
+    /**
+     * 路由热路径复用容器，减少每条 PUBLISH 的临时对象分配。
+     */
+    private static final class RouteScratch {
+        private final Set<String> localSubscribers = new LinkedHashSet<>();
+        private final Map<String, ClusterMessageDispatcher.DispatchTarget> remoteTargetPlans = new HashMap<>();
+
+        private Set<String> localSubscribers() {
+            return localSubscribers;
+        }
+
+        private Map<String, ClusterMessageDispatcher.DispatchTarget> remoteTargetPlans() {
+            return remoteTargetPlans;
         }
     }
 

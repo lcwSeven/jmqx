@@ -31,6 +31,17 @@ jmqx:
       port: 7900
     # Static nodeId -> endpoint map for cross-node routing.
     nodeEndpoints: node-1=127.0.0.1:7900
+    # Async dispatch for cross-node publish forwarding.
+    dispatch:
+      async:
+        # Enable bounded-queue async forwarding.
+        enabled: true
+        # Queue capacity for pending cross-node publish tasks.
+        queueCapacity: 20000
+        # Worker thread count processing dispatch queue.
+        workerCount: 2
+        # Enqueue timeout in milliseconds before dropping message.
+        enqueueTimeoutMs: 2
     # Raft metadata consensus settings for Core nodes.
     raft:
       groupId: jmqx-metadata
