@@ -5,4 +5,5 @@
 - [最佳实践](03-best-practices.md)
 - [配置项完整参考](04-configuration-reference.md)
 - [集群故障演练手册](05-cluster-failure-drill.md)
-
+- [管理页面（Admin Console）](06-admin-console.md)
+- [JMQX 功能与使用指南](08-jmqx-overview-and-usage.md)

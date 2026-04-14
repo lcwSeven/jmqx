@@ -15,6 +15,7 @@ JMQX 是一个基于 Java + Netty 的 MQTT Broker，目标是提供可读、可�
   - [配置项完整参考](docs/04-configuration-reference.md)
   - [集群故障演练手册](docs/05-cluster-failure-drill.md)
   - [管理页面（Admin Console）](docs/06-admin-console.md)
+  - [JMQX 功能与使用指南](docs/08-jmqx-overview-and-usage.md)
 
 ## 版本兼容矩阵
 
