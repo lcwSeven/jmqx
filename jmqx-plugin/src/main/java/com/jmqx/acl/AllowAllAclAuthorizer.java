@@ -6,7 +6,7 @@ package com.jmqx.acl;
  */
 public class AllowAllAclAuthorizer implements AclAuthorizer {
     @Override
-    public boolean isAllowed(AclRequest request) {
-        return true;
+    public AclDecision authorize(AclRequest request) {
+        return AclDecision.ALLOW;
     }
 }

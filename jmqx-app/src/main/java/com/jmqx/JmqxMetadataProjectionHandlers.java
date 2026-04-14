@@ -6,7 +6,6 @@ import com.jmqx.admin.embedded.BuiltInDatabaseUserService;
 import com.jmqx.admin.embedded.EmbeddedAdminStateStore;
 import com.jmqx.cluster.ClusterMetadataCommandApplier;
 import com.jmqx.cluster.MetadataCommand;
-import com.jmqx.common.logging.ClientTraceManager;
 import com.jmqx.protocol.ClientBlacklist;
 import com.jmqx.protocol.ClientAuthenticator;
 import com.jmqx.router.global.GlobalSubscriptionEvent;
@@ -43,9 +42,9 @@ public class JmqxMetadataProjectionHandlers {
     private final BuiltInDatabaseUserService builtInDatabaseUserService;
     private final ClientAuthenticator clientAuthenticator;
     private final ClientBlacklist clientBlacklist;
-    private final ClientTraceManager clientTraceManager;
     private final AdminSecurityConfigApplier adminSecurityConfigApplier;
     private final AdminClusterConfigApplier adminClusterConfigApplier;
+    private final AdminBridgeConfigApplier adminBridgeConfigApplier;
 
     public JmqxMetadataProjectionHandlers(
             GlobalSubscriptionRegistry globalSubscriptionRegistry,
@@ -57,7 +56,8 @@ public class JmqxMetadataProjectionHandlers {
             ClientAuthenticator clientAuthenticator,
             ClientBlacklist clientBlacklist,
             AdminSecurityConfigApplier adminSecurityConfigApplier,
-            AdminClusterConfigApplier adminClusterConfigApplier
+            AdminClusterConfigApplier adminClusterConfigApplier,
+            AdminBridgeConfigApplier adminBridgeConfigApplier
     ) {
         this.globalSubscriptionRegistry = globalSubscriptionRegistry;
         this.localClusterId = localClusterId == null || localClusterId.isBlank() ? "default" : localClusterId.trim();
@@ -67,9 +67,9 @@ public class JmqxMetadataProjectionHandlers {
         this.builtInDatabaseUserService = builtInDatabaseUserService;
         this.clientAuthenticator = clientAuthenticator;
         this.clientBlacklist = clientBlacklist == null ? ClientBlacklist.NOOP : clientBlacklist;
-        this.clientTraceManager = ClientTraceManager.getInstance();
         this.adminSecurityConfigApplier = adminSecurityConfigApplier;
         this.adminClusterConfigApplier = adminClusterConfigApplier;
+        this.adminBridgeConfigApplier = adminBridgeConfigApplier;
     }
 
     /**
@@ -256,6 +256,25 @@ public class JmqxMetadataProjectionHandlers {
         adminClusterConfigApplier.apply(clusterId, config);
     }
 
+    public void applyAdminBridgeConfigCommand(String localNodeId, MetadataCommand command) {
+        if (adminStateRepository == null || adminBridgeConfigApplier == null || command == null) {
+            return;
+        }
+        if (!ClusterMetadataCommandApplier.ADMIN_BRIDGE_NAMESPACE.equals(command.namespace())) {
+            return;
+        }
+        String clusterId = command.key();
+        if (clusterId == null || clusterId.isBlank()) {
+            return;
+        }
+        EmbeddedAdminStateStore.BridgeConfig config = AdminConfigCodec.decodeBridgeConfigFromString(command.value());
+        if (config == null) {
+            return;
+        }
+        adminStateRepository.setBridgeConfig(clusterId, config);
+        adminBridgeConfigApplier.apply(clusterId, config);
+    }
+
     public void applyBuiltInUserCommand(String localNodeId, MetadataCommand command) {
         if (builtInDatabaseUserService == null || command == null) {
             return;
@@ -279,32 +298,6 @@ public class JmqxMetadataProjectionHandlers {
         }
         if ("clear".equals(operation)) {
             builtInDatabaseUserService.deleteAllUsers();
-        }
-    }
-
-    public void applyClientTraceCommand(String localNodeId, MetadataCommand command) {
-        if (adminStateRepository == null || command == null) {
-            return;
-        }
-        if (!ClusterMetadataCommandApplier.ADMIN_CLIENT_TRACE_NAMESPACE.equals(command.namespace())) {
-            return;
-        }
-        String clusterId = command.key();
-        if (clusterId == null || clusterId.isBlank()) {
-            return;
-        }
-        ClientTraceManager.ClientTraceTask task = AdminConfigCodec.decodeClientTraceTaskFromString(command.value());
-        if (task == null || task.id() == null || task.id().isBlank()) {
-            return;
-        }
-        if ("upsert".equals(command.operation())) {
-            adminStateRepository.upsertClientTraceTask(clusterId, task);
-            clientTraceManager.upsert(task);
-            return;
-        }
-        if ("delete".equals(command.operation())) {
-            adminStateRepository.removeClientTraceTask(clusterId, task.id());
-            clientTraceManager.remove(task.id());
         }
     }
 
@@ -376,5 +369,10 @@ public class JmqxMetadataProjectionHandlers {
     @FunctionalInterface
     public interface AdminClusterConfigApplier {
         void apply(String clusterId, EmbeddedAdminStateStore.ClusterConfig config);
+    }
+
+    @FunctionalInterface
+    public interface AdminBridgeConfigApplier {
+        void apply(String clusterId, EmbeddedAdminStateStore.BridgeConfig config);
     }
 }

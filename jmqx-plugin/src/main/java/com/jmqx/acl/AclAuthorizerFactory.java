@@ -1,9 +1,13 @@
 package com.jmqx.acl;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.ServiceLoader;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * @author liucaiwen
@@ -14,20 +18,31 @@ public final class AclAuthorizerFactory {
     }
 
     public static AclAuthorizer create(AclProperties properties) {
-        String type = normalizeType(properties.getType());
         Map<String, AclAuthorizerPlugin> plugins = new HashMap<>();
         registerBuiltins(plugins);
         loadExtensions(plugins);
 
-        AclAuthorizerPlugin plugin = plugins.get(type);
-        if (plugin == null) {
-            plugin = plugins.get("allow_all");
-        }
-        AclAuthorizer delegate = plugin.create(properties);
+        AclAuthorizer delegate = createDelegate(properties, plugins);
         if (properties.getCacheMillis() <= 0) {
             return delegate;
         }
         return new CachedAclAuthorizer(delegate, properties.getCacheMillis());
+    }
+
+    private static AclAuthorizer createDelegate(
+            AclProperties properties,
+            Map<String, AclAuthorizerPlugin> plugins
+    ) {
+        List<String> chainTypes = parseChain(properties.getChain());
+        if (!chainTypes.isEmpty()) {
+            List<AclAuthorizer> chain = chainTypes.stream()
+                    .map(plugins::get)
+                    .filter(Objects::nonNull)
+                    .map(plugin -> plugin.create(properties))
+                    .collect(Collectors.toList());
+            return new ChainedAclAuthorizer(chain, properties.isDefaultAllow());
+        }
+        return plugins.get("allow_all").create(properties);
     }
 
     private static void registerBuiltins(Map<String, AclAuthorizerPlugin> plugins) {
@@ -40,13 +55,23 @@ public final class AclAuthorizerFactory {
     private static void loadExtensions(Map<String, AclAuthorizerPlugin> plugins) {
         ServiceLoader<AclAuthorizerPlugin> loader = ServiceLoader.load(AclAuthorizerPlugin.class);
         for (AclAuthorizerPlugin plugin : loader) {
-            plugins.put(normalizeType(plugin.type()), plugin);
+            plugins.put(normalizeChainType(plugin.type()), plugin);
         }
     }
 
-    private static String normalizeType(String type) {
-        if (type == null || type.isBlank()) {
-            return "allow_all";
+    private static List<String> parseChain(String chainRaw) {
+        if (chainRaw == null || chainRaw.isBlank()) {
+            return List.of();
+        }
+        return Stream.of(chainRaw.split(","))
+                .map(AclAuthorizerFactory::normalizeChainType)
+                .filter(type -> !type.isBlank() && !"allow_all".equals(type))
+                .collect(Collectors.toList());
+    }
+
+    private static String normalizeChainType(String type) {
+        if (type == null) {
+            return "";
         }
         return type.trim().toLowerCase(Locale.ROOT);
     }

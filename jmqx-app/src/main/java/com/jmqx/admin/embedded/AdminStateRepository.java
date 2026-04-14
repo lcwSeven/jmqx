@@ -36,6 +36,12 @@ public interface AdminStateRepository extends AutoCloseable {
 
     boolean hasSecurityConfig(String clusterId);
 
+    EmbeddedAdminStateStore.BridgeConfig getBridgeConfig(String clusterId);
+
+    void setBridgeConfig(String clusterId, EmbeddedAdminStateStore.BridgeConfig bridgeConfig);
+
+    boolean hasBridgeConfig(String clusterId);
+
     EmbeddedAdminStateStore.ClusterFullConfig getFullConfig(String clusterId);
 
     void upsertNodeMetrics(String clusterId, EmbeddedAdminStateStore.NodeMetrics nodeMetrics);

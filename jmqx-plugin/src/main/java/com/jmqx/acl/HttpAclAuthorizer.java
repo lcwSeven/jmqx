@@ -9,6 +9,7 @@ import okhttp3.Response;
 import java.io.IOException;
 import java.net.URI;
 import java.time.Duration;
+import java.util.Locale;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -22,7 +23,7 @@ public class HttpAclAuthorizer implements AclAuthorizer {
 
     private final OkHttpClient httpClient;
     private final URI endpoint;
-    private final boolean defaultAllow;
+    private final String bodyTemplate;
 
     public HttpAclAuthorizer(AclProperties properties) {
         this.httpClient = new OkHttpClient.Builder()
@@ -30,18 +31,13 @@ public class HttpAclAuthorizer implements AclAuthorizer {
                 .callTimeout(Duration.ofMillis(Math.max(properties.getHttpTimeoutMs(), 200)))
                 .build();
         this.endpoint = URI.create(properties.getHttpUrl());
-        this.defaultAllow = properties.isDefaultAllow();
+        this.bodyTemplate = normalizeBodyTemplate(properties.getHttpBodyTemplate());
     }
 
     @Override
-    public boolean isAllowed(AclRequest request) {
+    public AclDecision authorize(AclRequest request) {
         try {
-            String body = "{"
-                + "\"clientId\":\"" + escape(request.getClientId()) + "\","
-                + "\"username\":\"" + escape(request.getUsername()) + "\","
-                + "\"topic\":\"" + escape(request.getTopic()) + "\","
-                + "\"action\":\"" + request.getAction().name().toLowerCase() + "\""
-                + "}";
+            String body = renderTemplate(bodyTemplate, request);
             Request httpRequest = new Request.Builder()
                 .url(endpoint.toString())
                 .header("Content-Type", "application/json")
@@ -50,19 +46,19 @@ public class HttpAclAuthorizer implements AclAuthorizer {
             try (Response response = httpClient.newCall(httpRequest).execute()) {
                 String responseBody = response.body() == null ? "" : response.body().string().trim().toLowerCase();
                 if (responseBody.contains("\"allow\":true") || "allow".equals(responseBody) || "true".equals(responseBody)) {
-                    return true;
+                    return AclDecision.ALLOW;
                 }
                 if (responseBody.contains("\"allow\":false") || "deny".equals(responseBody) || "false".equals(responseBody)) {
-                    return false;
+                    return AclDecision.DENY;
                 }
-                return defaultAllow;
+                return AclDecision.NOT_FOUND;
             }
         } catch (IOException e) {
             LOG.log(Level.WARNING, "HTTP ACL request failed: " + e.getMessage(), e);
-            return defaultAllow;
+            return AclDecision.NOT_FOUND;
         } catch (RuntimeException e) {
             LOG.log(Level.WARNING, "HTTP ACL runtime error: " + e.getMessage(), e);
-            return defaultAllow;
+            return AclDecision.NOT_FOUND;
         }
     }
 
@@ -71,5 +67,35 @@ public class HttpAclAuthorizer implements AclAuthorizer {
             return "";
         }
         return value.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
+    private static String normalizeBodyTemplate(String template) {
+        if (template == null || template.isBlank()) {
+            return """
+                    {
+                      "clientId": "${clientId}",
+                      "username": "${username}",
+                      "topic": "${topic}",
+                      "action": "${action}"
+                    }
+                    """;
+        }
+        return template;
+    }
+
+    private static String renderTemplate(String template, AclRequest request) {
+        return normalizePlaceholderEscapes(normalizeBodyTemplate(template))
+                .replace("${clientId}", escape(request.getClientId()))
+                .replace("${username}", escape(request.getUsername()))
+                .replace("${topic}", escape(request.getTopic()))
+                .replace("${action}", request.getAction() == null ? "" : request.getAction().name().toLowerCase(Locale.ROOT));
+    }
+
+    private static String normalizePlaceholderEscapes(String template) {
+        return template
+                .replace("\\${clientId}", "${clientId}")
+                .replace("\\${username}", "${username}")
+                .replace("\\${topic}", "${topic}")
+                .replace("\\${action}", "${action}");
     }
 }

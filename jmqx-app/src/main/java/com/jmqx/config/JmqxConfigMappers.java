@@ -105,11 +105,12 @@ public final class JmqxConfigMappers {
 
     public static AclProperties loadAclProperties(JmqxConfig config) {
         AclProperties properties = new AclProperties();
-        properties.setType(config.getString("jmqx.acl.type", properties.getType()));
+        properties.setChain(config.getString("jmqx.acl.chain", properties.getChain()));
         properties.setDefaultAllow(config.getBoolean("jmqx.acl.defaultAllow", properties.isDefaultAllow()));
         properties.setCacheMillis(config.getInt("jmqx.acl.cacheMillis", properties.getCacheMillis()));
         properties.setHttpUrl(config.getString("jmqx.acl.http.url", properties.getHttpUrl()));
         properties.setHttpTimeoutMs(config.getInt("jmqx.acl.http.timeoutMs", properties.getHttpTimeoutMs()));
+        properties.setHttpBodyTemplate(config.getString("jmqx.acl.http.bodyTemplate", properties.getHttpBodyTemplate()));
         properties.setRedisHost(config.getString("jmqx.acl.redis.host", properties.getRedisHost()));
         properties.setRedisPort(config.getInt("jmqx.acl.redis.port", properties.getRedisPort()));
         properties.setRedisPassword(config.getString("jmqx.acl.redis.password", properties.getRedisPassword()));
@@ -197,11 +198,8 @@ public final class JmqxConfigMappers {
     }
 
     public static List<String> resolveAclChain(AclProperties aclProperties) {
-        String type = aclProperties.getType();
-        if (type == null || type.isBlank()) {
-            return List.of();
-        }
-        return normalizePluginList(List.of(type));
+        List<String> fromChain = normalizePluginList(splitCommaList(aclProperties.getChain()));
+        return filterAllowAll(fromChain);
     }
 
     public static String firstOrEmpty(List<String> values) {

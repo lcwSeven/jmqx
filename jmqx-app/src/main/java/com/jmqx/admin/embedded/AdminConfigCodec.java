@@ -51,6 +51,21 @@ public final class AdminConfigCodec {
         }
     }
 
+    public static String encodeBridgeConfigToString(EmbeddedAdminStateStore.BridgeConfig config) {
+        return Base64.getEncoder().encodeToString(encodeBridgeConfig(config));
+    }
+
+    public static EmbeddedAdminStateStore.BridgeConfig decodeBridgeConfigFromString(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        try {
+            return decodeBridgeConfig(Base64.getDecoder().decode(raw));
+        } catch (IllegalArgumentException exception) {
+            return null;
+        }
+    }
+
     public static String encodeBlacklistEntryToString(EmbeddedAdminStateStore.BlacklistEntry entry) {
         return Base64.getEncoder().encodeToString(encodeBlacklistEntry(entry));
     }
@@ -114,13 +129,150 @@ public final class AdminConfigCodec {
         }
     }
 
+    private static byte[] encodeBridgeConfig(EmbeddedAdminStateStore.BridgeConfig config) {
+        try {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            DataOutputStream data = new DataOutputStream(out);
+            data.writeByte(2);
+            data.writeBoolean(config.enabled());
+            writeStringList(data, config.types());
+            writeStringList(data, config.topicFilters());
+            data.writeBoolean(config.asyncEnabled());
+            data.writeInt(config.asyncQueueCapacity());
+            data.writeInt(config.asyncWorkerCount());
+            data.writeBoolean(config.kafka().enabled());
+            writeString(data, config.kafka().bootstrapServers());
+            writeString(data, config.kafka().topic());
+            writeStringList(data, config.kafka().sourceTopicFilters());
+            writeString(data, config.kafka().acks());
+            writeString(data, config.kafka().clientId());
+            writeString(data, config.kafka().compressionType());
+            data.writeBoolean(config.rocketmq().enabled());
+            writeString(data, config.rocketmq().nameServer());
+            writeString(data, config.rocketmq().producerGroup());
+            writeString(data, config.rocketmq().topic());
+            writeStringList(data, config.rocketmq().sourceTopicFilters());
+            data.writeBoolean(config.rocketmq().syncSend());
+            data.writeInt(config.rocketmq().timeoutMs());
+            data.writeBoolean(config.mysql().enabled());
+            writeString(data, config.mysql().driver());
+            writeString(data, config.mysql().url());
+            writeString(data, config.mysql().user());
+            writeString(data, config.mysql().password());
+            writeString(data, config.mysql().table());
+            writeStringList(data, config.mysql().sourceTopicFilters());
+            data.writeBoolean(config.mysql().autoCreateTable());
+            data.flush();
+            return out.toByteArray();
+        } catch (Exception exception) {
+            throw new IllegalStateException("encode bridge config failed", exception);
+        }
+    }
+
+    private static EmbeddedAdminStateStore.BridgeConfig decodeBridgeConfig(byte[] raw) {
+        try {
+            DataInputStream in = new DataInputStream(new ByteArrayInputStream(raw));
+            int version = in.readByte();
+            if (version == 2) {
+                return new EmbeddedAdminStateStore.BridgeConfig(
+                        in.readBoolean(),
+                        readStringList(in),
+                        readStringList(in),
+                        in.readBoolean(),
+                        in.readInt(),
+                        in.readInt(),
+                        new EmbeddedAdminStateStore.BridgeKafkaConfig(
+                                in.readBoolean(),
+                                readString(in),
+                                readString(in),
+                                readStringList(in),
+                                readString(in),
+                                readString(in),
+                                readString(in)
+                        ),
+                        new EmbeddedAdminStateStore.BridgeRocketmqConfig(
+                                in.readBoolean(),
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                readStringList(in),
+                                in.readBoolean(),
+                                in.readInt()
+                        ),
+                        new EmbeddedAdminStateStore.BridgeMysqlConfig(
+                                in.readBoolean(),
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                readStringList(in),
+                                in.readBoolean()
+                        )
+                );
+            }
+            if (version != 1) {
+                return null;
+            }
+            return new EmbeddedAdminStateStore.BridgeConfig(
+                    in.readBoolean(),
+                    readStringList(in),
+                    readStringList(in),
+                    in.readBoolean(),
+                    in.readInt(),
+                    in.readInt(),
+                    new EmbeddedAdminStateStore.BridgeKafkaConfig(
+                            false,
+                            readString(in),
+                            readString(in),
+                            readStringList(in),
+                            readString(in),
+                            readString(in),
+                            readString(in)
+                    ),
+                    new EmbeddedAdminStateStore.BridgeRocketmqConfig(
+                            false,
+                            readString(in),
+                            readString(in),
+                            readString(in),
+                            readStringList(in),
+                            in.readBoolean(),
+                            in.readInt()
+                    ),
+                    new EmbeddedAdminStateStore.BridgeMysqlConfig(
+                            false,
+                            readString(in),
+                            readString(in),
+                            readString(in),
+                            readString(in),
+                            readString(in),
+                            readStringList(in),
+                            in.readBoolean()
+                    )
+            );
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
     private static byte[] encodeSecurityConfig(EmbeddedAdminStateStore.SecurityConfig config) {
         try {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             DataOutputStream data = new DataOutputStream(out);
-            data.writeByte(9);
+            data.writeByte(11);
             data.writeBoolean(config.aclEnabled());
             writeStringList(data, config.aclChain());
+            data.writeBoolean(config.aclDefaultAllow());
+            writeString(data, config.aclHttp().url());
+            data.writeInt(config.aclHttp().timeoutMs());
+            writeString(data, config.aclHttp().bodyTemplate());
+            writeString(data, config.aclFile().path());
+            writeString(data, config.aclRedis().host());
+            data.writeInt(config.aclRedis().port());
+            writeString(data, config.aclRedis().password());
+            data.writeInt(config.aclRedis().db());
+            writeString(data, config.aclRedis().keyPrefix());
+            data.writeInt(config.aclRedis().timeoutMs());
             data.writeBoolean(config.authEnabled());
             writeStringList(data, config.authChain());
             data.writeLong(config.cacheTtlMs());
@@ -245,6 +397,150 @@ public final class AdminConfigCodec {
         try {
             DataInputStream in = new DataInputStream(new ByteArrayInputStream(raw));
             int version = in.readByte();
+            if (version == 11) {
+                return new EmbeddedAdminStateStore.SecurityConfig(
+                        in.readBoolean(),
+                        readStringList(in),
+                        in.readBoolean(),
+                        new EmbeddedAdminStateStore.AclHttpConfig(
+                                readString(in),
+                                in.readInt(),
+                                readString(in)
+                        ),
+                        new EmbeddedAdminStateStore.AclFileConfig(readString(in)),
+                        new EmbeddedAdminStateStore.AclRedisConfig(
+                                readString(in),
+                                in.readInt(),
+                                readString(in),
+                                in.readInt(),
+                                readString(in),
+                                in.readInt()
+                        ),
+                        in.readBoolean(),
+                        readStringList(in),
+                        in.readLong(),
+                        new EmbeddedAdminStateStore.AuthHttpConfig(
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                in.readBoolean(),
+                                readString(in),
+                                in.readInt(),
+                                in.readInt(),
+                                in.readInt(),
+                                in.readInt(),
+                                in.readInt()
+                        ),
+                        new EmbeddedAdminStateStore.AuthFileConfig(readString(in)),
+                        new EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig(
+                                readString(in),
+                                readString(in),
+                                readString(in)
+                        ),
+                        new EmbeddedAdminStateStore.AuthRedisConfig(
+                                readString(in),
+                                in.readInt(),
+                                readString(in),
+                                in.readInt(),
+                                readString(in),
+                                in.readInt()
+                        ),
+                        new EmbeddedAdminStateStore.AuthMysqlConfig(
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                in.readInt(),
+                                in.readInt(),
+                                in.readLong(),
+                                in.readLong(),
+                                in.readLong()
+                        ),
+                        new EmbeddedAdminStateStore.AuthPostgresqlConfig(
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                in.readInt(),
+                                in.readInt(),
+                                in.readLong(),
+                                in.readLong(),
+                                in.readLong()
+                        )
+                );
+            }
+            if (version == 10) {
+                return new EmbeddedAdminStateStore.SecurityConfig(
+                        in.readBoolean(),
+                        readStringList(in),
+                        in.readBoolean(),
+                        new EmbeddedAdminStateStore.AclHttpConfig(
+                                readString(in),
+                                in.readInt(),
+                                EmbeddedAdminStateStore.AclHttpConfig.defaults().bodyTemplate()
+                        ),
+                        new EmbeddedAdminStateStore.AclFileConfig(readString(in)),
+                        new EmbeddedAdminStateStore.AclRedisConfig(
+                                readString(in),
+                                in.readInt(),
+                                readString(in),
+                                in.readInt(),
+                                readString(in),
+                                in.readInt()
+                        ),
+                        in.readBoolean(),
+                        readStringList(in),
+                        in.readLong(),
+                        new EmbeddedAdminStateStore.AuthHttpConfig(
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                in.readBoolean(),
+                                readString(in),
+                                in.readInt(),
+                                in.readInt(),
+                                in.readInt(),
+                                in.readInt(),
+                                in.readInt()
+                        ),
+                        new EmbeddedAdminStateStore.AuthFileConfig(readString(in)),
+                        new EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig(
+                                readString(in),
+                                readString(in),
+                                readString(in)
+                        ),
+                        new EmbeddedAdminStateStore.AuthRedisConfig(
+                                readString(in),
+                                in.readInt(),
+                                readString(in),
+                                in.readInt(),
+                                readString(in),
+                                in.readInt()
+                        ),
+                        new EmbeddedAdminStateStore.AuthMysqlConfig(
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                in.readInt(),
+                                in.readInt(),
+                                in.readLong(),
+                                in.readLong(),
+                                in.readLong()
+                        ),
+                        new EmbeddedAdminStateStore.AuthPostgresqlConfig(
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                in.readInt(),
+                                in.readInt(),
+                                in.readLong(),
+                                in.readLong(),
+                                in.readLong()
+                        )
+                );
+            }
             if (version == 8) {
                 return new EmbeddedAdminStateStore.SecurityConfig(
                         in.readBoolean(),

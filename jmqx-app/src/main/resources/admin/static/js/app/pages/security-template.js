@@ -1,28 +1,168 @@
 export const securityPageTemplate = `
-  <section class="panel" v-if="activeMenu==='acl'">
-    <div class="section-head">
+  <section class="panel auth-surface" v-if="activeMenu==='acl' && !aclCreateMode">
+    <div class="auth-list-toolbar">
       <div>
-        <h2 class="title">ACL 鉴权配置</h2>
-        <div class="section-subtitle">控制主题发布与订阅的访问链路。</div>
+        <h2 class="title auth-title">ACL 鉴权</h2>
+        <div class="section-subtitle">统一管理主题发布与订阅的 ACL 数据源，列表顺序就是最终 ACL 链执行顺序。</div>
       </div>
-      <span class="status-badge" :class="aclStatusClass">{{ aclStatusText }}</span>
+      <el-button type="primary" size="large" @click="openAclCreate" :disabled="!availableAclDatasourceOptions.length">+ 创建</el-button>
     </div>
-    <div class="form-grid">
-      <label class="field checkbox-field">
-        <input type="checkbox" v-model="securityConfig.aclEnabled"/>
-        <span>启用 ACL 鉴权</span>
-      </label>
-      <label class="field">
-        <span class="field-label">ACL 链（逗号分隔，按顺序执行）</span>
-        <input :value="joinComma(securityConfig.aclChain)" @input="securityConfig.aclChain=$event.target.value"/>
-      </label>
-      <label class="field">
-        <span class="field-label">鉴权缓存时间（毫秒）</span>
-        <input type="number" min="0" v-model.number="securityConfig.cacheTtlMs"/>
-      </label>
+    <el-table v-if="aclEntries.length" :data="aclEntries" stripe class="ep-table auth-ep-table">
+      <el-table-column label="数据源及 ACL 方式" min-width="260">
+        <template #default="scope">
+          <div class="auth-main-cell">
+            <div class="auth-main-name">{{ scope.row.displayName }}</div>
+            <div class="auth-main-sub">{{ scope.row.summary }}</div>
+          </div>
+        </template>
+      </el-table-column>
+      <el-table-column label="链路顺序" width="120">
+        <template #default="scope">
+          第 {{ scope.row.index + 1 }} 位
+        </template>
+      </el-table-column>
+      <el-table-column label="默认策略" width="140">
+        <template #default>
+          <el-tag :type="securityConfig.aclDefaultAllow ? 'warning' : 'info'" effect="light">
+            {{ securityConfig.aclDefaultAllow ? '默认放行' : '默认拒绝' }}
+          </el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="是否启用" width="120">
+        <template #default>
+          <el-switch v-model="securityConfig.aclEnabled" @change="toggleAclEnabled"/>
+        </template>
+      </el-table-column>
+      <el-table-column label="操作" min-width="320">
+        <template #default="scope">
+          <div class="auth-actions ep-actions">
+            <el-button size="small" @click="moveAclEntryUp(scope.row.plugin)" :disabled="scope.row.index===0">上移</el-button>
+            <el-button size="small" @click="moveAclEntryDown(scope.row.plugin)" :disabled="scope.row.index===aclEntries.length-1">下移</el-button>
+            <el-button size="small" @click="openAclSettings(scope.row.plugin)">设置</el-button>
+            <el-button size="small" type="danger" plain @click="removeAclEntry(scope.row.plugin)">删除</el-button>
+          </div>
+        </template>
+      </el-table-column>
+    </el-table>
+    <el-empty v-else description="暂无 ACL 配置；未配置时默认允许全部。" class="auth-empty"></el-empty>
+    <div class="hint">当前 ACL 链：{{ joinComma(securityConfig.aclChain) || '未配置（允许全部）' }}</div>
+  </section>
+
+  <section class="panel auth-surface" v-if="activeMenu==='acl' && aclCreateMode">
+    <div class="auth-create-header">
+      <el-button plain @click="cancelAclCreate">返回</el-button>
+      <span class="auth-sep">|</span>
+      <h2 class="title auth-title">创建 ACL</h2>
     </div>
-    <div class="actions">
-      <button class="btn" @click="saveAclConfig">保存 ACL 配置</button>
+
+    <el-steps :active="aclStep" align-center finish-status="success" class="auth-steps">
+      <el-step title="ACL 方式"></el-step>
+      <el-step title="数据源"></el-step>
+      <el-step title="配置参数"></el-step>
+    </el-steps>
+
+    <div v-if="aclStep===1">
+      <div class="auth-hint">控制客户端主题发布与订阅权限</div>
+      <div class="auth-option-grid">
+        <el-button
+            v-for="item in aclMethodOptions"
+            :key="item.key"
+            class="auth-option-card ep-option-card"
+            :type="aclDraft.method===item.key ? 'primary' : 'default'"
+            :plain="aclDraft.method!==item.key"
+            @click="selectAclMethod(item.key)">
+          {{ item.label }}
+        </el-button>
+      </div>
+    </div>
+
+    <div v-if="aclStep===2">
+      <div class="auth-hint">选择 ACL 规则来源</div>
+      <div class="auth-option-grid datasource-grid">
+        <el-button
+            v-for="item in aclDraftDatasourceOptions"
+            :key="item.key"
+            class="auth-option-card ep-option-card"
+            :type="aclDraft.datasource===item.key ? 'primary' : 'default'"
+            :plain="aclDraft.datasource!==item.key"
+            @click="selectAclDatasource(item.key)">
+          <span class="ds-icon">{{ item.icon }}</span>{{ item.label }}
+        </el-button>
+      </div>
+    </div>
+
+    <div v-if="aclStep===3">
+      <div class="auth-hint">当前组合：{{ aclMethodLabel() }} / {{ aclDatasourceLabel() }}</div>
+      <div class="form-grid auth-config-grid auth-config-stack">
+        <div class="auth-chain-preview">
+          <div class="field-label">保存后生效的 ACL 链</div>
+          <div class="auth-chain-preview-value">
+            {{ joinComma(aclEditingPlugin ? securityConfig.aclChain : [...securityConfig.aclChain, mapAclDatasourceToPlugin(aclDraft.datasource)].filter((value, index, array) => value && array.indexOf(value) === index)) || '未配置（允许全部）' }}
+          </div>
+          <div class="hint">列表顺序决定执行顺序，所有数据源都未命中时再按默认策略处理。</div>
+        </div>
+        <label class="field">
+          <span class="field-label">缓存时间（毫秒）</span>
+          <el-input-number v-model="aclDraft.cacheTtlMs" :min="0" controls-position="right" />
+        </label>
+        <label class="field">
+          <span class="field-label">未命中规则时默认放行</span>
+          <el-switch v-model="aclDraft.defaultAllow" active-text="是" inactive-text="否"></el-switch>
+          <div class="hint">关闭后，ACL 数据源未命中规则时将默认拒绝。</div>
+        </label>
+        <label class="field" v-if="aclDraft.datasource==='file'">
+          <span class="field-label">ACL 文件路径</span>
+          <el-input v-model="aclDraft.filePath" placeholder="acl-rules.txt"/>
+        </label>
+        <label class="field" v-if="aclDraft.datasource==='http'">
+          <span class="field-label">HTTP ACL 地址</span>
+          <el-input v-model="aclDraft.httpUrl" placeholder="http://127.0.0.1:8080/acl/check"/>
+        </label>
+        <label class="field" v-if="aclDraft.datasource==='http'">
+          <span class="field-label">请求超时时间（毫秒）</span>
+          <el-input-number v-model="aclDraft.httpTimeoutMs" :min="200" controls-position="right" />
+        </label>
+        <label class="field" v-if="aclDraft.datasource==='http'">
+          <span class="field-label">请求体</span>
+          <el-input
+              v-model="aclDraft.httpBodyTemplate"
+              type="textarea"
+              :rows="8"
+              placeholder='{"clientId":"\${clientId}","username":"\${username}","topic":"\${topic}","action":"\${action}"}'/>
+          <div class="hint">可用占位符：<code>\${clientId}</code>、<code>\${username}</code>、<code>\${topic}</code>、<code>\${action}</code></div>
+        </label>
+        <label class="field" v-if="aclDraft.datasource==='redis'">
+          <span class="field-label">Redis Host</span>
+          <el-input v-model="aclDraft.redisHost" placeholder="127.0.0.1"/>
+        </label>
+        <label class="field" v-if="aclDraft.datasource==='redis'">
+          <span class="field-label">Redis Port</span>
+          <el-input-number v-model="aclDraft.redisPort" :min="1" controls-position="right" />
+        </label>
+        <label class="field" v-if="aclDraft.datasource==='redis'">
+          <span class="field-label">Redis Password</span>
+          <el-input v-model="aclDraft.redisPassword" type="password" show-password />
+        </label>
+        <label class="field" v-if="aclDraft.datasource==='redis'">
+          <span class="field-label">Redis DB</span>
+          <el-input-number v-model="aclDraft.redisDb" :min="0" controls-position="right" />
+        </label>
+        <label class="field" v-if="aclDraft.datasource==='redis'">
+          <span class="field-label">Redis Key Prefix</span>
+          <el-input v-model="aclDraft.redisKeyPrefix" placeholder="jmqx:acl"/>
+        </label>
+        <label class="field" v-if="aclDraft.datasource==='redis'">
+          <span class="field-label">Redis 超时（毫秒）</span>
+          <el-input-number v-model="aclDraft.redisTimeoutMs" :min="200" controls-position="right" />
+        </label>
+      </div>
+    </div>
+
+    <div class="auth-footer-actions">
+      <el-button @click="cancelAclCreate">取消</el-button>
+      <el-button v-if="aclStep>1" @click="previousAclStep">上一步</el-button>
+      <el-button type="primary" v-if="aclStep<3" @click="nextAclStep">下一步</el-button>
+      <el-button type="primary" v-if="aclStep===3" @click="createAclAndSave">{{ aclEditingPlugin ? '保存' : '创建' }}</el-button>
     </div>
   </section>
 

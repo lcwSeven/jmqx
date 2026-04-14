@@ -68,6 +68,12 @@ public class NettyMetadataCommandGateway implements MetadataCommandGateway {
         this.ioGroup = new NioEventLoopGroup(1);
     }
 
+    /**
+     * 提交元数据命令。
+     *
+     * @param command 命令
+     * @return 提交成功时返回当前已应用索引，否则返回 -1L
+     */
     @Override
     public long submit(MetadataCommand command) {
         if (command == null || endpoints.isEmpty()) {
@@ -96,7 +102,9 @@ public class NettyMetadataCommandGateway implements MetadataCommandGateway {
                 markPreferredLeader(leaderHint);
                 ClusterEndpoint leaderEndpoint = ClusterEndpoint.parse(leaderHint);
                 if (leaderEndpoint != null && !endpoint.equals(leaderEndpoint)) {
+                    // 提交到leader节点重试
                     SubmitResponse redirected = submitToEndpoint(leaderEndpoint, command);
+                    // 重试成功 标记leader节点
                     if (redirected != null && redirected.success()) {
                         markPreferredLeader(leaderHint);
                         return redirected.logIndex();
@@ -110,6 +118,12 @@ public class NettyMetadataCommandGateway implements MetadataCommandGateway {
         return -1L;
     }
 
+    /**
+     * 构建候选节点列表。
+     *
+     * @param preferredLeaderEndpoint 优先 leader 节点
+     * @return 候选节点列表
+     */
     private List<ClusterEndpoint> buildCandidates(String preferredLeaderEndpoint) {
         List<ClusterEndpoint> result = new ArrayList<>();
         ClusterEndpoint preferred = ClusterEndpoint.parse(preferredLeaderEndpoint);
@@ -125,6 +139,13 @@ public class NettyMetadataCommandGateway implements MetadataCommandGateway {
         return result;
     }
 
+    /**
+     * 提交到指定节点。
+     *
+     * @param endpoint 节点
+     * @param command  命令
+     * @return 响应
+     */
     private SubmitResponse submitToEndpoint(ClusterEndpoint endpoint, MetadataCommand command) {
         try {
             EndpointClient client = endpointClients.computeIfAbsent(endpoint, this::newEndpointClient);
@@ -141,6 +162,11 @@ public class NettyMetadataCommandGateway implements MetadataCommandGateway {
         return new EndpointClient(endpoint);
     }
 
+    /**
+     * 获取当前 preferredLeader。
+     *
+     * @return preferredLeader
+     */
     private String getPreferredLeaderIfValid() {
         String leader = preferredLeader.get();
         if (leader == null || leader.isBlank()) {
@@ -186,6 +212,9 @@ public class NettyMetadataCommandGateway implements MetadataCommandGateway {
         }
     }
 
+    /**
+     * 清空 preferred leader
+     */
     private void clearPreferredLeader() {
         preferredLeader.set(null);
         preferredLeaderUpdatedAt.set(0L);
@@ -208,7 +237,7 @@ public class NettyMetadataCommandGateway implements MetadataCommandGateway {
 
     private final class EndpointClient {
         private final ClusterEndpoint endpoint;
-        private final SubmitResponseHandler handler = new SubmitResponseHandler();
+        private final SubmitExchange exchange = new SubmitExchange();
         private final Bootstrap clientBootstrap;
         private volatile Channel channel;
 
@@ -224,7 +253,7 @@ public class NettyMetadataCommandGateway implements MetadataCommandGateway {
                         ch.pipeline().addLast(MetadataWireCodec.decoder());
                         ch.pipeline().addLast(new LengthFieldPrepender(4));
                         ch.pipeline().addLast(MetadataWireCodec.encoder());
-                        ch.pipeline().addLast(handler);
+                        ch.pipeline().addLast(new SubmitResponseHandler(exchange));
                     }
                 });
         }
@@ -234,7 +263,7 @@ public class NettyMetadataCommandGateway implements MetadataCommandGateway {
             if (ch == null || !ch.isActive()) {
                 return null;
             }
-            handler.prepare(currentRequestId);
+            exchange.prepare(currentRequestId);
             ch.writeAndFlush(new MetadataWireMessage(
                 MetadataMessageType.SUBMIT_REQUEST,
                 currentRequestId,
@@ -248,7 +277,7 @@ public class NettyMetadataCommandGateway implements MetadataCommandGateway {
             )).syncUninterruptibly();
             boolean completed;
             try {
-                completed = handler.await(timeoutMs);
+                completed = exchange.await(timeoutMs);
             } catch (InterruptedException exception) {
                 Thread.currentThread().interrupt();
                 closeChannel();
@@ -259,7 +288,7 @@ public class NettyMetadataCommandGateway implements MetadataCommandGateway {
                 closeChannel();
                 return null;
             }
-            SubmitResponse response = handler.response();
+            SubmitResponse response = exchange.response();
             if (response == null) {
                 closeChannel();
             }
@@ -292,7 +321,7 @@ public class NettyMetadataCommandGateway implements MetadataCommandGateway {
         }
     }
 
-    private static final class SubmitResponseHandler extends SimpleChannelInboundHandler<MetadataWireMessage> {
+    private static final class SubmitExchange {
         private volatile SubmitResponse response;
         private volatile long expectedRequestId = -1L;
         private volatile CountDownLatch currentLatch = new CountDownLatch(1);
@@ -303,8 +332,7 @@ public class NettyMetadataCommandGateway implements MetadataCommandGateway {
             this.currentLatch = new CountDownLatch(1);
         }
 
-        @Override
-        protected void channelRead0(ChannelHandlerContext ctx, MetadataWireMessage message) {
+        private void onResponse(MetadataWireMessage message) {
             if (message.type() != MetadataMessageType.SUBMIT_RESPONSE) {
                 return;
             }
@@ -319,10 +347,8 @@ public class NettyMetadataCommandGateway implements MetadataCommandGateway {
             currentLatch.countDown();
         }
 
-        @Override
-        public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+        private void onFailure() {
             currentLatch.countDown();
-            ctx.close();
         }
 
         private boolean await(int timeoutMs) throws InterruptedException {
@@ -331,6 +357,31 @@ public class NettyMetadataCommandGateway implements MetadataCommandGateway {
 
         private SubmitResponse response() {
             return response;
+        }
+    }
+
+    private static final class SubmitResponseHandler extends SimpleChannelInboundHandler<MetadataWireMessage> {
+        private final SubmitExchange exchange;
+
+        private SubmitResponseHandler(SubmitExchange exchange) {
+            this.exchange = exchange;
+        }
+
+        @Override
+        protected void channelRead0(ChannelHandlerContext ctx, MetadataWireMessage message) {
+            exchange.onResponse(message);
+        }
+
+        @Override
+        public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+            exchange.onFailure();
+            ctx.close();
+        }
+
+        @Override
+        public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+            exchange.onFailure();
+            super.channelInactive(ctx);
         }
     }
 

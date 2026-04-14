@@ -16,7 +16,7 @@ public class ReloadableAclAuthorizer implements AclAuthorizer {
     }
 
     @Override
-    public boolean isAllowed(AclRequest request) {
-        return delegate.isAllowed(request);
+    public AclDecision authorize(AclRequest request) {
+        return delegate.authorize(request);
     }
 }

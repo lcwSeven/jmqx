@@ -1,6 +1,5 @@
 package com.jmqx.admin.embedded;
 
-import com.jmqx.common.logging.ClientTraceManager;
 import com.jmqx.router.SubscriptionRegistry;
 import com.jmqx.session.ClientSession;
 import com.jmqx.session.SessionRegistry;
@@ -65,12 +64,11 @@ public class AdminPanelServer {
     private final ConnectionMetrics connectionMetrics;
     private final AdminStateRepository stateStore;
     private final BuiltInDatabaseUserService builtInDatabaseUserService;
-    private final ClientTraceManager clientTraceManager = ClientTraceManager.getInstance();
     private final SecurityConfigUpdater securityConfigUpdater;
     private final ClusterConfigUpdater clusterConfigUpdater;
+    private final BridgeConfigUpdater bridgeConfigUpdater;
     private final ClientKickUpdater clientKickUpdater;
     private final BlacklistUpdater blacklistUpdater;
-    private final ClientTraceUpdater clientTraceUpdater;
     private final BuiltInDatabaseUsersUpdater builtInDatabaseUsersUpdater;
     private final OkHttpClient httpClient;
     private HttpServer server;
@@ -90,11 +88,12 @@ public class AdminPanelServer {
                             AdminStateRepository stateStore,
                             EmbeddedAdminStateStore.SecurityConfig initialSecurityConfig,
                             EmbeddedAdminStateStore.ClusterConfig initialClusterConfig,
+                            EmbeddedAdminStateStore.BridgeConfig initialBridgeConfig,
                             SecurityConfigUpdater securityConfigUpdater,
                             ClusterConfigUpdater clusterConfigUpdater,
+                            BridgeConfigUpdater bridgeConfigUpdater,
                             ClientKickUpdater clientKickUpdater,
                             BlacklistUpdater blacklistUpdater,
-                            ClientTraceUpdater clientTraceUpdater,
                             BuiltInDatabaseUsersUpdater builtInDatabaseUsersUpdater,
                             BuiltInDatabaseUserService builtInDatabaseUserService) {
         this.host = (host == null || host.isBlank()) ? "0.0.0.0" : host.trim();
@@ -125,16 +124,19 @@ public class AdminPanelServer {
         if (initialClusterConfig != null && !this.stateStore.hasClusterConfig(this.defaultClusterId)) {
             this.stateStore.setClusterConfig(this.defaultClusterId, initialClusterConfig);
         }
+        if (initialBridgeConfig != null && !this.stateStore.hasBridgeConfig(this.defaultClusterId)) {
+            this.stateStore.setBridgeConfig(this.defaultClusterId, initialBridgeConfig);
+        }
         this.securityConfigUpdater = securityConfigUpdater == null ? (clusterId, config) -> {
         } : securityConfigUpdater;
         this.clusterConfigUpdater = clusterConfigUpdater == null ? (clusterId, config) -> {
         } : clusterConfigUpdater;
+        this.bridgeConfigUpdater = bridgeConfigUpdater == null ? (clusterId, config) -> {
+        } : bridgeConfigUpdater;
         this.clientKickUpdater = clientKickUpdater == null ? (clusterId, clientId) -> {
         } : clientKickUpdater;
         this.blacklistUpdater = blacklistUpdater == null ? new BlacklistUpdater() {
         } : blacklistUpdater;
-        this.clientTraceUpdater = clientTraceUpdater == null ? new ClientTraceUpdater() {
-        } : clientTraceUpdater;
         this.builtInDatabaseUsersUpdater = builtInDatabaseUsersUpdater == null ? new BuiltInDatabaseUsersUpdater() {
             @Override
             public void upsert(String clusterId, EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig config, String userId, String password, boolean superuser) {
@@ -351,6 +353,30 @@ public class AdminPanelServer {
             writeJson(exchange, 200, toFullConfigJson(stateStore.getFullConfig(clusterId)));
             return;
         }
+        if ("/api/v1/bridge/config".equals(path) && "GET".equals(method)) {
+            writeJson(exchange, 200, toBridgeConfigJson(stateStore.getBridgeConfig(clusterId)));
+            return;
+        }
+        if ("/api/v1/bridge/config".equals(path) && "PUT".equals(method)) {
+            EmbeddedAdminStateStore.BridgeConfig before = stateStore.getBridgeConfig(clusterId);
+            EmbeddedAdminStateStore.BridgeConfig config = parseBridgeConfig(body, before);
+            String validationError = validateBridgeConfig(config);
+            if (validationError != null) {
+                writeJson(exchange, 400, "{\"error\":\"" + escape(validationError) + "\"}");
+                return;
+            }
+            bridgeConfigUpdater.apply(clusterId, config);
+            stateStore.setBridgeConfig(clusterId, config);
+            appendAuditLog(
+                    clusterId,
+                    "bridge.config.updated",
+                    resolveAuditSource(exchange),
+                    toBridgeConfigJson(before),
+                    toBridgeConfigJson(config)
+            );
+            writeJson(exchange, 200, toBridgeConfigJson(config));
+            return;
+        }
         if ("/api/v1/audit/logs".equals(path) && "GET".equals(method)) {
             int limit = Math.min(Math.max(parseInt(query.get("limit"), 20), 1), 200);
             writeJson(exchange, 200, toAuditLogsJson(stateStore.listAuditLogs(clusterId, limit)));
@@ -362,49 +388,6 @@ public class AdminPanelServer {
         }
         if ("/api/v1/blacklist".equals(path) && "GET".equals(method)) {
             writeJson(exchange, 200, buildBlacklistJson(clusterId));
-            return;
-        }
-        if ("/api/v1/client-traces".equals(path) && "GET".equals(method)) {
-            writeJson(exchange, 200, buildClientTraceTasksJson(clusterId));
-            return;
-        }
-        if ("/api/v1/client-traces".equals(path) && "POST".equals(method)) {
-            ClientTraceManager.ClientTraceTask task = parseClientTraceTask(body, resolveAdminSource(exchange, adminPrincipal));
-            String validationError = validateClientTraceTask(task);
-            if (validationError != null) {
-                writeJson(exchange, 400, "{\"error\":\"" + escape(validationError) + "\"}");
-                return;
-            }
-            clientTraceUpdater.upsert(clusterId, task);
-            stateStore.upsertClientTraceTask(clusterId, task);
-            clientTraceManager.upsert(task);
-            appendAuditLog(
-                    clusterId,
-                    "logging.client-trace.upserted",
-                    resolveAdminSource(exchange, adminPrincipal),
-                    "{}",
-                    toClientTraceTaskJson(task)
-            );
-            writeJson(exchange, 200, buildClientTraceTasksJson(clusterId));
-            return;
-        }
-        if (path.startsWith("/api/v1/client-traces/") && "DELETE".equals(method)) {
-            String taskId = decode(path.substring("/api/v1/client-traces/".length()));
-            if (taskId == null || taskId.isBlank()) {
-                writeJson(exchange, 400, "{\"error\":\"taskId is required\"}");
-                return;
-            }
-            clientTraceUpdater.delete(clusterId, taskId);
-            stateStore.removeClientTraceTask(clusterId, taskId);
-            clientTraceManager.remove(taskId);
-            appendAuditLog(
-                    clusterId,
-                    "logging.client-trace.deleted",
-                    resolveAdminSource(exchange, adminPrincipal),
-                    "{\"taskId\":\"" + escape(taskId) + "\"}",
-                    "{}"
-            );
-            writeJson(exchange, 200, buildClientTraceTasksJson(clusterId));
             return;
         }
         if ("/api/v1/blacklist".equals(path) && "POST".equals(method)) {
@@ -846,6 +829,10 @@ public class AdminPanelServer {
         return "{"
                 + "\"aclEnabled\":" + config.aclEnabled() + ","
                 + "\"aclChain\":" + toStringArray(config.aclChain()) + ","
+                + "\"aclDefaultAllow\":" + config.aclDefaultAllow() + ","
+                + "\"aclHttp\":" + toAclHttpJson(config.aclHttp()) + ","
+                + "\"aclFile\":" + toAclFileJson(config.aclFile()) + ","
+                + "\"aclRedis\":" + toAclRedisJson(config.aclRedis()) + ","
                 + "\"authEnabled\":" + config.authEnabled() + ","
                 + "\"authChain\":" + toStringArray(config.authChain()) + ","
                 + "\"cacheTtlMs\":" + config.cacheTtlMs() + ","
@@ -855,6 +842,82 @@ public class AdminPanelServer {
                 + "\"authRedis\":" + toAuthRedisJson(config.authRedis()) + ","
                 + "\"authMysql\":" + toAuthMysqlJson(config.authMysql()) + ","
                 + "\"authPostgresql\":" + toAuthPostgresqlJson(config.authPostgresql())
+                + "}";
+    }
+
+    private static String toBridgeConfigJson(EmbeddedAdminStateStore.BridgeConfig config) {
+        return "{"
+                + "\"enabled\":" + config.enabled() + ","
+                + "\"types\":" + toStringArray(config.types()) + ","
+                + "\"topicFilters\":" + toStringArray(config.topicFilters()) + ","
+                + "\"asyncEnabled\":" + config.asyncEnabled() + ","
+                + "\"asyncQueueCapacity\":" + config.asyncQueueCapacity() + ","
+                + "\"asyncWorkerCount\":" + config.asyncWorkerCount() + ","
+                + "\"kafka\":" + toBridgeKafkaJson(config.kafka()) + ","
+                + "\"rocketmq\":" + toBridgeRocketmqJson(config.rocketmq()) + ","
+                + "\"mysql\":" + toBridgeMysqlJson(config.mysql())
+                + "}";
+    }
+
+    private static String toBridgeKafkaJson(EmbeddedAdminStateStore.BridgeKafkaConfig config) {
+        return "{"
+                + "\"enabled\":" + config.enabled() + ","
+                + "\"bootstrapServers\":\"" + escape(config.bootstrapServers()) + "\","
+                + "\"topic\":\"" + escape(config.topic()) + "\","
+                + "\"sourceTopicFilters\":" + toStringArray(config.sourceTopicFilters()) + ","
+                + "\"acks\":\"" + escape(config.acks()) + "\","
+                + "\"clientId\":\"" + escape(config.clientId()) + "\","
+                + "\"compressionType\":\"" + escape(config.compressionType()) + "\""
+                + "}";
+    }
+
+    private static String toBridgeRocketmqJson(EmbeddedAdminStateStore.BridgeRocketmqConfig config) {
+        return "{"
+                + "\"enabled\":" + config.enabled() + ","
+                + "\"nameServer\":\"" + escape(config.nameServer()) + "\","
+                + "\"producerGroup\":\"" + escape(config.producerGroup()) + "\","
+                + "\"topic\":\"" + escape(config.topic()) + "\","
+                + "\"sourceTopicFilters\":" + toStringArray(config.sourceTopicFilters()) + ","
+                + "\"syncSend\":" + config.syncSend() + ","
+                + "\"timeoutMs\":" + config.timeoutMs()
+                + "}";
+    }
+
+    private static String toBridgeMysqlJson(EmbeddedAdminStateStore.BridgeMysqlConfig config) {
+        return "{"
+                + "\"enabled\":" + config.enabled() + ","
+                + "\"driver\":\"" + escape(config.driver()) + "\","
+                + "\"url\":\"" + escape(config.url()) + "\","
+                + "\"user\":\"" + escape(config.user()) + "\","
+                + "\"password\":\"" + escape(config.password()) + "\","
+                + "\"table\":\"" + escape(config.table()) + "\","
+                + "\"sourceTopicFilters\":" + toStringArray(config.sourceTopicFilters()) + ","
+                + "\"autoCreateTable\":" + config.autoCreateTable()
+                + "}";
+    }
+
+    private static String toAclHttpJson(EmbeddedAdminStateStore.AclHttpConfig config) {
+        return "{"
+                + "\"url\":\"" + escape(config.url()) + "\","
+                + "\"timeoutMs\":" + config.timeoutMs() + ","
+                + "\"bodyTemplate\":\"" + escape(config.bodyTemplate()) + "\""
+                + "}";
+    }
+
+    private static String toAclFileJson(EmbeddedAdminStateStore.AclFileConfig config) {
+        return "{"
+                + "\"path\":\"" + escape(config.path()) + "\""
+                + "}";
+    }
+
+    private static String toAclRedisJson(EmbeddedAdminStateStore.AclRedisConfig config) {
+        return "{"
+                + "\"host\":\"" + escape(config.host()) + "\","
+                + "\"port\":" + config.port() + ","
+                + "\"password\":\"" + escape(config.password()) + "\","
+                + "\"db\":" + config.db() + ","
+                + "\"keyPrefix\":\"" + escape(config.keyPrefix()) + "\","
+                + "\"timeoutMs\":" + config.timeoutMs()
                 + "}";
     }
 
@@ -979,21 +1042,6 @@ public class AdminPanelServer {
                 + "}";
     }
 
-    private String toClientTraceTaskJson(ClientTraceManager.ClientTraceTask task) {
-        long now = System.currentTimeMillis();
-        return "{"
-                + "\"id\":\"" + escape(task.id()) + "\","
-                + "\"clientId\":\"" + escape(task.clientId()) + "\","
-                + "\"startAt\":" + task.startAt() + ","
-                + "\"endAt\":" + task.endAt() + ","
-                + "\"createdAt\":" + task.createdAt() + ","
-                + "\"createdBy\":\"" + escape(task.createdBy()) + "\","
-                + "\"filePath\":\"" + escape(task.filePath()) + "\","
-                + "\"status\":\"" + escape(task.statusAt(now)) + "\","
-                + "\"durationMinutes\":" + Math.max(1L, task.durationMillis() / 60_000L)
-                + "}";
-    }
-
     private static String toAdminSessionJson(AdminPrincipal principal) {
         if (principal == null) {
             return "{\"authenticated\":false}";
@@ -1058,19 +1106,6 @@ public class AdminPanelServer {
         return "{\"records\":" + builder + "}";
     }
 
-    private String buildClientTraceTasksJson(String clusterId) {
-        List<ClientTraceManager.ClientTraceTask> tasks = stateStore.listClientTraceTasks(clusterId);
-        StringBuilder builder = new StringBuilder("[");
-        for (int i = 0; i < tasks.size(); i++) {
-            if (i > 0) {
-                builder.append(",");
-            }
-            builder.append(toClientTraceTaskJson(tasks.get(i)));
-        }
-        builder.append("]");
-        return "{\"records\":" + builder + "}";
-    }
-
     private static String toStringArray(List<String> values) {
         StringBuilder builder = new StringBuilder("[");
         for (int i = 0; i < values.size(); i++) {
@@ -1094,18 +1129,55 @@ public class AdminPanelServer {
         return new EmbeddedAdminStateStore.ClusterConfig(coreNodes, replicantNodes, acceptClients, sharedMax);
     }
 
+    private static EmbeddedAdminStateStore.BridgeConfig parseBridgeConfig(String body, EmbeddedAdminStateStore.BridgeConfig current) {
+        List<String> types = extractStringList(body, "types");
+        List<String> topicFilters = extractStringList(body, "topicFilters");
+        boolean asyncEnabled = extractBoolean(body, "asyncEnabled", current.asyncEnabled());
+        int asyncQueueCapacity = extractInt(body, "asyncQueueCapacity", current.asyncQueueCapacity());
+        int asyncWorkerCount = extractInt(body, "asyncWorkerCount", current.asyncWorkerCount());
+        if (types.isEmpty() && !containsField(body, "types")) {
+            types = current.types();
+        }
+        if (topicFilters.isEmpty() && !containsField(body, "topicFilters")) {
+            topicFilters = current.topicFilters();
+        }
+        EmbeddedAdminStateStore.BridgeKafkaConfig kafka = parseBridgeKafkaConfig(body, current.kafka());
+        EmbeddedAdminStateStore.BridgeRocketmqConfig rocketmq = parseBridgeRocketmqConfig(body, current.rocketmq());
+        EmbeddedAdminStateStore.BridgeMysqlConfig mysql = parseBridgeMysqlConfig(body, current.mysql());
+        boolean enabled = extractBoolean(
+                body,
+                "enabled",
+                kafka.enabled() || rocketmq.enabled() || mysql.enabled()
+        );
+        return new EmbeddedAdminStateStore.BridgeConfig(
+                enabled,
+                types,
+                topicFilters,
+                asyncEnabled,
+                asyncQueueCapacity,
+                asyncWorkerCount,
+                kafka,
+                rocketmq,
+                mysql
+        );
+    }
+
     private static EmbeddedAdminStateStore.SecurityConfig parseSecurityConfig(String body, EmbeddedAdminStateStore.SecurityConfig current) {
         boolean aclEnabled = extractBoolean(body, "aclEnabled", current.aclEnabled());
         boolean authEnabled = extractBoolean(body, "authEnabled", current.authEnabled());
         List<String> aclChain = extractStringList(body, "aclChain");
         List<String> authChain = extractStringList(body, "authChain");
         long cacheTtlMs = extractLong(body, "cacheTtlMs", current.cacheTtlMs());
-        if (aclChain.isEmpty()) {
+        if (aclChain.isEmpty() && !containsField(body, "aclChain")) {
             aclChain = current.aclChain();
         }
-        if (authChain.isEmpty()) {
+        if (authChain.isEmpty() && !containsField(body, "authChain")) {
             authChain = current.authChain();
         }
+        boolean aclDefaultAllow = extractBoolean(body, "aclDefaultAllow", current.aclDefaultAllow());
+        EmbeddedAdminStateStore.AclHttpConfig aclHttp = parseAclHttpConfig(body, current.aclHttp());
+        EmbeddedAdminStateStore.AclFileConfig aclFile = parseAclFileConfig(body, current.aclFile());
+        EmbeddedAdminStateStore.AclRedisConfig aclRedis = parseAclRedisConfig(body, current.aclRedis());
         EmbeddedAdminStateStore.AuthHttpConfig authHttp = parseAuthHttpConfig(body, current.authHttp());
         EmbeddedAdminStateStore.AuthFileConfig authFile = parseAuthFileConfig(body, current.authFile());
         EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig authBuiltInDatabase = parseAuthBuiltInDatabaseConfig(body, current.authBuiltInDatabase());
@@ -1115,6 +1187,10 @@ public class AdminPanelServer {
         return new EmbeddedAdminStateStore.SecurityConfig(
                 aclEnabled,
                 aclChain,
+                aclDefaultAllow,
+                aclHttp,
+                aclFile,
+                aclRedis,
                 authEnabled,
                 authChain,
                 cacheTtlMs,
@@ -1179,43 +1255,6 @@ public class AdminPanelServer {
             return null;
         }
         return new EmbeddedAdminStateStore.BlacklistEntry(type, value, System.currentTimeMillis(), source);
-    }
-
-    private ClientTraceManager.ClientTraceTask parseClientTraceTask(String body, String source) {
-        String clientId = normalize(extractString(body, "clientId"), "");
-        long startAt = extractLong(body, "startAt", 0L);
-        int durationMinutes = extractInt(body, "durationMinutes", 0);
-        String taskId = ClientTraceManager.newTaskId();
-        long createdAt = System.currentTimeMillis();
-        long endAt = startAt + Math.max(0L, durationMinutes) * 60_000L;
-        String filePath = clientTraceManager.generateFilePath(clientId, startAt, taskId);
-        return new ClientTraceManager.ClientTraceTask(
-                taskId,
-                clientId,
-                startAt,
-                endAt,
-                createdAt,
-                source,
-                filePath
-        ).normalize();
-    }
-
-    private static String validateClientTraceTask(ClientTraceManager.ClientTraceTask task) {
-        if (task == null || task.clientId() == null || task.clientId().isBlank()) {
-            return "clientId 不能为空";
-        }
-        long now = System.currentTimeMillis();
-        if (task.startAt() <= now) {
-            return "追踪开始时间必须是未来时间";
-        }
-        long durationMillis = task.durationMillis();
-        if (durationMillis <= 0L) {
-            return "追踪时长至少为 1 分钟";
-        }
-        if (durationMillis > ClientTraceManager.MAX_DURATION_MILLIS) {
-            return "追踪时长不能超过 30 分钟";
-        }
-        return null;
     }
 
     private static Map<String, String> parseQuery(String raw) {
@@ -1342,6 +1381,128 @@ public class AdminPanelServer {
             }
         }
         return defaultValue;
+    }
+
+    private static boolean containsField(String body, String key) {
+        return Pattern.compile("\"" + Pattern.quote(key) + "\"\\s*:").matcher(body).find();
+    }
+
+    private static EmbeddedAdminStateStore.AclHttpConfig parseAclHttpConfig(
+            String body,
+            EmbeddedAdminStateStore.AclHttpConfig current
+    ) {
+        String segment = extractObject(body, "aclHttp");
+        if (segment == null) {
+            return current;
+        }
+        return new EmbeddedAdminStateStore.AclHttpConfig(
+                normalize(extractString(segment, "url"), current.url()),
+                extractInt(segment, "timeoutMs", current.timeoutMs()),
+                extractString(segment, "bodyTemplate") == null ? current.bodyTemplate() : extractString(segment, "bodyTemplate")
+        );
+    }
+
+    private static EmbeddedAdminStateStore.BridgeKafkaConfig parseBridgeKafkaConfig(
+            String body,
+            EmbeddedAdminStateStore.BridgeKafkaConfig current
+    ) {
+        String segment = extractObject(body, "kafka");
+        if (segment == null) {
+            return current;
+        }
+        List<String> filters = extractStringList(segment, "sourceTopicFilters");
+        if (filters.isEmpty() && !containsField(segment, "sourceTopicFilters")) {
+            filters = current.sourceTopicFilters();
+        }
+        return new EmbeddedAdminStateStore.BridgeKafkaConfig(
+                extractBoolean(segment, "enabled", current.enabled()),
+                normalize(extractString(segment, "bootstrapServers"), current.bootstrapServers()),
+                normalize(extractString(segment, "topic"), current.topic()),
+                filters,
+                normalize(extractString(segment, "acks"), current.acks()),
+                normalize(extractString(segment, "clientId"), current.clientId()),
+                normalize(extractString(segment, "compressionType"), current.compressionType())
+        );
+    }
+
+    private static EmbeddedAdminStateStore.BridgeRocketmqConfig parseBridgeRocketmqConfig(
+            String body,
+            EmbeddedAdminStateStore.BridgeRocketmqConfig current
+    ) {
+        String segment = extractObject(body, "rocketmq");
+        if (segment == null) {
+            return current;
+        }
+        List<String> filters = extractStringList(segment, "sourceTopicFilters");
+        if (filters.isEmpty() && !containsField(segment, "sourceTopicFilters")) {
+            filters = current.sourceTopicFilters();
+        }
+        return new EmbeddedAdminStateStore.BridgeRocketmqConfig(
+                extractBoolean(segment, "enabled", current.enabled()),
+                normalize(extractString(segment, "nameServer"), current.nameServer()),
+                normalize(extractString(segment, "producerGroup"), current.producerGroup()),
+                normalize(extractString(segment, "topic"), current.topic()),
+                filters,
+                extractBoolean(segment, "syncSend", current.syncSend()),
+                extractInt(segment, "timeoutMs", current.timeoutMs())
+        );
+    }
+
+    private static EmbeddedAdminStateStore.BridgeMysqlConfig parseBridgeMysqlConfig(
+            String body,
+            EmbeddedAdminStateStore.BridgeMysqlConfig current
+    ) {
+        String segment = extractObject(body, "mysql");
+        if (segment == null) {
+            return current;
+        }
+        List<String> filters = extractStringList(segment, "sourceTopicFilters");
+        if (filters.isEmpty() && !containsField(segment, "sourceTopicFilters")) {
+            filters = current.sourceTopicFilters();
+        }
+        String driver = extractString(segment, "driver");
+        String password = extractString(segment, "password");
+        return new EmbeddedAdminStateStore.BridgeMysqlConfig(
+                extractBoolean(segment, "enabled", current.enabled()),
+                driver == null ? current.driver() : driver,
+                normalize(extractString(segment, "url"), current.url()),
+                normalize(extractString(segment, "user"), current.user()),
+                password == null ? current.password() : password,
+                normalize(extractString(segment, "table"), current.table()),
+                filters,
+                extractBoolean(segment, "autoCreateTable", current.autoCreateTable())
+        );
+    }
+
+    private static EmbeddedAdminStateStore.AclFileConfig parseAclFileConfig(
+            String body,
+            EmbeddedAdminStateStore.AclFileConfig current
+    ) {
+        String segment = extractObject(body, "aclFile");
+        if (segment == null) {
+            return current;
+        }
+        return new EmbeddedAdminStateStore.AclFileConfig(
+                normalize(extractString(segment, "path"), current.path())
+        );
+    }
+
+    private static EmbeddedAdminStateStore.AclRedisConfig parseAclRedisConfig(
+            String body,
+            EmbeddedAdminStateStore.AclRedisConfig current
+    ) {
+        String segment = extractObject(body, "aclRedis");
+        if (segment == null) {
+            return current;
+        }
+        return new EmbeddedAdminStateStore.AclRedisConfig(
+                normalize(extractString(segment, "host"), current.host()),
+                extractInt(segment, "port", current.port()),
+                extractString(segment, "password") == null ? current.password() : extractString(segment, "password"),
+                extractInt(segment, "db", current.db()),
+                normalize(extractString(segment, "keyPrefix"), current.keyPrefix()),
+                extractInt(segment, "timeoutMs", current.timeoutMs())
+        );
     }
 
     private static EmbeddedAdminStateStore.AuthHttpConfig parseAuthHttpConfig(
@@ -1486,6 +1647,16 @@ public class AdminPanelServer {
                     return error;
                 }
             }
+        }
+        return null;
+    }
+
+    private static String validateBridgeConfig(EmbeddedAdminStateStore.BridgeConfig config) {
+        if (config == null || !config.enabled()) {
+            return null;
+        }
+        if (config.types().isEmpty()) {
+            return "已启用桥接时，至少需要选择一种桥接类型";
         }
         return null;
     }
@@ -1663,6 +1834,11 @@ public class AdminPanelServer {
     }
 
     @FunctionalInterface
+    public interface BridgeConfigUpdater {
+        void apply(String clusterId, EmbeddedAdminStateStore.BridgeConfig config);
+    }
+
+    @FunctionalInterface
     public interface ClientKickUpdater {
         void apply(String clusterId, String clientId);
     }
@@ -1672,14 +1848,6 @@ public class AdminPanelServer {
         }
 
         default void delete(String clusterId, String type, String value) {
-        }
-    }
-
-    public interface ClientTraceUpdater {
-        default void upsert(String clusterId, ClientTraceManager.ClientTraceTask task) {
-        }
-
-        default void delete(String clusterId, String taskId) {
         }
     }
 

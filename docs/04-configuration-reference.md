@@ -175,7 +175,7 @@ DB：
 
 | 配置项 | 默认值 | 说明 |
 |---|---|---|
-| `jmqx.acl.type` | `allow_all` | ACL 插件类型 |
+| `jmqx.acl.chain` | `""` | ACL 链配置，多个数据源用逗号分隔，留空表示允许全部 |
 | `jmqx.acl.defaultAllow` | `false` | 未命中默认放行 |
 | `jmqx.acl.cacheMillis` | `60000` | 缓存时间（毫秒） |
 

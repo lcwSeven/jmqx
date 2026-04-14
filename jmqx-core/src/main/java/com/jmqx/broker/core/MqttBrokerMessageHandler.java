@@ -124,6 +124,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     private final AclAuthorizer aclAuthorizer;
     private final SharedSubscriptionManager sharedSubscriptionManager;
     private final MessageBridge messageBridge;
+    private volatile boolean bridgeEnabled;
     private final boolean retainedEnabled;
     private final GlobalSubscriptionRegistry globalSubscriptionRegistry;
     private final String nodeId;
@@ -131,7 +132,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     private final ClusterMessageDispatcher clusterMessageDispatcher;
     private final AdminReporter adminReporter;
     private final String dashboardClusterId;
-    private final List<String> bridgeTopicFilters;
+    private volatile List<String> bridgeTopicFilters;
     private final int maxAllowedQos;
     private final int maxSubscriptionsPerClient;
     private final int maxWillPayloadBytes;
@@ -156,6 +157,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             AclAuthorizer aclAuthorizer,
             SharedSubscriptionManager sharedSubscriptionManager,
             MessageBridge messageBridge,
+            boolean bridgeEnabled,
             boolean retainedEnabled,
             Qos1InflightStore qos1InflightStore,
             Qos2InflightStore qos2InflightStore,
@@ -181,6 +183,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             ? new SharedSubscriptionManager()
             : sharedSubscriptionManager;
         this.messageBridge = messageBridge == null ? MessageBridge.NOOP : messageBridge;
+        this.bridgeEnabled = bridgeEnabled;
         this.retainedEnabled = retainedEnabled;
         this.willMessageStore = willMessageStore == null ? WillMessageStore.NOOP : willMessageStore;
         this.willPersistenceEnabled = this.willMessageStore != WillMessageStore.NOOP;
@@ -210,6 +213,11 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             RETAINED_RETRY_INTERVAL_MS,
             TimeUnit.MILLISECONDS
         );
+    }
+
+    public void updateBridgeSettings(boolean enabled, String rawTopicFilters) {
+        this.bridgeEnabled = enabled;
+        this.bridgeTopicFilters = parseBridgeTopicFilters(rawTopicFilters);
     }
 
     @Override
@@ -833,6 +841,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     private void routeMessage(String topic, byte[] payload, int publishQos) {
+        // 匹配全局路由
         GlobalSubscriptionMatch globalMatch = resolveGlobalMatch(topic);
         RouteScratch routeScratch = routeScratchHolder.get();
         Set<String> localSubscribers = routeScratch.localSubscribers();
@@ -1318,6 +1327,9 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
      * 2. 未配置 topicFilters：桥接所有非 dashboard 主题。
      */
     private boolean shouldBridgeTopic(String topic) {
+        if (!bridgeEnabled) {
+            return false;
+        }
         if (topic == null || topic.isBlank()) {
             return false;
         }

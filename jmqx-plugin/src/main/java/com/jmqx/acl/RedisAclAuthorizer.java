@@ -25,8 +25,6 @@ public class RedisAclAuthorizer implements AclAuthorizer {
     private final int db;
     private final String keyPrefix;
     private final int timeoutMs;
-    private final boolean defaultAllow;
-
     public RedisAclAuthorizer(AclProperties properties) {
         this.host = properties.getRedisHost();
         this.port = properties.getRedisPort();
@@ -34,11 +32,10 @@ public class RedisAclAuthorizer implements AclAuthorizer {
         this.db = properties.getRedisDb();
         this.keyPrefix = properties.getRedisKeyPrefix();
         this.timeoutMs = Math.max(properties.getRedisTimeoutMs(), 200);
-        this.defaultAllow = properties.isDefaultAllow();
     }
 
     @Override
-    public boolean isAllowed(AclRequest request) {
+    public AclDecision authorize(AclRequest request) {
         List<String> keys = buildKeys(request);
         try (Socket socket = new Socket()) {
             socket.connect(new InetSocketAddress(host, port), timeoutMs);
@@ -63,16 +60,16 @@ public class RedisAclAuthorizer implements AclAuthorizer {
                 }
                 String normalized = value.trim().toLowerCase(Locale.ROOT);
                 if ("allow".equals(normalized) || "true".equals(normalized) || "1".equals(normalized)) {
-                    return true;
+                    return AclDecision.ALLOW;
                 }
                 if ("deny".equals(normalized) || "false".equals(normalized) || "0".equals(normalized)) {
-                    return false;
+                    return AclDecision.DENY;
                 }
             }
-            return defaultAllow;
+            return AclDecision.NOT_FOUND;
         } catch (IOException e) {
             LOG.log(Level.WARNING, "Redis ACL request failed: " + e.getMessage(), e);
-            return defaultAllow;
+            return AclDecision.NOT_FOUND;
         }
     }
 

@@ -25,7 +25,7 @@
 - `jmqx.retained.enabled=false`
 - `jmqx.bridge.enabled=false`
 - `jmqx.auth.type=allow_all`
-- `jmqx.acl.type=allow_all`
+- `jmqx.acl.chain=`
 
 ## 3. JVM 配置（参考）
 

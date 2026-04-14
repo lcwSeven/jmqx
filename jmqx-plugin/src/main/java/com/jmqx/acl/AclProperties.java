@@ -5,12 +5,20 @@ package com.jmqx.acl;
  * @date 2026/4/4
  */
 public class AclProperties {
-    private String type = "allow_all";
+    private String chain = "";
     private boolean defaultAllow = false;
     private int cacheMillis = 60_000;
 
     private String httpUrl = "";
     private int httpTimeoutMs = 2000;
+    private String httpBodyTemplate = """
+            {
+              "clientId": "${clientId}",
+              "username": "${username}",
+              "topic": "${topic}",
+              "action": "${action}"
+            }
+            """;
 
     private String redisHost = "127.0.0.1";
     private int redisPort = 6379;
@@ -21,12 +29,12 @@ public class AclProperties {
 
     private String filePath = "acl-rules.txt";
 
-    public String getType() {
-        return type;
+    public String getChain() {
+        return chain;
     }
 
-    public void setType(String type) {
-        this.type = type;
+    public void setChain(String chain) {
+        this.chain = chain;
     }
 
     public boolean isDefaultAllow() {
@@ -59,6 +67,14 @@ public class AclProperties {
 
     public void setHttpTimeoutMs(int httpTimeoutMs) {
         this.httpTimeoutMs = httpTimeoutMs;
+    }
+
+    public String getHttpBodyTemplate() {
+        return httpBodyTemplate;
+    }
+
+    public void setHttpBodyTemplate(String httpBodyTemplate) {
+        this.httpBodyTemplate = httpBodyTemplate;
     }
 
     public String getRedisHost() {

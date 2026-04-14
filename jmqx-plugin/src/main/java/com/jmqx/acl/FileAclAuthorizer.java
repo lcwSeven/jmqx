@@ -20,21 +20,19 @@ public class FileAclAuthorizer implements AclAuthorizer {
     private static final Logger LOG = Logger.getLogger(FileAclAuthorizer.class.getName());
 
     private final List<AclRule> rules;
-    private final boolean defaultAllow;
 
     public FileAclAuthorizer(AclProperties properties) {
         this.rules = loadRules(Path.of(properties.getFilePath()));
-        this.defaultAllow = properties.isDefaultAllow();
     }
 
     @Override
-    public boolean isAllowed(AclRequest request) {
+    public AclDecision authorize(AclRequest request) {
         for (AclRule rule : rules) {
             if (rule.matches(request)) {
-                return rule.allow;
+                return rule.allow ? AclDecision.ALLOW : AclDecision.DENY;
             }
         }
-        return defaultAllow;
+        return AclDecision.NOT_FOUND;
     }
 
     private List<AclRule> loadRules(Path path) {

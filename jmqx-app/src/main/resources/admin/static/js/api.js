@@ -189,6 +189,17 @@ export function saveClusterConfig(clusterId, payload) {
     });
 }
 
+export function fetchBridgeConfig(clusterId) {
+    return request(API_BASE + "/bridge/config?clusterId=" + encodeURIComponent(clusterId));
+}
+
+export function saveBridgeConfig(clusterId, payload) {
+    return request(API_BASE + "/bridge/config?clusterId=" + encodeURIComponent(clusterId), {
+        method: "PUT",
+        body: JSON.stringify(payload)
+    });
+}
+
 export function fetchClusterFullConfig(clusterId) {
     return request(API_BASE + "/cluster/full-config?clusterId=" + encodeURIComponent(clusterId));
 }

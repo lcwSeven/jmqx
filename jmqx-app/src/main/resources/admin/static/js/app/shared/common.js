@@ -1,4 +1,4 @@
-import { changeAdminPassword, clearStoredAdminAuth, fetchAdminSession, storeAdminAuth } from "../../api.js";
+import { changeAdminPassword, clearStoredAdminAuth, fetchAdminSession, fetchClusters, storeAdminAuth } from "../../api.js";
 import { createInitialState } from "../state.js";
 
 export const commonMethods = {
@@ -9,30 +9,39 @@ export const commonMethods = {
     setMenu(menu) {
         this.activeMenu = menu;
         this.selectedClient = null;
+        if (menu !== "acl") {
+            this.aclCreateMode = false;
+            this.aclStep = 1;
+        }
         if (menu !== "auth") {
             this.authCreateMode = false;
             this.authStep = 1;
         }
-        if (menu === "trace" && typeof this.loadClientTraces === "function") {
-            this.loadClientTraces();
+        if (menu !== "bridge") {
+            this.bridgeCreateMode = false;
+            this.bridgeEditingType = "";
+            this.bridgeStep = 1;
         }
         if (menu === "blacklist" && typeof this.loadBlacklistEntries === "function") {
             this.loadBlacklistEntries();
+        }
+        if (menu === "bridge" && typeof this.loadBridgeConfig === "function") {
+            this.loadBridgeConfig();
         }
         this.clearTips();
     },
     resetAdminWorkspace() {
         const initial = createInitialState();
         this.activeMenu = initial.activeMenu;
+        this.clusters = initial.clusters;
         this.currentClusterId = initial.currentClusterId;
+        this.clusterSelectionTouched = initial.clusterSelectionTouched;
         this.mqttStatus = initial.mqttStatus;
         this.realtimeNodeMap = {};
         this.overview = initial.overview;
         this.clients = initial.clients;
         this.search = initial.search;
         this.selectedClient = null;
-        this.clientTraces = initial.clientTraces;
-        this.clientTraceForm = initial.clientTraceForm;
         this.blacklistEntries = initial.blacklistEntries;
         this.blacklistForm = initial.blacklistForm;
         this.builtInUsers = initial.builtInUsers;
@@ -44,7 +53,16 @@ export const commonMethods = {
         this.auditFilter = initial.auditFilter;
         this.expandedAuditIds = [];
         this.securityConfig = initial.securityConfig;
+        this.bridgeConfig = initial.bridgeConfig;
+        this.bridgeCreateMode = false;
+        this.bridgeEditingType = "";
+        this.bridgeStep = 1;
+        this.bridgeDraft = initial.bridgeDraft;
         this.clusterConfig = initial.clusterConfig;
+        this.aclCreateMode = false;
+        this.aclEditingPlugin = "";
+        this.aclStep = 1;
+        this.aclDraft = initial.aclDraft;
         this.authCreateMode = false;
         this.authEditingPlugin = "";
         this.authStep = 1;
@@ -55,15 +73,26 @@ export const commonMethods = {
     },
     async reloadCurrentClusterData() {
         this.clearTips();
+        try {
+            await this.loadClusters();
+        } catch (e) {
+            if (e?.status === 401) {
+                this.adminAuthRequired = true;
+                this.adminAuthenticated = false;
+                this.disconnectDashboardStream();
+                this.resetAdminWorkspace();
+                this.error = "请输入内嵌管理后台账号密码";
+                return;
+            }
+            throw e;
+        }
         const tasks = [
             { label: "登录会话", run: () => this.loadAdminSession() },
             { label: "集群概览", run: () => this.refreshOverview() },
             { label: "客户端列表", run: () => this.queryClients() },
-            { label: "日志追踪", optional: true, run: () => this.loadClientTraces() },
             { label: "黑名单", optional: true, run: () => this.loadBlacklistEntries() },
             { label: "安全配置", run: () => this.loadSecurityConfig() },
-            { label: "集群配置", run: () => this.loadClusterConfig() },
-            { label: "操作审计", optional: true, run: () => this.loadAuditLogs() }
+            { label: "桥接配置", run: () => this.loadBridgeConfig() }
         ];
         const results = await Promise.allSettled(tasks.map(task => task.run()));
         const failures = [];
@@ -95,9 +124,45 @@ export const commonMethods = {
         if (optionalFailures.length > 0) {
             this.message = optionalFailures.map(item => item.label + "暂不可用，已跳过加载").join("；");
         }
-        if (optionalFailures.some(item => item.label === "操作审计")) {
-            this.auditLogs = [];
-            this.expandedAuditIds = [];
+    },
+    async loadClusters() {
+        const clusters = await fetchClusters();
+        this.clusters = Array.isArray(clusters) ? clusters : [];
+        this.currentClusterId = this.resolvePreferredClusterId(this.clusters, this.currentClusterId, this.clusterSelectionTouched);
+    },
+    resolvePreferredClusterId(clusters, currentClusterId, preserveSelection) {
+        const records = Array.isArray(clusters) ? clusters.filter(Boolean) : [];
+        if (records.length === 0) {
+            return currentClusterId || "default";
+        }
+        if (preserveSelection && currentClusterId && records.some(cluster => cluster.clusterId === currentClusterId)) {
+            return currentClusterId;
+        }
+        const preferred = records.find(cluster => cluster.clusterId && cluster.clusterId !== "default");
+        if (preferred?.clusterId) {
+            return preferred.clusterId;
+        }
+        return records[0]?.clusterId || currentClusterId || "default";
+    },
+    async switchCluster(clusterId) {
+        const nextClusterId = String(clusterId || "").trim();
+        if (!nextClusterId || nextClusterId === this.currentClusterId) {
+            return;
+        }
+        this.clearTips();
+        this.clusterSelectionTouched = true;
+        this.currentClusterId = nextClusterId;
+        this.realtimeNodeMap = {};
+        this.selectedClient = null;
+        this.disconnectDashboardStream();
+        try {
+            await this.reloadCurrentClusterData();
+            if (this.adminAuthenticated) {
+                this.connectDashboardStream();
+                this.message = `已切换到集群 ${this.currentClusterId}`;
+            }
+        } catch (e) {
+            this.error = "切换集群失败: " + (e?.message || "request failed");
         }
     },
     async loadAdminSession() {

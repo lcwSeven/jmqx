@@ -47,7 +47,8 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
         ClusterState state = clusterStates.computeIfAbsent(id, ignored -> new ClusterState(
                 new ClusterSummary(id, normalize(displayName, id), normalize(seedCoreNode, "unknown"), System.currentTimeMillis()),
                 new ClusterConfig(List.of(normalize(seedCoreNode, "unknown")), List.of(), true, 10_000),
-                SecurityConfig.defaultConfig()
+                SecurityConfig.defaultConfig(),
+                BridgeConfig.defaults()
         ));
         return state.summary;
     }
@@ -99,6 +100,23 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
     @Override
     public boolean hasSecurityConfig(String clusterId) {
         return getOrCreate(clusterId).securityConfigInitialized;
+    }
+
+    @Override
+    public BridgeConfig getBridgeConfig(String clusterId) {
+        return getOrCreate(clusterId).bridgeConfig;
+    }
+
+    @Override
+    public void setBridgeConfig(String clusterId, BridgeConfig bridgeConfig) {
+        ClusterState state = getOrCreate(clusterId);
+        state.bridgeConfig = bridgeConfig;
+        state.bridgeConfigInitialized = true;
+    }
+
+    @Override
+    public boolean hasBridgeConfig(String clusterId) {
+        return getOrCreate(clusterId).bridgeConfigInitialized;
     }
 
     @Override
@@ -245,7 +263,8 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
         return clusterStates.computeIfAbsent(id, ignored -> new ClusterState(
                 new ClusterSummary(id, "集群-" + id, "unknown", System.currentTimeMillis()),
                 new ClusterConfig(List.of(), List.of(), true, 10_000),
-                SecurityConfig.defaultConfig()
+                SecurityConfig.defaultConfig(),
+                BridgeConfig.defaults()
         ));
     }
 
@@ -279,6 +298,10 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
     public record SecurityConfig(
             boolean aclEnabled,
             List<String> aclChain,
+            boolean aclDefaultAllow,
+            AclHttpConfig aclHttp,
+            AclFileConfig aclFile,
+            AclRedisConfig aclRedis,
             boolean authEnabled,
             List<String> authChain,
             long cacheTtlMs,
@@ -297,6 +320,68 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
             this(
                     aclEnabled,
                     aclChain,
+                    false,
+                    AclHttpConfig.defaults(),
+                    AclFileConfig.defaults(),
+                    AclRedisConfig.defaults(),
+                    authEnabled,
+                    authChain,
+                    cacheTtlMs,
+                    AuthHttpConfig.defaults(),
+                    AuthFileConfig.defaults(),
+                    AuthBuiltInDatabaseConfig.defaults(),
+                    AuthRedisConfig.defaults(),
+                    AuthMysqlConfig.defaults(),
+                    AuthPostgresqlConfig.defaults()
+            );
+        }
+
+        public SecurityConfig(boolean aclEnabled,
+                              List<String> aclChain,
+                              boolean authEnabled,
+                              List<String> authChain,
+                              long cacheTtlMs,
+                              AuthHttpConfig authHttp,
+                              AuthFileConfig authFile,
+                              AuthBuiltInDatabaseConfig authBuiltInDatabase,
+                              AuthRedisConfig authRedis,
+                              AuthMysqlConfig authMysql,
+                              AuthPostgresqlConfig authPostgresql) {
+            this(
+                    aclEnabled,
+                    aclChain,
+                    false,
+                    AclHttpConfig.defaults(),
+                    AclFileConfig.defaults(),
+                    AclRedisConfig.defaults(),
+                    authEnabled,
+                    authChain,
+                    cacheTtlMs,
+                    authHttp,
+                    authFile,
+                    authBuiltInDatabase,
+                    authRedis,
+                    authMysql,
+                    authPostgresql
+            );
+        }
+
+        public SecurityConfig(boolean aclEnabled,
+                              List<String> aclChain,
+                              boolean aclDefaultAllow,
+                              AclHttpConfig aclHttp,
+                              AclFileConfig aclFile,
+                              AclRedisConfig aclRedis,
+                              boolean authEnabled,
+                              List<String> authChain,
+                              long cacheTtlMs) {
+            this(
+                    aclEnabled,
+                    aclChain,
+                    aclDefaultAllow,
+                    aclHttp,
+                    aclFile,
+                    aclRedis,
                     authEnabled,
                     authChain,
                     cacheTtlMs,
@@ -310,8 +395,11 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
         }
 
         public SecurityConfig {
-            aclChain = normalizeList(aclChain);
-            authChain = normalizeList(authChain);
+            aclChain = normalizePluginChain(aclChain);
+            authChain = normalizePluginChain(authChain);
+            aclHttp = aclHttp == null ? AclHttpConfig.defaults() : aclHttp;
+            aclFile = aclFile == null ? AclFileConfig.defaults() : aclFile;
+            aclRedis = aclRedis == null ? AclRedisConfig.defaults() : aclRedis;
             authHttp = authHttp == null ? AuthHttpConfig.defaults() : authHttp;
             authFile = authFile == null ? AuthFileConfig.defaults() : authFile;
             authBuiltInDatabase = authBuiltInDatabase == null ? AuthBuiltInDatabaseConfig.defaults() : authBuiltInDatabase;
@@ -322,8 +410,12 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
 
         public static SecurityConfig defaultConfig() {
             return new SecurityConfig(
-                    true,
-                    List.of("file"),
+                    false,
+                    List.of(),
+                    false,
+                    AclHttpConfig.defaults(),
+                    AclFileConfig.defaults(),
+                    AclRedisConfig.defaults(),
                     false,
                     List.of(),
                     60_000,
@@ -334,6 +426,61 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
                     AuthMysqlConfig.defaults(),
                     AuthPostgresqlConfig.defaults()
             );
+        }
+    }
+
+    public record AclHttpConfig(String url, int timeoutMs, String bodyTemplate) {
+        public AclHttpConfig {
+            url = normalize(url, "http://127.0.0.1:8080/acl/check");
+            timeoutMs = Math.max(timeoutMs, 200);
+            bodyTemplate = bodyTemplate == null || bodyTemplate.isBlank()
+                    ? """
+                    {
+                      "clientId": "${clientId}",
+                      "username": "${username}",
+                      "topic": "${topic}",
+                      "action": "${action}"
+                    }
+                    """
+                    : bodyTemplate;
+        }
+
+        public static AclHttpConfig defaults() {
+            return new AclHttpConfig(
+                    "http://127.0.0.1:8080/acl/check",
+                    2000,
+                    """
+                    {
+                      "clientId": "${clientId}",
+                      "username": "${username}",
+                      "topic": "${topic}",
+                      "action": "${action}"
+                    }
+                    """
+            );
+        }
+    }
+
+    public record AclFileConfig(String path) {
+        public AclFileConfig {
+            path = normalize(path, "acl-rules.txt");
+        }
+
+        public static AclFileConfig defaults() {
+            return new AclFileConfig("acl-rules.txt");
+        }
+    }
+
+    public record AclRedisConfig(String host, int port, String password, int db, String keyPrefix, int timeoutMs) {
+        public AclRedisConfig {
+            host = normalize(host, "127.0.0.1");
+            password = password == null ? "" : password;
+            keyPrefix = normalize(keyPrefix, "jmqx:acl");
+            timeoutMs = Math.max(timeoutMs, 200);
+        }
+
+        public static AclRedisConfig defaults() {
+            return new AclRedisConfig("127.0.0.1", 6379, "", 0, "jmqx:acl", 2000);
         }
     }
 
@@ -490,6 +637,136 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
         }
     }
 
+    public record BridgeConfig(
+            boolean enabled,
+            List<String> types,
+            List<String> topicFilters,
+            boolean asyncEnabled,
+            int asyncQueueCapacity,
+            int asyncWorkerCount,
+            BridgeKafkaConfig kafka,
+            BridgeRocketmqConfig rocketmq,
+            BridgeMysqlConfig mysql
+    ) {
+        public BridgeConfig {
+            types = normalizeBridgeTypes(types);
+            topicFilters = normalizeList(topicFilters);
+            asyncQueueCapacity = Math.max(1024, asyncQueueCapacity);
+            asyncWorkerCount = Math.max(1, asyncWorkerCount);
+            kafka = kafka == null ? BridgeKafkaConfig.defaults() : kafka;
+            rocketmq = rocketmq == null ? BridgeRocketmqConfig.defaults() : rocketmq;
+            mysql = mysql == null ? BridgeMysqlConfig.defaults() : mysql;
+        }
+
+        public static BridgeConfig defaults() {
+            return new BridgeConfig(
+                    false,
+                    List.of(),
+                    List.of(),
+                    true,
+                    10_000,
+                    1,
+                    BridgeKafkaConfig.defaults(),
+                    BridgeRocketmqConfig.defaults(),
+                    BridgeMysqlConfig.defaults()
+            );
+        }
+    }
+
+    public record BridgeKafkaConfig(
+            boolean enabled,
+            String bootstrapServers,
+            String topic,
+            List<String> sourceTopicFilters,
+            String acks,
+            String clientId,
+            String compressionType
+    ) {
+        public BridgeKafkaConfig {
+            bootstrapServers = normalize(bootstrapServers, "127.0.0.1:9092");
+            topic = normalize(topic, "jmqx-messages");
+            sourceTopicFilters = normalizeList(sourceTopicFilters);
+            acks = normalize(acks, "1");
+            clientId = normalize(clientId, "jmqx-bridge");
+            compressionType = normalize(compressionType, "none");
+        }
+
+        public static BridgeKafkaConfig defaults() {
+            return new BridgeKafkaConfig(
+                    false,
+                    "127.0.0.1:9092",
+                    "jmqx-messages",
+                    List.of(),
+                    "1",
+                    "jmqx-bridge",
+                    "none"
+            );
+        }
+    }
+
+    public record BridgeRocketmqConfig(
+            boolean enabled,
+            String nameServer,
+            String producerGroup,
+            String topic,
+            List<String> sourceTopicFilters,
+            boolean syncSend,
+            int timeoutMs
+    ) {
+        public BridgeRocketmqConfig {
+            nameServer = normalize(nameServer, "127.0.0.1:9876");
+            producerGroup = normalize(producerGroup, "jmqx-bridge-group");
+            topic = normalize(topic, "JMQX_MESSAGES");
+            sourceTopicFilters = normalizeList(sourceTopicFilters);
+            timeoutMs = Math.max(100, timeoutMs);
+        }
+
+        public static BridgeRocketmqConfig defaults() {
+            return new BridgeRocketmqConfig(
+                    false,
+                    "127.0.0.1:9876",
+                    "jmqx-bridge-group",
+                    "JMQX_MESSAGES",
+                    List.of(),
+                    false,
+                    3000
+            );
+        }
+    }
+
+    public record BridgeMysqlConfig(
+            boolean enabled,
+            String driver,
+            String url,
+            String user,
+            String password,
+            String table,
+            List<String> sourceTopicFilters,
+            boolean autoCreateTable
+    ) {
+        public BridgeMysqlConfig {
+            driver = driver == null ? "" : driver.trim();
+            url = normalize(url, "jdbc:mysql://127.0.0.1:3306/jmqx");
+            user = normalize(user, "root");
+            password = password == null ? "" : password;
+            table = normalize(table, "jmqx_bridge_message");
+            sourceTopicFilters = normalizeList(sourceTopicFilters);
+        }
+
+        public static BridgeMysqlConfig defaults() {
+            return new BridgeMysqlConfig(
+                    false,
+                    "",
+                    "jdbc:mysql://127.0.0.1:3306/jmqx",
+                    "root",
+                    "",
+                    "jmqx_bridge_message",
+                    List.of(),
+                    true
+            );
+        }
+    }
+
     /**
      * 完整配置。
      */
@@ -570,20 +847,24 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
         private final ClusterSummary summary;
         private volatile ClusterConfig clusterConfig;
         private volatile SecurityConfig securityConfig;
+        private volatile BridgeConfig bridgeConfig;
         private volatile boolean clusterConfigInitialized;
         private volatile boolean securityConfigInitialized;
+        private volatile boolean bridgeConfigInitialized;
         private final Map<String, NodeMetrics> nodeMetrics = new ConcurrentHashMap<>();
         private final Map<String, ClientSnapshot> clientSnapshots = new ConcurrentHashMap<>();
         private final Map<String, BlacklistEntry> blacklistEntries = new ConcurrentHashMap<>();
         private final Map<String, ClientTraceManager.ClientTraceTask> clientTraceTasks = new ConcurrentHashMap<>();
         private final List<AuditLogEntry> auditLogs = new CopyOnWriteArrayList<>();
 
-        private ClusterState(ClusterSummary summary, ClusterConfig clusterConfig, SecurityConfig securityConfig) {
+        private ClusterState(ClusterSummary summary, ClusterConfig clusterConfig, SecurityConfig securityConfig, BridgeConfig bridgeConfig) {
             this.summary = summary;
             this.clusterConfig = clusterConfig;
             this.securityConfig = securityConfig;
+            this.bridgeConfig = bridgeConfig;
             this.clusterConfigInitialized = false;
             this.securityConfigInitialized = false;
+            this.bridgeConfigInitialized = false;
         }
     }
 
@@ -597,6 +878,44 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
             if (normalized != null) {
                 result.add(normalized);
             }
+        }
+        return result;
+    }
+
+    private static List<String> normalizePluginChain(List<String> values) {
+        if (values == null || values.isEmpty()) {
+            return List.of();
+        }
+        List<String> result = new ArrayList<>();
+        for (String value : values) {
+            String normalized = normalize(value, null);
+            if (normalized == null) {
+                continue;
+            }
+            normalized = normalized.toLowerCase();
+            if ("allow_all".equals(normalized) || result.contains(normalized)) {
+                continue;
+            }
+            result.add(normalized);
+        }
+        return result;
+    }
+
+    private static List<String> normalizeBridgeTypes(List<String> values) {
+        if (values == null || values.isEmpty()) {
+            return List.of();
+        }
+        List<String> result = new ArrayList<>();
+        for (String value : values) {
+            String normalized = normalize(value, null);
+            if (normalized == null) {
+                continue;
+            }
+            normalized = normalized.toLowerCase();
+            if (!List.of("kafka", "rocketmq", "mysql").contains(normalized) || result.contains(normalized)) {
+                continue;
+            }
+            result.add(normalized);
         }
         return result;
     }

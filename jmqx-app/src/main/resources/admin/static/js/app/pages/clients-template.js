@@ -33,15 +33,14 @@ export const clientsPageTemplate = `
       <tbody>
       <tr class="click-row" v-for="c in clients.records" :key="c.clientId" @click="viewClient(c.clientId)">
         <td>{{ c.clientId }}</td>
+        <td>{{ c.username || '-' }}</td>
         <td>{{ c.nodeId }}</td>
         <td>{{ c.clientIp }}</td>
         <td>{{ c.keepAliveSeconds }}</td>
         <td>{{ c.connectionType }}</td>
-        <td>{{ c.username || '-' }}</td>
         <td>{{ formatDateTime(c.connectedAt) }}</td>
         <td>
           <div class="table-actions">
-            <el-button type="primary" link @click.stop="openClientTraceForClient(c.clientId)">日志追踪</el-button>
             <el-button type="warning" link @click.stop="kickClient(c.clientId)">踢下线</el-button>
             <el-button type="danger" link @click.stop="blockClientByClientId(c.clientId)">拉黑 clientId</el-button>
             <el-button v-if="c.clientIp && c.clientIp !== 'unknown'" type="danger" link @click.stop="blockClientByIp(c.clientIp, c.clientId)">拉黑 IP</el-button>
@@ -62,7 +61,6 @@ export const clientsPageTemplate = `
     </div>
     <div class="toolbar">
       <button class="btn secondary" @click="selectedClient=null">返回列表</button>
-      <button class="btn" @click="openClientTraceForClient(selectedClient.session.clientId)">日志追踪</button>
       <button class="btn warning" @click="kickClient(selectedClient.session.clientId)">踢下线</button>
       <button class="btn danger" @click="blockClientByClientId(selectedClient.session.clientId)">拉黑 clientId</button>
       <button class="btn danger" v-if="selectedClient.session.clientIp && selectedClient.session.clientIp !== 'unknown'" @click="blockClientByIp(selectedClient.session.clientIp, selectedClient.session.clientId)">拉黑 IP</button>

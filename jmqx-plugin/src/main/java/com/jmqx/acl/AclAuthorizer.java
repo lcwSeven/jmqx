@@ -5,5 +5,9 @@ package com.jmqx.acl;
  * @date 2026/4/4
  */
 public interface AclAuthorizer {
-    boolean isAllowed(AclRequest request);
+    AclDecision authorize(AclRequest request);
+
+    default boolean isAllowed(AclRequest request) {
+        return authorize(request) == AclDecision.ALLOW;
+    }
 }

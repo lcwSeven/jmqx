@@ -22,6 +22,226 @@ export const securityPageMethods = {
     async saveAclConfig() {
         await this.saveSecurityConfig();
     },
+    openAclCreate() {
+        if (!this.availableAclDatasourceOptions.length) {
+            this.error = "可用的 ACL 数据源已经全部加入当前 ACL 链";
+            return;
+        }
+        this.aclCreateMode = true;
+        this.aclEditingPlugin = "";
+        this.aclStep = 1;
+        this.aclDraft.method = "topic";
+        this.aclDraft.cacheTtlMs = Number(this.securityConfig.cacheTtlMs || 60000);
+        const fallbackDatasource = this.availableAclDatasourceOptions.length
+            ? this.availableAclDatasourceOptions[0].key
+            : this.mapAclPluginToDatasource(this.primaryAclPlugin() || "file");
+        this.applyAclDraftFromPlugin(this.mapAclDatasourceToPlugin(fallbackDatasource || "file"));
+    },
+    cancelAclCreate() {
+        this.aclCreateMode = false;
+        this.aclEditingPlugin = "";
+        this.aclStep = 1;
+    },
+    selectAclMethod(key) {
+        this.aclDraft.method = key;
+    },
+    selectAclDatasource(key) {
+        this.aclDraft.datasource = key;
+    },
+    previousAclStep() {
+        if (this.aclStep > 1) {
+            this.aclStep -= 1;
+        }
+    },
+    nextAclStep() {
+        if (this.aclStep < 3) {
+            this.aclStep += 1;
+        }
+    },
+    aclMethodLabel() {
+        const hit = this.aclMethodOptions.find(item => item.key === this.aclDraft.method);
+        return hit ? hit.label : "Topic ACL";
+    },
+    aclDatasourceLabel() {
+        const hit = this.aclDatasourceOptions.find(item => item.key === this.aclDraft.datasource);
+        return hit ? hit.label : "文件";
+    },
+    mapAclDatasourceToPlugin(datasource) {
+        if (datasource === "http") {
+            return "http";
+        }
+        if (datasource === "redis") {
+            return "redis";
+        }
+        return "file";
+    },
+    mapAclPluginToDatasource(plugin) {
+        if (plugin === "http") {
+            return "http";
+        }
+        if (plugin === "redis") {
+            return "redis";
+        }
+        return "file";
+    },
+    aclPluginDisplayName(plugin) {
+        if (plugin === "http") {
+            return "HTTP 服务";
+        }
+        if (plugin === "redis") {
+            return "Redis";
+        }
+        return "文件";
+    },
+    describeAclPlugin(plugin) {
+        if (plugin === "http") {
+            const config = this.securityConfig.aclHttp || {};
+            return `${config.url || "-"} · ${config.timeoutMs || 2000}ms`;
+        }
+        if (plugin === "redis") {
+            const redis = this.securityConfig.aclRedis || {};
+            return `${redis.host || "127.0.0.1"}:${redis.port || 6379}/${redis.db || 0}`;
+        }
+        return this.securityConfig.aclFile?.path || "acl-rules.txt";
+    },
+    primaryAclPlugin() {
+        const chain = Array.isArray(this.securityConfig.aclChain)
+            ? this.securityConfig.aclChain
+            : [];
+        if (!chain.length || !chain[0]) {
+            return "";
+        }
+        return String(chain[0]).trim().toLowerCase();
+    },
+    hasAclRecord() {
+        return Array.isArray(this.securityConfig.aclChain) && this.securityConfig.aclChain.length > 0;
+    },
+    async createAclAndSave() {
+        try {
+            const plugin = this.mapAclDatasourceToPlugin(this.aclDraft.datasource);
+            if (!this.aclEditingPlugin && this.securityConfig.aclChain.includes(plugin)) {
+                this.error = "同一种 ACL 数据源已存在，请直接编辑该项配置";
+                return;
+            }
+            this.securityConfig.aclEnabled = true;
+            this.securityConfig.cacheTtlMs = Number(this.aclDraft.cacheTtlMs || 60000);
+            this.applyAclDraftToSecurityConfig(plugin);
+            const currentChain = Array.isArray(this.securityConfig.aclChain) ? [...this.securityConfig.aclChain] : [];
+            if (!currentChain.includes(plugin)) {
+                currentChain.push(plugin);
+            }
+            this.securityConfig.aclChain = currentChain;
+            await this.saveAclConfig();
+            this.aclCreateMode = false;
+            this.aclEditingPlugin = "";
+            this.aclStep = 1;
+            this.message = "ACL 鉴权配置已保存";
+            this.error = "";
+        } catch (e) {
+            this.error = "保存 ACL 配置失败: " + e.message;
+        }
+    },
+    async toggleAclEnabled() {
+        await this.saveAclConfig();
+    },
+    openAclSettings(plugin) {
+        const targetPlugin = plugin || this.primaryAclPlugin() || "file";
+        this.aclCreateMode = true;
+        this.aclEditingPlugin = targetPlugin;
+        this.aclStep = 3;
+        this.applyAclDraftFromPlugin(targetPlugin);
+    },
+    async moveAclEntryUp(plugin) {
+        const previousChain = Array.isArray(this.securityConfig.aclChain) ? [...this.securityConfig.aclChain] : [];
+        const chain = [...previousChain];
+        const index = chain.indexOf(plugin);
+        if (index <= 0) {
+            return;
+        }
+        [chain[index - 1], chain[index]] = [chain[index], chain[index - 1]];
+        this.securityConfig.aclChain = chain;
+        this.error = "";
+        await this.saveAclConfig();
+        if (this.error) {
+            this.securityConfig.aclChain = previousChain;
+            return;
+        }
+        this.message = "ACL 链顺序已更新";
+    },
+    async moveAclEntryDown(plugin) {
+        const previousChain = Array.isArray(this.securityConfig.aclChain) ? [...this.securityConfig.aclChain] : [];
+        const chain = [...previousChain];
+        const index = chain.indexOf(plugin);
+        if (index < 0 || index >= chain.length - 1) {
+            return;
+        }
+        [chain[index], chain[index + 1]] = [chain[index + 1], chain[index]];
+        this.securityConfig.aclChain = chain;
+        this.error = "";
+        await this.saveAclConfig();
+        if (this.error) {
+            this.securityConfig.aclChain = previousChain;
+            return;
+        }
+        this.message = "ACL 链顺序已更新";
+    },
+    async removeAclEntry(plugin) {
+        try {
+            this.securityConfig.aclChain = (Array.isArray(this.securityConfig.aclChain) ? this.securityConfig.aclChain : [])
+                .filter(item => item !== plugin);
+            if (!this.securityConfig.aclChain.length) {
+                this.securityConfig.aclEnabled = false;
+            }
+            await this.saveAclConfig();
+            this.message = "ACL 数据源已移除";
+            this.error = "";
+        } catch (e) {
+            this.error = "删除 ACL 数据源失败: " + e.message;
+        }
+    },
+    applyAclDraftFromPlugin(plugin) {
+        const normalizedPlugin = plugin || "file";
+        this.aclDraft.datasource = this.mapAclPluginToDatasource(normalizedPlugin);
+        this.aclDraft.cacheTtlMs = Number(this.securityConfig.cacheTtlMs || 60000);
+        this.aclDraft.defaultAllow = this.securityConfig.aclDefaultAllow === true;
+        this.aclDraft.filePath = this.securityConfig.aclFile?.path || "acl-rules.txt";
+        this.aclDraft.httpUrl = this.securityConfig.aclHttp?.url || "http://127.0.0.1:8080/acl/check";
+        this.aclDraft.httpTimeoutMs = Number(this.securityConfig.aclHttp?.timeoutMs || 2000);
+        this.aclDraft.httpBodyTemplate = this.securityConfig.aclHttp?.bodyTemplate
+            || '{\n  "clientId": "${clientId}",\n  "username": "${username}",\n  "topic": "${topic}",\n  "action": "${action}"\n}';
+        this.aclDraft.redisHost = this.securityConfig.aclRedis?.host || "127.0.0.1";
+        this.aclDraft.redisPort = Number(this.securityConfig.aclRedis?.port || 6379);
+        this.aclDraft.redisPassword = this.securityConfig.aclRedis?.password || "";
+        this.aclDraft.redisDb = Number(this.securityConfig.aclRedis?.db || 0);
+        this.aclDraft.redisKeyPrefix = this.securityConfig.aclRedis?.keyPrefix || "jmqx:acl";
+        this.aclDraft.redisTimeoutMs = Number(this.securityConfig.aclRedis?.timeoutMs || 2000);
+    },
+    applyAclDraftToSecurityConfig(plugin) {
+        this.securityConfig.aclDefaultAllow = this.aclDraft.defaultAllow === true;
+        if (plugin === "http") {
+            this.securityConfig.aclHttp = {
+                url: this.aclDraft.httpUrl || "",
+                timeoutMs: Number(this.aclDraft.httpTimeoutMs || 2000),
+                bodyTemplate: this.aclDraft.httpBodyTemplate
+                    || '{\n  "clientId": "${clientId}",\n  "username": "${username}",\n  "topic": "${topic}",\n  "action": "${action}"\n}'
+            };
+            return;
+        }
+        if (plugin === "redis") {
+            this.securityConfig.aclRedis = {
+                host: this.aclDraft.redisHost || "127.0.0.1",
+                port: Number(this.aclDraft.redisPort || 6379),
+                password: this.aclDraft.redisPassword || "",
+                db: Number(this.aclDraft.redisDb || 0),
+                keyPrefix: this.aclDraft.redisKeyPrefix || "jmqx:acl",
+                timeoutMs: Number(this.aclDraft.redisTimeoutMs || 2000)
+            };
+            return;
+        }
+        this.securityConfig.aclFile = {
+            path: this.aclDraft.filePath || "acl-rules.txt"
+        };
+    },
     async saveAuthConfig() {
         await this.saveSecurityConfig();
     },
@@ -410,14 +630,36 @@ export const securityPageMethods = {
         };
     },
     normalizeSecurityConfig(config = {}) {
+        const normalizedAclChain = (Array.isArray(config.aclChain)
+            ? config.aclChain
+            : this.toCommaList(config.aclChain || ""))
+            .map(item => String(item || "").trim().toLowerCase())
+            .filter((item, index, array) => item && item !== "allow_all" && array.indexOf(item) === index);
         const normalizedAuthChain = (Array.isArray(config.authChain)
             ? config.authChain
             : this.toCommaList(config.authChain || ""))
             .map(item => String(item || "").trim().toLowerCase())
             .filter(item => item && item !== "allow_all");
         return {
-            aclEnabled: config.aclEnabled !== false,
-            aclChain: Array.isArray(config.aclChain) ? config.aclChain : this.toCommaList(config.aclChain || "file"),
+            aclEnabled: config.aclEnabled === true && normalizedAclChain.length > 0,
+            aclChain: normalizedAclChain,
+            aclDefaultAllow: config.aclDefaultAllow === true,
+            aclHttp: {
+                url: config.aclHttp?.url || "http://127.0.0.1:8080/acl/check",
+                timeoutMs: Number(config.aclHttp?.timeoutMs || 2000),
+                bodyTemplate: config.aclHttp?.bodyTemplate || '{\n  "clientId": "${clientId}",\n  "username": "${username}",\n  "topic": "${topic}",\n  "action": "${action}"\n}'
+            },
+            aclFile: {
+                path: config.aclFile?.path || "acl-rules.txt"
+            },
+            aclRedis: {
+                host: config.aclRedis?.host || "127.0.0.1",
+                port: Number(config.aclRedis?.port || 6379),
+                password: config.aclRedis?.password || "",
+                db: Number(config.aclRedis?.db || 0),
+                keyPrefix: config.aclRedis?.keyPrefix || "jmqx:acl",
+                timeoutMs: Number(config.aclRedis?.timeoutMs || 2000)
+            },
             authEnabled: config.authEnabled === true && normalizedAuthChain.length > 0,
             authChain: normalizedAuthChain,
             cacheTtlMs: Number(config.cacheTtlMs || 60000),

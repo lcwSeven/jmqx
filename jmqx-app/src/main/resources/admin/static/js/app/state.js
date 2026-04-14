@@ -24,7 +24,9 @@ export function createInitialState() {
             newPassword: "",
             confirmPassword: ""
         },
+        clusters: [],
         currentClusterId: "default",
+        clusterSelectionTouched: false,
         mqttStatus: "未连接",
         mqttClient: null,
         realtimeNodeMap: {},
@@ -33,12 +35,6 @@ export function createInitialState() {
         clients: { records: [], total: 0, pageNo: 1, pageSize: 20 },
         search: { clientId: "", userName: "", pageNo: 1, pageSize: 20 },
         selectedClient: null,
-        clientTraces: [],
-        clientTraceForm: {
-            clientId: "",
-            startAt: "",
-            durationMinutes: 5
-        },
         blacklistEntries: [],
         blacklistForm: {
             type: "clientId",
@@ -65,8 +61,25 @@ export function createInitialState() {
         auditFilter: "all",
         expandedAuditIds: [],
         securityConfig: {
-            aclEnabled: true,
-            aclChain: ["file"],
+            aclEnabled: false,
+            aclChain: [],
+            aclDefaultAllow: false,
+            aclHttp: {
+                url: "http://127.0.0.1:8080/acl/check",
+                timeoutMs: 2000,
+                bodyTemplate: '{\n  "clientId": "${clientId}",\n  "username": "${username}",\n  "topic": "${topic}",\n  "action": "${action}"\n}'
+            },
+            aclFile: {
+                path: "acl-rules.txt"
+            },
+            aclRedis: {
+                host: "127.0.0.1",
+                port: 6379,
+                password: "",
+                db: 0,
+                keyPrefix: "jmqx:acl",
+                timeoutMs: 2000
+            },
             authEnabled: false,
             authChain: [],
             cacheTtlMs: 60000,
@@ -113,6 +126,113 @@ export function createInitialState() {
             }
         },
         clusterConfig: { coreNodes: ["core-1:9801"], replicantNodes: [], coreAcceptClientConnections: true, sharedSubscriptionMaxMembersPerGroup: 10000 },
+        bridgeConfig: {
+            enabled: false,
+            types: [],
+            topicFilters: [],
+            asyncEnabled: true,
+            asyncQueueCapacity: 10000,
+            asyncWorkerCount: 1,
+            kafka: {
+                enabled: false,
+                bootstrapServers: "127.0.0.1:9092",
+                topic: "jmqx-messages",
+                sourceTopicFilters: [],
+                acks: "1",
+                clientId: "jmqx-bridge",
+                compressionType: "none"
+            },
+            rocketmq: {
+                enabled: false,
+                nameServer: "127.0.0.1:9876",
+                producerGroup: "jmqx-bridge-group",
+                topic: "JMQX_MESSAGES",
+                sourceTopicFilters: [],
+                syncSend: false,
+                timeoutMs: 3000
+            },
+            mysql: {
+                enabled: false,
+                driver: "",
+                url: "jdbc:mysql://127.0.0.1:3306/jmqx",
+                user: "root",
+                password: "",
+                table: "jmqx_bridge_message",
+                sourceTopicFilters: [],
+                autoCreateTable: true
+            }
+        },
+        bridgeTypeOptions: [
+            { key: "kafka", label: "Kafka" },
+            { key: "rocketmq", label: "RocketMQ" },
+            { key: "mysql", label: "MySQL" }
+        ],
+        bridgeCreateMode: false,
+        bridgeEditingType: "",
+        bridgeStep: 1,
+        bridgeDatasourceOptions: [
+            { key: "kafka", label: "Kafka", icon: "🟠" },
+            { key: "rocketmq", label: "RocketMQ", icon: "🚀" },
+            { key: "mysql", label: "MySQL", icon: "🐬" }
+        ],
+        bridgeDraft: {
+            datasource: "kafka",
+            kafka: {
+                enabled: true,
+                bootstrapServers: "127.0.0.1:9092",
+                topic: "jmqx-messages",
+                sourceTopicFilters: [],
+                acks: "1",
+                clientId: "jmqx-bridge",
+                compressionType: "none"
+            },
+            rocketmq: {
+                enabled: true,
+                nameServer: "127.0.0.1:9876",
+                producerGroup: "jmqx-bridge-group",
+                topic: "JMQX_MESSAGES",
+                sourceTopicFilters: [],
+                syncSend: false,
+                timeoutMs: 3000
+            },
+            mysql: {
+                enabled: true,
+                driver: "",
+                url: "jdbc:mysql://127.0.0.1:3306/jmqx",
+                user: "root",
+                password: "",
+                table: "jmqx_bridge_message",
+                sourceTopicFilters: [],
+                autoCreateTable: true
+            }
+        },
+        aclCreateMode: false,
+        aclEditingPlugin: "",
+        aclStep: 1,
+        aclMethodOptions: [
+            { key: "topic", label: "Topic ACL" }
+        ],
+        aclDatasourceOptions: [
+            { key: "file", label: "文件", icon: "📄" },
+            { key: "redis", label: "Redis", icon: "🧱" },
+            { key: "http", label: "HTTP 服务", icon: "🌐" }
+        ],
+        aclDraft: {
+            method: "topic",
+            datasource: "file",
+            cacheTtlMs: 60000,
+            defaultAllow: false,
+            filePath: "acl-rules.txt",
+            httpUrl: "http://127.0.0.1:8080/acl/check",
+            httpTimeoutMs: 2000,
+            httpBodyTemplate: '{\n  "clientId": "${clientId}",\n  "username": "${username}",\n  "topic": "${topic}",\n  "action": "${action}"\n}',
+            redisHost: "127.0.0.1",
+            redisPort: 6379,
+            redisPassword: "",
+            redisDb: 0,
+            redisKeyPrefix: "jmqx:acl",
+            redisTimeoutMs: 2000
+        },
         authCreateMode: false,
         authEditingPlugin: "",
         authStep: 1,

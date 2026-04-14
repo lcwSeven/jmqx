@@ -21,24 +21,24 @@ public class CachedAclAuthorizer implements AclAuthorizer {
     }
 
     @Override
-    public boolean isAllowed(AclRequest request) {
+    public AclDecision authorize(AclRequest request) {
         if (ttlMillis <= 0) {
-            return delegate.isAllowed(request);
+            return delegate.authorize(request);
         }
         long now = System.currentTimeMillis();
         CacheKey key = new CacheKey(request);
         CacheValue hit = cache.get(key);
         if (hit != null && hit.expireAt >= now) {
-            return hit.allowed;
+            return hit.decision;
         }
 
-        boolean allowed = delegate.isAllowed(request);
-        cache.put(key, new CacheValue(allowed, now + ttlMillis));
+        AclDecision decision = delegate.authorize(request);
+        cache.put(key, new CacheValue(decision, now + ttlMillis));
 
         if ((accessCounter.incrementAndGet() & 0xFF) == 0) {
             cleanup(now);
         }
-        return allowed;
+        return decision;
     }
 
     private void cleanup(long now) {
@@ -91,11 +91,11 @@ public class CachedAclAuthorizer implements AclAuthorizer {
      * @date 2026/4/4
      */
     private static class CacheValue {
-        private final boolean allowed;
+        private final AclDecision decision;
         private final long expireAt;
 
-        private CacheValue(boolean allowed, long expireAt) {
-            this.allowed = allowed;
+        private CacheValue(AclDecision decision, long expireAt) {
+            this.decision = decision;
             this.expireAt = expireAt;
         }
     }

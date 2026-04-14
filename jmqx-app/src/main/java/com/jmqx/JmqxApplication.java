@@ -23,6 +23,7 @@ import com.jmqx.broker.ratelimit.BrokerRateLimitConfig;
 import com.jmqx.bridge.BridgeProperties;
 import com.jmqx.bridge.MessageBridge;
 import com.jmqx.bridge.MessageBridgeFactory;
+import com.jmqx.bridge.ReloadableMessageBridge;
 import com.jmqx.cluster.ClusterMetadataCommandApplier;
 import com.jmqx.cluster.ClusterRoleProvider;
 import com.jmqx.cluster.MetadataCommand;
@@ -80,6 +81,7 @@ import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 
@@ -208,9 +210,14 @@ public class JmqxApplication {
         ReloadableAclAuthorizer aclAuthorizer = new ReloadableAclAuthorizer(AclAuthorizerFactory.create(context.aclProperties()));
         AdminStateRepository adminStateRepository = buildAdminStateRepository(context.adminPanelSettings());
         AdminAuthRuntime adminAuthRuntime = new AdminAuthRuntime(resolveAdminAuthConfig(adminStateRepository, context.adminAuthSettings()));
+        ReloadableMessageBridge messageBridge = new ReloadableMessageBridge(MessageBridgeFactory.create(context.bridgeProperties()));
+        AtomicReference<MqttBrokerMessageHandler> brokerMessageHandlerRef = new AtomicReference<>();
+        EmbeddedAdminStateStore.BridgeConfig initialBridgeConfig = adminStateRepository != null
+                && adminStateRepository.hasBridgeConfig(context.adminSyncSettings().clusterId())
+                ? adminStateRepository.getBridgeConfig(context.adminSyncSettings().clusterId())
+                : buildInitialBridgeConfig(context.bridgeProperties());
         RuntimeClientBlacklist clientBlacklist = new RuntimeClientBlacklist();
         loadPersistedBlacklistEntries(adminStateRepository, context.adminSyncSettings().clusterId(), clientBlacklist);
-        loadPersistedClientTraceTasks(adminStateRepository, context.adminSyncSettings().clusterId());
         ClientAuthenticator clientAuthenticator = new ClientAuthenticator() {
             @Override
             public AuthResult authenticateResult(String clientId, String username, String password) {
@@ -249,6 +256,12 @@ public class JmqxApplication {
                         sharedSubscriptionManager,
                         context.sharedSlowThreshold(),
                         clusterConfig
+                ),
+                (clusterId, bridgeConfig) -> applyRuntimeBridgeConfig(
+                        context.bridgeProperties(),
+                        messageBridge,
+                        brokerMessageHandlerRef.get(),
+                        bridgeConfig
                 ),
                 context.clusterSettings().coreBindHost(),
                 context.clusterSettings().coreBindPort(),
@@ -307,7 +320,6 @@ public class JmqxApplication {
         }
 
         // 3) 组装 Broker 依赖：共享订阅、保留消息、AUTH/ACL、桥接、连接指标、管理上报。
-        MessageBridge messageBridge = MessageBridgeFactory.create(context.bridgeProperties());
         ConnectionMetrics connectionMetrics = new ConnectionMetrics();
         AdminReporter adminReporter = buildAdminReporter(
                 context.adminSyncSettings(),
@@ -327,6 +339,7 @@ public class JmqxApplication {
                 aclAuthorizer,
                 sharedSubscriptionManager,
                 messageBridge,
+                initialBridgeConfig.enabled(),
                 context.retainedStoreProperties().isRetainedEnabled(),
                 qos1InflightStore,
                 qos2InflightStore,
@@ -355,6 +368,8 @@ public class JmqxApplication {
                         context.brokerProperties().getRateLimitIdleSeconds()
                 )
         );
+        brokerMessageHandlerRef.set(brokerMessageHandler);
+        applyRuntimeBridgeConfig(context.bridgeProperties(), messageBridge, brokerMessageHandler, initialBridgeConfig);
         // 绑定集群入站消息回调：收到跨节点消息后交给 Broker 路由。
         clusterMessageTransport.setMessageConsumer(
                 brokerMessageHandler::onClusterPublish
@@ -387,6 +402,7 @@ public class JmqxApplication {
                 builtInDatabaseUserService,
                 buildInitialSecurityConfig(context.authProperties(), context.aclProperties()),
                 buildInitialClusterConfig(context),
+                initialBridgeConfig,
                 (clusterId, securityConfig) -> metadataRuntime.gateway().submit(new MetadataCommand(
                         ClusterMetadataCommandApplier.ADMIN_SECURITY_NAMESPACE,
                         "upsert",
@@ -399,6 +415,13 @@ public class JmqxApplication {
                         "upsert",
                         clusterId,
                         AdminConfigCodec.encodeClusterConfigToString(clusterConfig),
+                        context.clusterRoleProvider().nodeId()
+                )),
+                (clusterId, bridgeConfig) -> metadataRuntime.gateway().submit(new MetadataCommand(
+                        ClusterMetadataCommandApplier.ADMIN_BRIDGE_NAMESPACE,
+                        "upsert",
+                        clusterId,
+                        AdminConfigCodec.encodeBridgeConfigToString(bridgeConfig),
                         context.clusterRoleProvider().nodeId()
                 )),
                 (clusterId, clientId) -> metadataRuntime.gateway().submit(new MetadataCommand(
@@ -428,39 +451,6 @@ public class JmqxApplication {
                                 clusterId,
                                 AdminConfigCodec.encodeBlacklistEntryToString(
                                         new EmbeddedAdminStateStore.BlacklistEntry(type, value, System.currentTimeMillis(), context.clusterRoleProvider().nodeId())
-                                ),
-                                context.clusterRoleProvider().nodeId()
-                        ));
-                    }
-                },
-                new AdminPanelServer.ClientTraceUpdater() {
-                    @Override
-                    public void upsert(String clusterId, com.jmqx.common.logging.ClientTraceManager.ClientTraceTask task) {
-                        metadataRuntime.gateway().submit(new MetadataCommand(
-                                ClusterMetadataCommandApplier.ADMIN_CLIENT_TRACE_NAMESPACE,
-                                "upsert",
-                                clusterId,
-                                AdminConfigCodec.encodeClientTraceTaskToString(task),
-                                context.clusterRoleProvider().nodeId()
-                        ));
-                    }
-
-                    @Override
-                    public void delete(String clusterId, String taskId) {
-                        metadataRuntime.gateway().submit(new MetadataCommand(
-                                ClusterMetadataCommandApplier.ADMIN_CLIENT_TRACE_NAMESPACE,
-                                "delete",
-                                clusterId,
-                                AdminConfigCodec.encodeClientTraceTaskToString(
-                                        new com.jmqx.common.logging.ClientTraceManager.ClientTraceTask(
-                                                taskId,
-                                                "",
-                                                0L,
-                                                0L,
-                                                System.currentTimeMillis(),
-                                                context.clusterRoleProvider().nodeId(),
-                                                ""
-                                        )
                                 ),
                                 context.clusterRoleProvider().nodeId()
                         ));
@@ -655,7 +645,7 @@ public class JmqxApplication {
             LOG.info("JMQX wss: wss://{}:{}{}", wssHost, brokerProperties.getWssPort(), wssPath);
         }
         LOG.info("AUTH chain: {}", context.authProperties().getChain());
-        LOG.info("ACL plugin: {}", context.aclProperties().getType());
+        LOG.info("ACL chain: {}", context.aclProperties().getChain());
         LOG.info("BRIDGE enabled={}, types={}, topicFilters={}",
                 context.bridgeProperties().isEnabled(),
                 context.bridgeProperties().getTypes(),
@@ -890,11 +880,12 @@ public class JmqxApplication {
             BuiltInDatabaseUserService builtInDatabaseUserService,
             EmbeddedAdminStateStore.SecurityConfig initialSecurityConfig,
             EmbeddedAdminStateStore.ClusterConfig initialClusterConfig,
+            EmbeddedAdminStateStore.BridgeConfig initialBridgeConfig,
             AdminPanelServer.SecurityConfigUpdater securityConfigUpdater,
             AdminPanelServer.ClusterConfigUpdater clusterConfigUpdater,
+            AdminPanelServer.BridgeConfigUpdater bridgeConfigUpdater,
             AdminPanelServer.ClientKickUpdater clientKickUpdater,
             AdminPanelServer.BlacklistUpdater blacklistUpdater,
-            AdminPanelServer.ClientTraceUpdater clientTraceUpdater,
             AdminPanelServer.BuiltInDatabaseUsersUpdater builtInDatabaseUsersUpdater
     ) {
         String panelNodeIp = resolveLocalNodeIp();
@@ -914,11 +905,12 @@ public class JmqxApplication {
                 stateRepository,
                 initialSecurityConfig,
                 initialClusterConfig,
+                initialBridgeConfig,
                 securityConfigUpdater,
                 clusterConfigUpdater,
+                bridgeConfigUpdater,
                 clientKickUpdater,
                 blacklistUpdater,
-                clientTraceUpdater,
                 builtInDatabaseUsersUpdater,
                 builtInDatabaseUserService
         );
@@ -973,23 +965,6 @@ public class JmqxApplication {
         }
     }
 
-    private static void loadPersistedClientTraceTasks(
-            AdminStateRepository adminStateRepository,
-            String clusterId
-    ) {
-        if (adminStateRepository == null) {
-            return;
-        }
-        String effectiveClusterId = (clusterId == null || clusterId.isBlank()) ? "default" : clusterId.trim();
-        com.jmqx.common.logging.ClientTraceManager manager = com.jmqx.common.logging.ClientTraceManager.getInstance();
-        for (com.jmqx.common.logging.ClientTraceManager.ClientTraceTask task : adminStateRepository.listClientTraceTasks(effectiveClusterId)) {
-            if (task == null) {
-                continue;
-            }
-            manager.upsert(task);
-        }
-    }
-
     private static MetadataRuntime buildMetadataRuntime(
             ClusterRoleProvider clusterRoleProvider,
             GlobalSubscriptionRegistry globalSubscriptionRegistry,
@@ -1002,6 +977,7 @@ public class JmqxApplication {
             ClientBlacklist clientBlacklist,
             JmqxMetadataProjectionHandlers.AdminSecurityConfigApplier adminSecurityConfigApplier,
             JmqxMetadataProjectionHandlers.AdminClusterConfigApplier adminClusterConfigApplier,
+            JmqxMetadataProjectionHandlers.AdminBridgeConfigApplier adminBridgeConfigApplier,
             String coreBindHost,
             int coreBindPort,
             int clusterRequestTimeoutMs,
@@ -1029,7 +1005,8 @@ public class JmqxApplication {
                 clientAuthenticator,
                 clientBlacklist,
                 adminSecurityConfigApplier,
-                adminClusterConfigApplier
+                adminClusterConfigApplier,
+                adminBridgeConfigApplier
         );
         ClusterMetadataCommandApplier commandApplier = new ClusterMetadataCommandApplier(
                 clusterRoleProvider.nodeId(),
@@ -1038,9 +1015,9 @@ public class JmqxApplication {
                 handlers::applyRetainedCommand,
                 handlers::applyAdminSecurityConfigCommand,
                 handlers::applyAdminClusterConfigCommand,
+                handlers::applyAdminBridgeConfigCommand,
                 handlers::applyBuiltInUserCommand,
-                handlers::applyAdminBlacklistCommand,
-                handlers::applyClientTraceCommand
+                handlers::applyAdminBlacklistCommand
         );
         if (clusterRoleProvider.role() == NodeRole.CORE) {
             SofaJraftMetadataCommandGateway raftGateway = new SofaJraftMetadataCommandGateway(
@@ -1136,11 +1113,28 @@ public class JmqxApplication {
         List<String> authChain = JmqxConfigMappers.resolveAuthChain(authProperties);
         List<String> aclChain = JmqxConfigMappers.resolveAclChain(aclProperties);
         boolean authEnabled = !authChain.isEmpty() && !"allow_all".equalsIgnoreCase(JmqxConfigMappers.firstOrEmpty(authChain));
-        boolean aclEnabled = !aclChain.isEmpty() && !"allow_all".equalsIgnoreCase(JmqxConfigMappers.firstOrEmpty(aclChain));
+        boolean aclEnabled = !aclChain.isEmpty();
         long cacheTtlMs = Math.max(authProperties.getCacheMillis(), aclProperties.getCacheMillis());
         return new EmbeddedAdminStateStore.SecurityConfig(
                 aclEnabled,
                 aclChain,
+                aclProperties.isDefaultAllow(),
+                new EmbeddedAdminStateStore.AclHttpConfig(
+                        aclProperties.getHttpUrl(),
+                        aclProperties.getHttpTimeoutMs(),
+                        aclProperties.getHttpBodyTemplate()
+                ),
+                new EmbeddedAdminStateStore.AclFileConfig(
+                        aclProperties.getFilePath()
+                ),
+                new EmbeddedAdminStateStore.AclRedisConfig(
+                        aclProperties.getRedisHost(),
+                        aclProperties.getRedisPort(),
+                        aclProperties.getRedisPassword(),
+                        aclProperties.getRedisDb(),
+                        aclProperties.getRedisKeyPrefix(),
+                        aclProperties.getRedisTimeoutMs()
+                ),
                 authEnabled,
                 authChain,
                 Math.max(cacheTtlMs, 0),
@@ -1210,6 +1204,47 @@ public class JmqxApplication {
         );
     }
 
+    private static EmbeddedAdminStateStore.BridgeConfig buildInitialBridgeConfig(BridgeProperties bridgeProperties) {
+        List<String> configuredTypes = splitCommaList(bridgeProperties.getTypes());
+        boolean bridgeEnabled = bridgeProperties.isEnabled();
+        return new EmbeddedAdminStateStore.BridgeConfig(
+                bridgeEnabled,
+                configuredTypes,
+                splitCommaList(bridgeProperties.getTopicFilters()),
+                bridgeProperties.isAsync(),
+                bridgeProperties.getAsyncQueueCapacity(),
+                bridgeProperties.getAsyncWorkerCount(),
+                new EmbeddedAdminStateStore.BridgeKafkaConfig(
+                        bridgeEnabled && configuredTypes.contains("kafka"),
+                        bridgeProperties.getKafkaBootstrapServers(),
+                        bridgeProperties.getKafkaTopic(),
+                        splitCommaList(bridgeProperties.getKafkaSourceTopicFilters()),
+                        bridgeProperties.getKafkaAcks(),
+                        bridgeProperties.getKafkaClientId(),
+                        bridgeProperties.getKafkaCompressionType()
+                ),
+                new EmbeddedAdminStateStore.BridgeRocketmqConfig(
+                        bridgeEnabled && configuredTypes.contains("rocketmq"),
+                        bridgeProperties.getRocketmqNameServer(),
+                        bridgeProperties.getRocketmqProducerGroup(),
+                        bridgeProperties.getRocketmqTopic(),
+                        splitCommaList(bridgeProperties.getRocketmqSourceTopicFilters()),
+                        bridgeProperties.isRocketmqSyncSend(),
+                        bridgeProperties.getRocketmqTimeoutMs()
+                ),
+                new EmbeddedAdminStateStore.BridgeMysqlConfig(
+                        bridgeEnabled && configuredTypes.contains("mysql"),
+                        bridgeProperties.getMysqlDriver(),
+                        bridgeProperties.getMysqlUrl(),
+                        bridgeProperties.getMysqlUser(),
+                        bridgeProperties.getMysqlPassword(),
+                        bridgeProperties.getMysqlTable(),
+                        splitCommaList(bridgeProperties.getMysqlSourceTopicFilters()),
+                        bridgeProperties.isMysqlAutoCreateTable()
+                )
+        );
+    }
+
     private static void applyRuntimeSecurityConfig(
             AuthProperties authProperties,
             AclProperties aclProperties,
@@ -1275,17 +1310,83 @@ public class JmqxApplication {
             authProperties.setPostgresqlPoolMaxLifetimeMs(securityConfig.authPostgresql().poolMaxLifetimeMs());
 
             List<String> aclChain = normalizePluginList(securityConfig.aclChain());
-            if (!securityConfig.aclEnabled()) {
-                aclProperties.setType("allow_all");
+            aclProperties.setDefaultAllow(securityConfig.aclDefaultAllow());
+            aclProperties.setHttpUrl(securityConfig.aclHttp().url());
+            aclProperties.setHttpTimeoutMs(securityConfig.aclHttp().timeoutMs());
+            aclProperties.setHttpBodyTemplate(securityConfig.aclHttp().bodyTemplate());
+            aclProperties.setFilePath(securityConfig.aclFile().path());
+            aclProperties.setRedisHost(securityConfig.aclRedis().host());
+            aclProperties.setRedisPort(securityConfig.aclRedis().port());
+            aclProperties.setRedisPassword(securityConfig.aclRedis().password());
+            aclProperties.setRedisDb(securityConfig.aclRedis().db());
+            aclProperties.setRedisKeyPrefix(securityConfig.aclRedis().keyPrefix());
+            aclProperties.setRedisTimeoutMs(securityConfig.aclRedis().timeoutMs());
+            if (!securityConfig.aclEnabled() || aclChain.isEmpty()) {
+                aclProperties.setChain("");
             } else {
-                if (aclChain.isEmpty()) {
-                    aclChain = List.of("file");
-                }
-                aclProperties.setType(JmqxConfigMappers.firstOrEmpty(aclChain));
+                aclProperties.setChain(String.join(",", aclChain));
             }
 
             reloadableAuthProvider.setDelegate(AuthProviderFactory.create(authProperties));
             reloadableAclAuthorizer.setDelegate(AclAuthorizerFactory.create(aclProperties));
+        }
+    }
+
+    private static void applyRuntimeBridgeConfig(
+            BridgeProperties bridgeProperties,
+            ReloadableMessageBridge reloadableMessageBridge,
+            MqttBrokerMessageHandler brokerMessageHandler,
+            EmbeddedAdminStateStore.BridgeConfig bridgeConfig
+    ) {
+        if (bridgeProperties == null || reloadableMessageBridge == null || bridgeConfig == null) {
+            return;
+        }
+        synchronized (JmqxApplication.class) {
+            List<String> activeTypes = new ArrayList<>();
+            if (bridgeConfig.types().contains("kafka") && bridgeConfig.kafka().enabled()) {
+                activeTypes.add("kafka");
+            }
+            if (bridgeConfig.types().contains("rocketmq") && bridgeConfig.rocketmq().enabled()) {
+                activeTypes.add("rocketmq");
+            }
+            if (bridgeConfig.types().contains("mysql") && bridgeConfig.mysql().enabled()) {
+                activeTypes.add("mysql");
+            }
+            boolean bridgeEnabled = bridgeConfig.enabled() && !activeTypes.isEmpty();
+
+            bridgeProperties.setEnabled(bridgeEnabled);
+            bridgeProperties.setTypes(String.join(",", activeTypes));
+            bridgeProperties.setTopicFilters(String.join(",", bridgeConfig.topicFilters()));
+            bridgeProperties.setAsync(bridgeConfig.asyncEnabled());
+            bridgeProperties.setAsyncQueueCapacity(bridgeConfig.asyncQueueCapacity());
+            bridgeProperties.setAsyncWorkerCount(bridgeConfig.asyncWorkerCount());
+            bridgeProperties.setKafkaBootstrapServers(bridgeConfig.kafka().bootstrapServers());
+            bridgeProperties.setKafkaTopic(bridgeConfig.kafka().topic());
+            bridgeProperties.setKafkaSourceTopicFilters(String.join(",", bridgeConfig.kafka().sourceTopicFilters()));
+            bridgeProperties.setKafkaAcks(bridgeConfig.kafka().acks());
+            bridgeProperties.setKafkaClientId(bridgeConfig.kafka().clientId());
+            bridgeProperties.setKafkaCompressionType(bridgeConfig.kafka().compressionType());
+            bridgeProperties.setRocketmqNameServer(bridgeConfig.rocketmq().nameServer());
+            bridgeProperties.setRocketmqProducerGroup(bridgeConfig.rocketmq().producerGroup());
+            bridgeProperties.setRocketmqTopic(bridgeConfig.rocketmq().topic());
+            bridgeProperties.setRocketmqSourceTopicFilters(String.join(",", bridgeConfig.rocketmq().sourceTopicFilters()));
+            bridgeProperties.setRocketmqSyncSend(bridgeConfig.rocketmq().syncSend());
+            bridgeProperties.setRocketmqTimeoutMs(bridgeConfig.rocketmq().timeoutMs());
+            bridgeProperties.setMysqlDriver(bridgeConfig.mysql().driver());
+            bridgeProperties.setMysqlUrl(bridgeConfig.mysql().url());
+            bridgeProperties.setMysqlUser(bridgeConfig.mysql().user());
+            bridgeProperties.setMysqlPassword(bridgeConfig.mysql().password());
+            bridgeProperties.setMysqlTable(bridgeConfig.mysql().table());
+            bridgeProperties.setMysqlSourceTopicFilters(String.join(",", bridgeConfig.mysql().sourceTopicFilters()));
+            bridgeProperties.setMysqlAutoCreateTable(bridgeConfig.mysql().autoCreateTable());
+
+            reloadableMessageBridge.setDelegate(MessageBridgeFactory.create(bridgeProperties));
+            if (brokerMessageHandler != null) {
+                brokerMessageHandler.updateBridgeSettings(
+                        bridgeEnabled,
+                        String.join(",", bridgeConfig.topicFilters())
+                );
+            }
         }
     }
 
@@ -1327,7 +1428,11 @@ public class JmqxApplication {
             if (item == null || item.isBlank()) {
                 continue;
             }
-            result.add(item.trim().toLowerCase());
+            String normalized = item.trim().toLowerCase();
+            if ("allow_all".equals(normalized)) {
+                continue;
+            }
+            result.add(normalized);
         }
         return result;
     }
