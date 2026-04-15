@@ -1,5 +1,6 @@
 package com.jmqx.bridge;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.logging.Logger;
 
@@ -12,7 +13,7 @@ public class MultiMessageBridge implements MessageBridge {
     private final List<MessageBridge> delegates;
 
     public MultiMessageBridge(List<MessageBridge> delegates) {
-        this.delegates = delegates;
+        this.delegates = new ArrayList<>(delegates);
     }
 
     @Override
@@ -20,8 +21,8 @@ public class MultiMessageBridge implements MessageBridge {
         for (MessageBridge delegate : delegates) {
             try {
                 delegate.publish(message);
-            } catch (Exception e) {
-                LOG.warning("[BRIDGE] delegate publish failed: " + e.getMessage());
+            } catch (Exception exception) {
+                LOG.warning("[BRIDGE] delegate publish failed: " + exception.getMessage());
             }
         }
     }
@@ -31,7 +32,8 @@ public class MultiMessageBridge implements MessageBridge {
         for (MessageBridge delegate : delegates) {
             try {
                 delegate.close();
-            } catch (Exception ignored) {
+            } catch (Exception exception) {
+                LOG.warning("[BRIDGE] delegate close failed: " + exception.getMessage());
             }
         }
     }

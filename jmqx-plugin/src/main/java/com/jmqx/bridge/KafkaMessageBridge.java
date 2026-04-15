@@ -1,7 +1,9 @@
 package com.jmqx.bridge;
 
 import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.Callback;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.header.internals.RecordHeader;
 
 import java.nio.charset.StandardCharsets;
@@ -20,27 +22,23 @@ public class KafkaMessageBridge implements MessageBridge {
 
     public KafkaMessageBridge(BridgeProperties properties) {
         this.topic = properties.getKafkaTopic();
-        Properties producerProperties = new Properties();
-        producerProperties.setProperty("bootstrap.servers", properties.getKafkaBootstrapServers());
-        producerProperties.setProperty("acks", properties.getKafkaAcks());
-        producerProperties.setProperty("client.id", properties.getKafkaClientId());
-        producerProperties.setProperty("compression.type", properties.getKafkaCompressionType());
-        producerProperties.setProperty("key.serializer", "org.apache.kafka.common.serialization.StringSerializer");
-        producerProperties.setProperty("value.serializer", "org.apache.kafka.common.serialization.ByteArraySerializer");
-        this.producer = new KafkaProducer<>(producerProperties);
+        this.producer = new KafkaProducer<>(buildProducerProperties(properties));
     }
 
     @Override
     public void publish(BridgeMessage message) {
         ProducerRecord<String, byte[]> record = new ProducerRecord<>(topic, message.topic(), message.payload());
-        record.headers().add(new RecordHeader("mqtt-topic", toBytes(message.topic())));
-        record.headers().add(new RecordHeader("mqtt-client-id", toBytes(message.clientId())));
-        record.headers().add(new RecordHeader("mqtt-qos", toBytes(Integer.toString(message.qos()))));
-        record.headers().add(new RecordHeader("mqtt-retain", toBytes(Boolean.toString(message.retain()))));
-        record.headers().add(new RecordHeader("mqtt-published-at", toBytes(Long.toString(message.publishedAt()))));
-        producer.send(record, (metadata, exception) -> {
-            if (exception != null) {
-                LOG.warning("[BRIDGE][KAFKA] send failed topic=" + message.topic() + ", error=" + exception.getMessage());
+        addHeader(record, "mqtt-topic", message.topic());
+        addHeader(record, "mqtt-client-id", message.clientId());
+        addHeader(record, "mqtt-qos", Integer.toString(message.qos()));
+        addHeader(record, "mqtt-retain", Boolean.toString(message.retain()));
+        addHeader(record, "mqtt-published-at", Long.toString(message.publishedAt()));
+        producer.send(record, new Callback() {
+            @Override
+            public void onCompletion(RecordMetadata metadata, Exception exception) {
+                if (exception != null) {
+                    LOG.warning("[BRIDGE][KAFKA] send failed topic=" + message.topic() + ", error=" + exception.getMessage());
+                }
             }
         });
     }
@@ -49,6 +47,21 @@ public class KafkaMessageBridge implements MessageBridge {
     public void close() {
         producer.flush();
         producer.close();
+    }
+
+    private static Properties buildProducerProperties(BridgeProperties properties) {
+        Properties result = new Properties();
+        result.setProperty("bootstrap.servers", properties.getKafkaBootstrapServers());
+        result.setProperty("acks", properties.getKafkaAcks());
+        result.setProperty("client.id", properties.getKafkaClientId());
+        result.setProperty("compression.type", properties.getKafkaCompressionType());
+        result.setProperty("key.serializer", "org.apache.kafka.common.serialization.StringSerializer");
+        result.setProperty("value.serializer", "org.apache.kafka.common.serialization.ByteArraySerializer");
+        return result;
+    }
+
+    private static void addHeader(ProducerRecord<String, byte[]> record, String name, String value) {
+        record.headers().add(new RecordHeader(name, toBytes(value)));
     }
 
     private static byte[] toBytes(String value) {

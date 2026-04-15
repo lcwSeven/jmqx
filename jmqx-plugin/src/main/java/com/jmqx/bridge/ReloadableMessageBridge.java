@@ -10,12 +10,12 @@ public class ReloadableMessageBridge implements MessageBridge {
     private volatile MessageBridge delegate;
 
     public ReloadableMessageBridge(MessageBridge delegate) {
-        this.delegate = delegate == null ? MessageBridge.NOOP : delegate;
+        this.delegate = normalizeDelegate(delegate);
     }
 
     public void setDelegate(MessageBridge delegate) {
         MessageBridge previous = this.delegate;
-        this.delegate = delegate == null ? MessageBridge.NOOP : delegate;
+        this.delegate = normalizeDelegate(delegate);
         if (previous != null && previous != this.delegate) {
             previous.close();
         }
@@ -33,5 +33,12 @@ public class ReloadableMessageBridge implements MessageBridge {
         if (current != null) {
             current.close();
         }
+    }
+
+    private static MessageBridge normalizeDelegate(MessageBridge delegate) {
+        if (delegate == null) {
+            return MessageBridge.NOOP;
+        }
+        return delegate;
     }
 }

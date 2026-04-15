@@ -34,12 +34,7 @@ public class RocketMqMessageBridge implements MessageBridge {
     public void publish(BridgeMessage message) {
         try {
             Message mqMessage = new Message(topic, toTag(message.topic()), message.payload());
-            mqMessage.putUserProperty("mqttTopic", nullToEmpty(message.topic()));
-            mqMessage.putUserProperty("clientId", nullToEmpty(message.clientId()));
-            mqMessage.putUserProperty("qos", Integer.toString(message.qos()));
-            mqMessage.putUserProperty("retain", Boolean.toString(message.retain()));
-            mqMessage.putUserProperty("publishedAt", Long.toString(message.publishedAt()));
-            mqMessage.setKeys(nullToEmpty(message.clientId()) + ":" + nullToEmpty(message.topic()));
+            fillMessageProperties(mqMessage, message);
             if (syncSend) {
                 producer.send(mqMessage, timeoutMs);
                 return;
@@ -56,6 +51,17 @@ public class RocketMqMessageBridge implements MessageBridge {
             producer.shutdown();
         } catch (Exception ignored) {
         }
+    }
+
+    private static void fillMessageProperties(Message mqMessage, BridgeMessage message) {
+        String topic = nullToEmpty(message.topic());
+        String clientId = nullToEmpty(message.clientId());
+        mqMessage.putUserProperty("mqttTopic", topic);
+        mqMessage.putUserProperty("clientId", clientId);
+        mqMessage.putUserProperty("qos", Integer.toString(message.qos()));
+        mqMessage.putUserProperty("retain", Boolean.toString(message.retain()));
+        mqMessage.putUserProperty("publishedAt", Long.toString(message.publishedAt()));
+        mqMessage.setKeys(clientId + ":" + topic);
     }
 
     private static String toTag(String mqttTopic) {

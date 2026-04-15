@@ -1,5 +1,7 @@
 package com.jmqx.bridge;
 
+import org.jetbrains.annotations.NotNull;
+
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadFactory;
@@ -18,6 +20,9 @@ import java.util.logging.Logger;
  */
 public class AsyncMessageBridge implements MessageBridge {
     private static final Logger LOG = Logger.getLogger(AsyncMessageBridge.class.getName());
+    private static final int MIN_QUEUE_CAPACITY = 1024;
+    private static final int MIN_WORKER_COUNT = 1;
+    private static final int SHUTDOWN_WAIT_SECONDS = 5;
 
     private final MessageBridge delegate;
     private final ThreadPoolExecutor executor;
@@ -25,16 +30,16 @@ public class AsyncMessageBridge implements MessageBridge {
 
     public AsyncMessageBridge(MessageBridge delegate, int queueCapacity, int workerCount) {
         this.delegate = delegate;
-        int normalizedQueueCapacity = Math.max(queueCapacity, 1024);
-        int normalizedWorkerCount = Math.max(workerCount, 1);
-        ThreadFactory threadFactory = bridgeThreadFactory();
+        int normalizedQueueCapacity = normalizeQueueCapacity(queueCapacity);
+        int normalizedWorkerCount = normalizeWorkerCount(workerCount);
+        ThreadFactory threadFactory = new BridgeThreadFactory();
         this.executor = new ThreadPoolExecutor(
-            normalizedWorkerCount,
-            normalizedWorkerCount,
-            0L,
-            TimeUnit.MILLISECONDS,
-            new ArrayBlockingQueue<>(normalizedQueueCapacity),
-            threadFactory
+                normalizedWorkerCount,
+                normalizedWorkerCount,
+                0L,
+                TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(normalizedQueueCapacity),
+                threadFactory
         );
     }
 
@@ -44,13 +49,7 @@ public class AsyncMessageBridge implements MessageBridge {
             return;
         }
         try {
-            executor.execute(() -> {
-                try {
-                    delegate.publish(message);
-                } catch (Exception exception) {
-                    LOG.warning("[BRIDGE] async publish failed: " + exception.getMessage());
-                }
-            });
+            executor.execute(new PublishTask(delegate, message));
         } catch (RejectedExecutionException exception) {
             LOG.warning("[BRIDGE] async queue is full, drop message topic=" + message.topic());
         }
@@ -63,7 +62,7 @@ public class AsyncMessageBridge implements MessageBridge {
         }
         executor.shutdown();
         try {
-            if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+            if (!executor.awaitTermination(SHUTDOWN_WAIT_SECONDS, TimeUnit.SECONDS)) {
                 LOG.warning("[BRIDGE] async workers shutdown timeout, force stop");
                 executor.shutdownNow();
             }
@@ -74,12 +73,34 @@ public class AsyncMessageBridge implements MessageBridge {
         delegate.close();
     }
 
-    private static ThreadFactory bridgeThreadFactory() {
-        AtomicInteger workerIndex = new AtomicInteger(0);
-        return runnable -> {
+    private static int normalizeQueueCapacity(int queueCapacity) {
+        return Math.max(queueCapacity, MIN_QUEUE_CAPACITY);
+    }
+
+    private static int normalizeWorkerCount(int workerCount) {
+        return Math.max(workerCount, MIN_WORKER_COUNT);
+    }
+
+    private static class BridgeThreadFactory implements ThreadFactory {
+        private final AtomicInteger workerIndex = new AtomicInteger(0);
+
+        @Override
+        public Thread newThread(@NotNull Runnable runnable) {
             Thread thread = new Thread(runnable, "jmqx-bridge-worker-" + workerIndex.getAndIncrement());
             thread.setDaemon(true);
             return thread;
-        };
+        }
+    }
+
+    private record PublishTask(MessageBridge delegate, BridgeMessage message) implements Runnable {
+
+        @Override
+        public void run() {
+            try {
+                delegate.publish(message);
+            } catch (Exception exception) {
+                LOG.warning("[BRIDGE] async publish failed: " + exception.getMessage());
+            }
+        }
     }
 }
