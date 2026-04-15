@@ -7,3 +7,4 @@
 - [集群故障演练手册](05-cluster-failure-drill.md)
 - [管理页面（Admin Console）](06-admin-console.md)
 - [JMQX 功能与使用指南](08-jmqx-overview-and-usage.md)
+- [JMQX 性能优化路线图](09-performance-roadmap.md)

@@ -1,5 +1,7 @@
 package com.jmqx.acl;
 
+import java.util.concurrent.CompletableFuture;
+
 /**
  * @author liucaiwen
  * @date 2026/4/5
@@ -18,5 +20,10 @@ public class ReloadableAclAuthorizer implements AclAuthorizer {
     @Override
     public AclDecision authorize(AclRequest request) {
         return delegate.authorize(request);
+    }
+
+    @Override
+    public CompletableFuture<AclDecision> authorizeAsync(AclRequest request) {
+        return delegate.authorizeAsync(request);
     }
 }

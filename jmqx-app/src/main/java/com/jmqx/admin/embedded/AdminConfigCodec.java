@@ -133,7 +133,7 @@ public final class AdminConfigCodec {
         try {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             DataOutputStream data = new DataOutputStream(out);
-            data.writeByte(2);
+            data.writeByte(3);
             data.writeBoolean(config.enabled());
             writeStringList(data, config.types());
             writeStringList(data, config.topicFilters());
@@ -162,6 +162,11 @@ public final class AdminConfigCodec {
             writeString(data, config.mysql().table());
             writeStringList(data, config.mysql().sourceTopicFilters());
             data.writeBoolean(config.mysql().autoCreateTable());
+            data.writeInt(config.mysql().poolMinIdle());
+            data.writeInt(config.mysql().poolMaxSize());
+            data.writeLong(config.mysql().poolConnectionTimeoutMs());
+            data.writeLong(config.mysql().poolIdleTimeoutMs());
+            data.writeLong(config.mysql().poolMaxLifetimeMs());
             data.flush();
             return out.toByteArray();
         } catch (Exception exception) {
@@ -173,7 +178,7 @@ public final class AdminConfigCodec {
         try {
             DataInputStream in = new DataInputStream(new ByteArrayInputStream(raw));
             int version = in.readByte();
-            if (version == 2) {
+            if (version == 3) {
                 return new EmbeddedAdminStateStore.BridgeConfig(
                         in.readBoolean(),
                         readStringList(in),
@@ -207,13 +212,63 @@ public final class AdminConfigCodec {
                                 readString(in),
                                 readString(in),
                                 readStringList(in),
-                                in.readBoolean()
+                                in.readBoolean(),
+                                in.readInt(),
+                                in.readInt(),
+                                in.readLong(),
+                                in.readLong(),
+                                in.readLong()
+                        )
+                );
+            }
+            if (version == 2) {
+                EmbeddedAdminStateStore.BridgeMysqlConfig defaults = EmbeddedAdminStateStore.BridgeMysqlConfig.defaults();
+                return new EmbeddedAdminStateStore.BridgeConfig(
+                        in.readBoolean(),
+                        readStringList(in),
+                        readStringList(in),
+                        in.readBoolean(),
+                        in.readInt(),
+                        in.readInt(),
+                        new EmbeddedAdminStateStore.BridgeKafkaConfig(
+                                in.readBoolean(),
+                                readString(in),
+                                readString(in),
+                                readStringList(in),
+                                readString(in),
+                                readString(in),
+                                readString(in)
+                        ),
+                        new EmbeddedAdminStateStore.BridgeRocketmqConfig(
+                                in.readBoolean(),
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                readStringList(in),
+                                in.readBoolean(),
+                                in.readInt()
+                        ),
+                        new EmbeddedAdminStateStore.BridgeMysqlConfig(
+                                in.readBoolean(),
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                readStringList(in),
+                                in.readBoolean(),
+                                defaults.poolMinIdle(),
+                                defaults.poolMaxSize(),
+                                defaults.poolConnectionTimeoutMs(),
+                                defaults.poolIdleTimeoutMs(),
+                                defaults.poolMaxLifetimeMs()
                         )
                 );
             }
             if (version != 1) {
                 return null;
             }
+            EmbeddedAdminStateStore.BridgeMysqlConfig defaults = EmbeddedAdminStateStore.BridgeMysqlConfig.defaults();
             return new EmbeddedAdminStateStore.BridgeConfig(
                     in.readBoolean(),
                     readStringList(in),
@@ -247,7 +302,12 @@ public final class AdminConfigCodec {
                             readString(in),
                             readString(in),
                             readStringList(in),
-                            in.readBoolean()
+                            in.readBoolean(),
+                            defaults.poolMinIdle(),
+                            defaults.poolMaxSize(),
+                            defaults.poolConnectionTimeoutMs(),
+                            defaults.poolIdleTimeoutMs(),
+                            defaults.poolMaxLifetimeMs()
                     )
             );
         } catch (Exception ignored) {

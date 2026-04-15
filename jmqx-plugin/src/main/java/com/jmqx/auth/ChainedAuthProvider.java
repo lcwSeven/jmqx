@@ -4,6 +4,7 @@ import com.jmqx.protocol.AuthDecision;
 import com.jmqx.protocol.AuthResult;
 
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * @author liucaiwen
@@ -37,6 +38,11 @@ public class ChainedAuthProvider implements AuthProvider {
     }
 
     @Override
+    public CompletableFuture<AuthResult> authenticateAsync(AuthRequest request) {
+        return authenticateAsync(request, 0);
+    }
+
+    @Override
     public void evictCache(String clientId, String username) {
         if (chain == null || chain.isEmpty()) {
             return;
@@ -58,5 +64,24 @@ public class ChainedAuthProvider implements AuthProvider {
                 provider.close();
             }
         }
+    }
+
+    private CompletableFuture<AuthResult> authenticateAsync(AuthRequest request, int index) {
+        if (chain == null || index >= chain.size()) {
+            return CompletableFuture.completedFuture(AuthResult.deny());
+        }
+        AuthProvider provider = chain.get(index);
+        if (provider == null) {
+            return authenticateAsync(request, index + 1);
+        }
+        return provider.authenticateAsync(request).thenCompose(result -> {
+            if (result == null) {
+                return authenticateAsync(request, index + 1);
+            }
+            if (result.decision() == AuthDecision.ALLOW || result.decision() == AuthDecision.DENY) {
+                return CompletableFuture.completedFuture(result);
+            }
+            return authenticateAsync(request, index + 1);
+        });
     }
 }

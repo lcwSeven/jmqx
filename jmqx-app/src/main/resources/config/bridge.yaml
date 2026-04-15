@@ -37,3 +37,9 @@ jmqx:
       table: jmqx_bridge_message
       sourceTopicFilters: ""
       autoCreateTable: true
+      pool:
+        minIdle: 1
+        maxSize: 8
+        connectionTimeoutMs: 3000
+        idleTimeoutMs: 60000
+        maxLifetimeMs: 600000

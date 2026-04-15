@@ -742,7 +742,12 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
             String password,
             String table,
             List<String> sourceTopicFilters,
-            boolean autoCreateTable
+            boolean autoCreateTable,
+            int poolMinIdle,
+            int poolMaxSize,
+            long poolConnectionTimeoutMs,
+            long poolIdleTimeoutMs,
+            long poolMaxLifetimeMs
     ) {
         public BridgeMysqlConfig {
             driver = driver == null ? "" : driver.trim();
@@ -751,6 +756,14 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
             password = password == null ? "" : password;
             table = normalize(table, "jmqx_bridge_message");
             sourceTopicFilters = normalizeList(sourceTopicFilters);
+            poolMinIdle = Math.max(0, poolMinIdle);
+            poolMaxSize = Math.max(1, poolMaxSize);
+            if (poolMinIdle > poolMaxSize) {
+                poolMinIdle = poolMaxSize;
+            }
+            poolConnectionTimeoutMs = Math.max(250L, poolConnectionTimeoutMs);
+            poolIdleTimeoutMs = Math.max(10_000L, poolIdleTimeoutMs);
+            poolMaxLifetimeMs = Math.max(30_000L, poolMaxLifetimeMs);
         }
 
         public static BridgeMysqlConfig defaults() {
@@ -762,7 +775,12 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
                     "",
                     "jmqx_bridge_message",
                     List.of(),
-                    true
+                    true,
+                    1,
+                    8,
+                    3000,
+                    60_000,
+                    600_000
             );
         }
     }
@@ -783,7 +801,19 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
             long inboundBytes,
             long outboundBytes,
             int connectedClients,
-            long reportTime
+            long reportTime,
+            long connectAuthSuccess,
+            long connectAuthFailure,
+            long connectAuthError,
+            long connectAuthSlow,
+            long connectAuthAvgMs,
+            long connectAuthMaxMs,
+            long publishAclAllow,
+            long publishAclDeny,
+            long publishAclError,
+            long publishAclSlow,
+            long publishAclAvgMs,
+            long publishAclMaxMs
     ) {
     }
 

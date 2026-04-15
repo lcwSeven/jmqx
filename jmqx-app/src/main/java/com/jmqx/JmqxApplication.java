@@ -19,6 +19,7 @@ import com.jmqx.auth.ReloadableAuthProvider;
 import com.jmqx.broker.core.AsyncClusterMessageDispatcher;
 import com.jmqx.broker.core.ClusterMessageDispatcher;
 import com.jmqx.broker.core.MqttBrokerMessageHandler;
+import com.jmqx.broker.core.SecurityPipelineMetrics;
 import com.jmqx.broker.ratelimit.BrokerRateLimitConfig;
 import com.jmqx.bridge.BridgeProperties;
 import com.jmqx.bridge.MessageBridge;
@@ -77,6 +78,7 @@ import java.util.ArrayList;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -227,6 +229,14 @@ public class JmqxApplication {
             }
 
             @Override
+            public CompletableFuture<AuthResult> authenticateAsync(String clientId, String username, String password) {
+                if (isAdminDashboardClient(adminAuthRuntime, clientId, username, password)) {
+                    return CompletableFuture.completedFuture(AuthResult.allow(true));
+                }
+                return authProvider.authenticateAsync(new AuthRequest(clientId, username, password));
+            }
+
+            @Override
             public void evictCache(String clientId, String username) {
                 authProvider.evictCache(clientId, username);
             }
@@ -368,6 +378,10 @@ public class JmqxApplication {
                 )
         );
         brokerMessageHandlerRef.set(brokerMessageHandler);
+        adminReporter.setSecurityMetricsSupplier(() -> {
+            MqttBrokerMessageHandler current = brokerMessageHandlerRef.get();
+            return current == null ? null : current.securityPipelineMetricsSnapshot();
+        });
         applyRuntimeBridgeConfig(context.bridgeProperties(), messageBridge, brokerMessageHandler, initialBridgeConfig);
         // 绑定集群入站消息回调：收到跨节点消息后交给 Broker 路由。
         clusterMessageTransport.setMessageConsumer(
@@ -396,6 +410,7 @@ public class JmqxApplication {
                 context.sessionRegistry(),
                 context.subscriptionRegistry(),
                 connectionMetrics,
+                brokerMessageHandler,
                 adminAuthRuntime,
                 adminStateRepository,
                 builtInDatabaseUserService,
@@ -846,6 +861,8 @@ public class JmqxApplication {
         scheduler.scheduleWithFixedDelay(() -> {
             try {
                 int connectedClients = sessionRegistry == null ? 0 : sessionRegistry.list().size();
+                SecurityPipelineMetrics.Snapshot securitySnapshot =
+                    brokerMessageHandler == null ? null : brokerMessageHandler.securityPipelineMetricsSnapshot();
                 String payload = "{"
                         + "\"clusterId\":\"" + safeJson(safeClusterId) + "\","
                         + "\"nodeId\":\"" + safeJson(nodeId) + "\","
@@ -854,6 +871,18 @@ public class JmqxApplication {
                         + "\"connections\":" + connectedClients + ","
                         + "\"inboundBytes\":" + connectionMetrics.getInboundBytes() + ","
                         + "\"outboundBytes\":" + connectionMetrics.getOutboundBytes() + ","
+                        + "\"connectAuthSuccess\":" + metricValue(securitySnapshot, SecurityPipelineMetrics.Snapshot::connectAuthSuccess) + ","
+                        + "\"connectAuthFailure\":" + metricValue(securitySnapshot, SecurityPipelineMetrics.Snapshot::connectAuthFailure) + ","
+                        + "\"connectAuthError\":" + metricValue(securitySnapshot, SecurityPipelineMetrics.Snapshot::connectAuthError) + ","
+                        + "\"connectAuthSlow\":" + metricValue(securitySnapshot, SecurityPipelineMetrics.Snapshot::connectAuthSlow) + ","
+                        + "\"connectAuthAvgMs\":" + metricValue(securitySnapshot, SecurityPipelineMetrics.Snapshot::connectAuthAvgMs) + ","
+                        + "\"connectAuthMaxMs\":" + metricValue(securitySnapshot, SecurityPipelineMetrics.Snapshot::connectAuthMaxMs) + ","
+                        + "\"publishAclAllow\":" + metricValue(securitySnapshot, SecurityPipelineMetrics.Snapshot::publishAclAllow) + ","
+                        + "\"publishAclDeny\":" + metricValue(securitySnapshot, SecurityPipelineMetrics.Snapshot::publishAclDeny) + ","
+                        + "\"publishAclError\":" + metricValue(securitySnapshot, SecurityPipelineMetrics.Snapshot::publishAclError) + ","
+                        + "\"publishAclSlow\":" + metricValue(securitySnapshot, SecurityPipelineMetrics.Snapshot::publishAclSlow) + ","
+                        + "\"publishAclAvgMs\":" + metricValue(securitySnapshot, SecurityPipelineMetrics.Snapshot::publishAclAvgMs) + ","
+                        + "\"publishAclMaxMs\":" + metricValue(securitySnapshot, SecurityPipelineMetrics.Snapshot::publishAclMaxMs) + ","
                         + "\"timestamp\":" + System.currentTimeMillis()
                         + "}";
                 brokerMessageHandler.publishSystemTopic(topic, payload.getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -861,6 +890,16 @@ public class JmqxApplication {
             }
         }, 1500, Math.max(500, publishIntervalMs), TimeUnit.MILLISECONDS);
         return scheduler;
+    }
+
+    private static long metricValue(
+            SecurityPipelineMetrics.Snapshot snapshot,
+            java.util.function.ToLongFunction<SecurityPipelineMetrics.Snapshot> extractor
+    ) {
+        if (snapshot == null || extractor == null) {
+            return 0L;
+        }
+        return extractor.applyAsLong(snapshot);
     }
 
     private static AdminPanelServer startAdminPanelServer(
@@ -871,6 +910,7 @@ public class JmqxApplication {
             SessionRegistry sessionRegistry,
             SubscriptionRegistry subscriptionRegistry,
             ConnectionMetrics connectionMetrics,
+            MqttBrokerMessageHandler brokerMessageHandler,
             AdminAuthRuntime adminAuthRuntime,
             AdminStateRepository stateRepository,
             BuiltInDatabaseUserService builtInDatabaseUserService,
@@ -898,6 +938,7 @@ public class JmqxApplication {
                 sessionRegistry,
                 subscriptionRegistry,
                 connectionMetrics,
+                () -> brokerMessageHandler == null ? null : brokerMessageHandler.securityPipelineMetricsSnapshot(),
                 stateRepository,
                 initialSecurityConfig,
                 initialClusterConfig,
@@ -1236,7 +1277,12 @@ public class JmqxApplication {
                         bridgeProperties.getMysqlPassword(),
                         bridgeProperties.getMysqlTable(),
                         splitCommaList(bridgeProperties.getMysqlSourceTopicFilters()),
-                        bridgeProperties.isMysqlAutoCreateTable()
+                        bridgeProperties.isMysqlAutoCreateTable(),
+                        bridgeProperties.getMysqlPoolMinIdle(),
+                        bridgeProperties.getMysqlPoolMaxSize(),
+                        bridgeProperties.getMysqlPoolConnectionTimeoutMs(),
+                        bridgeProperties.getMysqlPoolIdleTimeoutMs(),
+                        bridgeProperties.getMysqlPoolMaxLifetimeMs()
                 )
         );
     }
@@ -1375,6 +1421,11 @@ public class JmqxApplication {
             bridgeProperties.setMysqlTable(bridgeConfig.mysql().table());
             bridgeProperties.setMysqlSourceTopicFilters(String.join(",", bridgeConfig.mysql().sourceTopicFilters()));
             bridgeProperties.setMysqlAutoCreateTable(bridgeConfig.mysql().autoCreateTable());
+            bridgeProperties.setMysqlPoolMinIdle(bridgeConfig.mysql().poolMinIdle());
+            bridgeProperties.setMysqlPoolMaxSize(bridgeConfig.mysql().poolMaxSize());
+            bridgeProperties.setMysqlPoolConnectionTimeoutMs(bridgeConfig.mysql().poolConnectionTimeoutMs());
+            bridgeProperties.setMysqlPoolIdleTimeoutMs(bridgeConfig.mysql().poolIdleTimeoutMs());
+            bridgeProperties.setMysqlPoolMaxLifetimeMs(bridgeConfig.mysql().poolMaxLifetimeMs());
 
             reloadableMessageBridge.setDelegate(MessageBridgeFactory.create(bridgeProperties));
             if (brokerMessageHandler != null) {

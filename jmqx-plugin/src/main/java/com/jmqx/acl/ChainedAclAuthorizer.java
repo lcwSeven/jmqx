@@ -1,6 +1,7 @@
 package com.jmqx.acl;
 
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * @author liucaiwen
@@ -29,5 +30,26 @@ public class ChainedAclAuthorizer implements AclAuthorizer {
             }
         }
         return defaultAllow ? AclDecision.ALLOW : AclDecision.DENY;
+    }
+
+    @Override
+    public CompletableFuture<AclDecision> authorizeAsync(AclRequest request) {
+        return authorizeAsync(request, 0);
+    }
+
+    private CompletableFuture<AclDecision> authorizeAsync(AclRequest request, int index) {
+        if (chain == null || index >= chain.size()) {
+            return CompletableFuture.completedFuture(defaultAllow ? AclDecision.ALLOW : AclDecision.DENY);
+        }
+        AclAuthorizer authorizer = chain.get(index);
+        if (authorizer == null) {
+            return authorizeAsync(request, index + 1);
+        }
+        return authorizer.authorizeAsync(request).thenCompose(decision -> {
+            if (decision == AclDecision.ALLOW || decision == AclDecision.DENY) {
+                return CompletableFuture.completedFuture(decision);
+            }
+            return authorizeAsync(request, index + 1);
+        });
     }
 }

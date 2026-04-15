@@ -1,6 +1,8 @@
 package com.jmqx.auth;
 
 import com.jmqx.protocol.AuthResult;
+import okhttp3.Call;
+import okhttp3.Callback;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
@@ -13,6 +15,7 @@ import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Semaphore;
@@ -58,42 +61,66 @@ public class HttpAuthProvider implements AuthProvider {
 
     @Override
     public AuthResult authenticateResult(AuthRequest request) {
+        try {
+            return authenticateAsync(request).get();
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            return AuthResult.deny();
+        } catch (Exception exception) {
+            LOG.log(Level.WARNING, "HTTP auth request failed: " + exception.getMessage(), exception);
+            return AuthResult.deny();
+        }
+    }
+
+    @Override
+    public CompletableFuture<AuthResult> authenticateAsync(AuthRequest request) {
+        CompletableFuture<AuthResult> future = new CompletableFuture<>();
         boolean acquired = false;
         try {
             pipelineSemaphore.acquire();
             acquired = true;
             if (!rateLimiter.tryAcquire()) {
                 LOG.fine(() -> "[AUTH-HTTP] request rejected by rate limiter, endpoint=" + endpoint);
-                return AuthResult.deny();
+                pipelineSemaphore.release();
+                return CompletableFuture.completedFuture(AuthResult.deny());
             }
             String body = renderTemplate(bodyTemplate, request);
             Request requestObject = buildRequest(body);
-            try (Response response = httpClient.newCall(requestObject).execute()) {
-                String responseBody = response.body() == null ? "" : response.body().string().trim().toLowerCase();
-                if (responseBody.contains("\"allow\":true") || "allow".equals(responseBody) || "true".equals(responseBody)) {
-                    return AuthResult.allow();
+            httpClient.newCall(requestObject).enqueue(new Callback() {
+                @Override
+                public void onFailure(Call call, IOException e) {
+                    LOG.log(Level.WARNING, "HTTP auth request failed: " + e.getMessage(), e);
+                    pipelineSemaphore.release();
+                    future.complete(AuthResult.deny());
                 }
-                if (responseBody.contains("\"notfound\":true")
-                    || responseBody.contains("\"not_found\":true")
-                    || "not_found".equals(responseBody)
-                    || "notfound".equals(responseBody)) {
-                    return AuthResult.notFound();
+
+                @Override
+                public void onResponse(Call call, Response response) {
+                    try (response) {
+                        future.complete(parseAuthResult(response));
+                    } catch (Exception e) {
+                        LOG.log(Level.WARNING, "HTTP auth response parse failed: " + e.getMessage(), e);
+                        future.complete(AuthResult.deny());
+                    } finally {
+                        pipelineSemaphore.release();
+                    }
                 }
-                return AuthResult.deny();
-            }
-        } catch (IOException | InterruptedException e) {
-            if (e instanceof InterruptedException) {
-                Thread.currentThread().interrupt();
-            }
-            LOG.log(Level.WARNING, "HTTP auth request failed: " + e.getMessage(), e);
-            return AuthResult.deny();
-        } catch (RuntimeException e) {
-            LOG.log(Level.WARNING, "HTTP auth runtime error: " + e.getMessage(), e);
-            return AuthResult.deny();
-        } finally {
+            });
+            return future;
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
             if (acquired) {
                 pipelineSemaphore.release();
             }
+            future.complete(AuthResult.deny());
+            return future;
+        } catch (RuntimeException exception) {
+            if (acquired) {
+                pipelineSemaphore.release();
+            }
+            LOG.log(Level.WARNING, "HTTP auth runtime error: " + exception.getMessage(), exception);
+            future.complete(AuthResult.deny());
+            return future;
         }
     }
 
@@ -187,6 +214,20 @@ public class HttpAuthProvider implements AuthProvider {
             return "";
         }
         return value.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
+    private static AuthResult parseAuthResult(Response response) throws IOException {
+        String responseBody = response.body() == null ? "" : response.body().string().trim().toLowerCase();
+        if (responseBody.contains("\"allow\":true") || "allow".equals(responseBody) || "true".equals(responseBody)) {
+            return AuthResult.allow();
+        }
+        if (responseBody.contains("\"notfound\":true")
+            || responseBody.contains("\"not_found\":true")
+            || "not_found".equals(responseBody)
+            || "notfound".equals(responseBody)) {
+            return AuthResult.notFound();
+        }
+        return AuthResult.deny();
     }
 
     private static final class RequestRateLimiter {

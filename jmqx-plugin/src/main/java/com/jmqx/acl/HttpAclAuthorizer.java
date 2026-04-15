@@ -1,5 +1,7 @@
 package com.jmqx.acl;
 
+import okhttp3.Call;
+import okhttp3.Callback;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
@@ -10,6 +12,7 @@ import java.io.IOException;
 import java.net.URI;
 import java.time.Duration;
 import java.util.Locale;
+import java.util.concurrent.CompletableFuture;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -37,28 +40,48 @@ public class HttpAclAuthorizer implements AclAuthorizer {
     @Override
     public AclDecision authorize(AclRequest request) {
         try {
+            return authorizeAsync(request).get();
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            return AclDecision.NOT_FOUND;
+        } catch (Exception exception) {
+            LOG.log(Level.WARNING, "HTTP ACL request failed: " + exception.getMessage(), exception);
+            return AclDecision.NOT_FOUND;
+        }
+    }
+
+    @Override
+    public CompletableFuture<AclDecision> authorizeAsync(AclRequest request) {
+        CompletableFuture<AclDecision> future = new CompletableFuture<>();
+        try {
             String body = renderTemplate(bodyTemplate, request);
             Request httpRequest = new Request.Builder()
                 .url(endpoint.toString())
                 .header("Content-Type", "application/json")
                 .post(RequestBody.create(body, JSON_MEDIA_TYPE))
                 .build();
-            try (Response response = httpClient.newCall(httpRequest).execute()) {
-                String responseBody = response.body() == null ? "" : response.body().string().trim().toLowerCase();
-                if (responseBody.contains("\"allow\":true") || "allow".equals(responseBody) || "true".equals(responseBody)) {
-                    return AclDecision.ALLOW;
+            httpClient.newCall(httpRequest).enqueue(new Callback() {
+                @Override
+                public void onFailure(Call call, IOException e) {
+                    LOG.log(Level.WARNING, "HTTP ACL request failed: " + e.getMessage(), e);
+                    future.complete(AclDecision.NOT_FOUND);
                 }
-                if (responseBody.contains("\"allow\":false") || "deny".equals(responseBody) || "false".equals(responseBody)) {
-                    return AclDecision.DENY;
+
+                @Override
+                public void onResponse(Call call, Response response) {
+                    try (response) {
+                        future.complete(parseAclDecision(response));
+                    } catch (Exception e) {
+                        LOG.log(Level.WARNING, "HTTP ACL response parse failed: " + e.getMessage(), e);
+                        future.complete(AclDecision.NOT_FOUND);
+                    }
                 }
-                return AclDecision.NOT_FOUND;
-            }
-        } catch (IOException e) {
-            LOG.log(Level.WARNING, "HTTP ACL request failed: " + e.getMessage(), e);
-            return AclDecision.NOT_FOUND;
-        } catch (RuntimeException e) {
-            LOG.log(Level.WARNING, "HTTP ACL runtime error: " + e.getMessage(), e);
-            return AclDecision.NOT_FOUND;
+            });
+            return future;
+        } catch (RuntimeException exception) {
+            LOG.log(Level.WARNING, "HTTP ACL runtime error: " + exception.getMessage(), exception);
+            future.complete(AclDecision.NOT_FOUND);
+            return future;
         }
     }
 
@@ -97,5 +120,16 @@ public class HttpAclAuthorizer implements AclAuthorizer {
                 .replace("\\${username}", "${username}")
                 .replace("\\${topic}", "${topic}")
                 .replace("\\${action}", "${action}");
+    }
+
+    private static AclDecision parseAclDecision(Response response) throws IOException {
+        String responseBody = response.body() == null ? "" : response.body().string().trim().toLowerCase();
+        if (responseBody.contains("\"allow\":true") || "allow".equals(responseBody) || "true".equals(responseBody)) {
+            return AclDecision.ALLOW;
+        }
+        if (responseBody.contains("\"allow\":false") || "deny".equals(responseBody) || "false".equals(responseBody)) {
+            return AclDecision.DENY;
+        }
+        return AclDecision.NOT_FOUND;
     }
 }

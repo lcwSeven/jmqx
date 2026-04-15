@@ -1,5 +1,6 @@
 package com.jmqx.admin.embedded;
 
+import com.jmqx.broker.core.SecurityPipelineMetrics;
 import com.jmqx.router.SubscriptionRegistry;
 import com.jmqx.session.ClientSession;
 import com.jmqx.session.SessionRegistry;
@@ -36,6 +37,7 @@ import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.concurrent.Executors;
+import java.util.function.Supplier;
 import java.util.logging.Logger;
 
 /**
@@ -62,6 +64,7 @@ public class AdminPanelServer {
     private final SessionRegistry sessionRegistry;
     private final SubscriptionRegistry subscriptionRegistry;
     private final ConnectionMetrics connectionMetrics;
+    private final Supplier<SecurityPipelineMetrics.Snapshot> securityMetricsSupplier;
     private final AdminStateRepository stateStore;
     private final BuiltInDatabaseUserService builtInDatabaseUserService;
     private final SecurityConfigUpdater securityConfigUpdater;
@@ -85,6 +88,7 @@ public class AdminPanelServer {
                             SessionRegistry sessionRegistry,
                             SubscriptionRegistry subscriptionRegistry,
                             ConnectionMetrics connectionMetrics,
+                            Supplier<SecurityPipelineMetrics.Snapshot> securityMetricsSupplier,
                             AdminStateRepository stateStore,
                             EmbeddedAdminStateStore.SecurityConfig initialSecurityConfig,
                             EmbeddedAdminStateStore.ClusterConfig initialClusterConfig,
@@ -110,6 +114,7 @@ public class AdminPanelServer {
         this.sessionRegistry = sessionRegistry;
         this.subscriptionRegistry = subscriptionRegistry;
         this.connectionMetrics = connectionMetrics;
+        this.securityMetricsSupplier = securityMetricsSupplier;
         this.stateStore = stateStore == null ? new EmbeddedAdminStateStore() : stateStore;
         this.builtInDatabaseUserService = builtInDatabaseUserService == null ? new BuiltInDatabaseUserService() : builtInDatabaseUserService;
         if (!this.stateStore.hasAdminAuthConfig()) {
@@ -635,6 +640,12 @@ public class AdminPanelServer {
         int connections = 0;
         long inbound = 0;
         long outbound = 0;
+        long connectAuthFailure = 0;
+        long connectAuthError = 0;
+        long publishAclDeny = 0;
+        long publishAclError = 0;
+        long connectAuthMaxMs = 0;
+        long publishAclMaxMs = 0;
         StringBuilder nodeJson = new StringBuilder("[");
         for (int i = 0; i < nodes.size(); i++) {
             EmbeddedAdminStateStore.NodeMetrics node = nodes.get(i);
@@ -644,6 +655,12 @@ public class AdminPanelServer {
             connections += Math.max(0, node.connectedClients());
             inbound += Math.max(0, node.inboundBytes());
             outbound += Math.max(0, node.outboundBytes());
+            connectAuthFailure += Math.max(0L, node.connectAuthFailure());
+            connectAuthError += Math.max(0L, node.connectAuthError());
+            publishAclDeny += Math.max(0L, node.publishAclDeny());
+            publishAclError += Math.max(0L, node.publishAclError());
+            connectAuthMaxMs = Math.max(connectAuthMaxMs, Math.max(0L, node.connectAuthMaxMs()));
+            publishAclMaxMs = Math.max(publishAclMaxMs, Math.max(0L, node.publishAclMaxMs()));
             nodeJson.append(toNodeMetricsJson(node));
         }
         nodeJson.append("]");
@@ -652,6 +669,12 @@ public class AdminPanelServer {
                 + "\"totalConnections\":" + connections + ","
                 + "\"totalInboundBytes\":" + inbound + ","
                 + "\"totalOutboundBytes\":" + outbound + ","
+                + "\"totalConnectAuthFailure\":" + connectAuthFailure + ","
+                + "\"totalConnectAuthError\":" + connectAuthError + ","
+                + "\"totalPublishAclDeny\":" + publishAclDeny + ","
+                + "\"totalPublishAclError\":" + publishAclError + ","
+                + "\"maxConnectAuthMs\":" + connectAuthMaxMs + ","
+                + "\"maxPublishAclMs\":" + publishAclMaxMs + ","
                 + "\"nodes\":" + nodeJson
                 + "}";
     }
@@ -660,6 +683,8 @@ public class AdminPanelServer {
         int connections = sessionRegistry == null ? 0 : sessionRegistry.list().size();
         long inbound = connectionMetrics == null ? 0 : connectionMetrics.getInboundBytes();
         long outbound = connectionMetrics == null ? 0 : connectionMetrics.getOutboundBytes();
+        SecurityPipelineMetrics.Snapshot securityMetrics =
+                securityMetricsSupplier == null ? null : securityMetricsSupplier.get();
         EmbeddedAdminStateStore.NodeMetrics localMetrics = new EmbeddedAdminStateStore.NodeMetrics(
                 nodeId,
                 nodeIp,
@@ -667,7 +692,19 @@ public class AdminPanelServer {
                 inbound,
                 outbound,
                 connections,
-                System.currentTimeMillis()
+                System.currentTimeMillis(),
+                securityMetricValue(securityMetrics, SecurityPipelineMetrics.Snapshot::connectAuthSuccess),
+                securityMetricValue(securityMetrics, SecurityPipelineMetrics.Snapshot::connectAuthFailure),
+                securityMetricValue(securityMetrics, SecurityPipelineMetrics.Snapshot::connectAuthError),
+                securityMetricValue(securityMetrics, SecurityPipelineMetrics.Snapshot::connectAuthSlow),
+                securityMetricValue(securityMetrics, SecurityPipelineMetrics.Snapshot::connectAuthAvgMs),
+                securityMetricValue(securityMetrics, SecurityPipelineMetrics.Snapshot::connectAuthMaxMs),
+                securityMetricValue(securityMetrics, SecurityPipelineMetrics.Snapshot::publishAclAllow),
+                securityMetricValue(securityMetrics, SecurityPipelineMetrics.Snapshot::publishAclDeny),
+                securityMetricValue(securityMetrics, SecurityPipelineMetrics.Snapshot::publishAclError),
+                securityMetricValue(securityMetrics, SecurityPipelineMetrics.Snapshot::publishAclSlow),
+                securityMetricValue(securityMetrics, SecurityPipelineMetrics.Snapshot::publishAclAvgMs),
+                securityMetricValue(securityMetrics, SecurityPipelineMetrics.Snapshot::publishAclMaxMs)
         );
         stateStore.upsertNodeMetrics(clusterId, localMetrics);
     }
@@ -892,7 +929,12 @@ public class AdminPanelServer {
                 + "\"password\":\"" + escape(config.password()) + "\","
                 + "\"table\":\"" + escape(config.table()) + "\","
                 + "\"sourceTopicFilters\":" + toStringArray(config.sourceTopicFilters()) + ","
-                + "\"autoCreateTable\":" + config.autoCreateTable()
+                + "\"autoCreateTable\":" + config.autoCreateTable() + ","
+                + "\"poolMinIdle\":" + config.poolMinIdle() + ","
+                + "\"poolMaxSize\":" + config.poolMaxSize() + ","
+                + "\"poolConnectionTimeoutMs\":" + config.poolConnectionTimeoutMs() + ","
+                + "\"poolIdleTimeoutMs\":" + config.poolIdleTimeoutMs() + ","
+                + "\"poolMaxLifetimeMs\":" + config.poolMaxLifetimeMs()
                 + "}";
     }
 
@@ -1005,6 +1047,18 @@ public class AdminPanelServer {
                 + "\"inboundBytes\":" + metrics.inboundBytes() + ","
                 + "\"outboundBytes\":" + metrics.outboundBytes() + ","
                 + "\"connectedClients\":" + metrics.connectedClients() + ","
+                + "\"connectAuthSuccess\":" + metrics.connectAuthSuccess() + ","
+                + "\"connectAuthFailure\":" + metrics.connectAuthFailure() + ","
+                + "\"connectAuthError\":" + metrics.connectAuthError() + ","
+                + "\"connectAuthSlow\":" + metrics.connectAuthSlow() + ","
+                + "\"connectAuthAvgMs\":" + metrics.connectAuthAvgMs() + ","
+                + "\"connectAuthMaxMs\":" + metrics.connectAuthMaxMs() + ","
+                + "\"publishAclAllow\":" + metrics.publishAclAllow() + ","
+                + "\"publishAclDeny\":" + metrics.publishAclDeny() + ","
+                + "\"publishAclError\":" + metrics.publishAclError() + ","
+                + "\"publishAclSlow\":" + metrics.publishAclSlow() + ","
+                + "\"publishAclAvgMs\":" + metrics.publishAclAvgMs() + ","
+                + "\"publishAclMaxMs\":" + metrics.publishAclMaxMs() + ","
                 + "\"lastReportTime\":" + metrics.reportTime()
                 + "}";
     }
@@ -1210,6 +1264,18 @@ public class AdminPanelServer {
         long outbound = Math.max(0L, extractLong(body, "outboundBytes", 0L));
         int connections = Math.max(0, extractInt(body, "connectedClients", 0));
         long reportTime = extractLong(body, "reportTime", System.currentTimeMillis());
+        long connectAuthSuccess = Math.max(0L, extractLong(body, "connectAuthSuccess", 0L));
+        long connectAuthFailure = Math.max(0L, extractLong(body, "connectAuthFailure", 0L));
+        long connectAuthError = Math.max(0L, extractLong(body, "connectAuthError", 0L));
+        long connectAuthSlow = Math.max(0L, extractLong(body, "connectAuthSlow", 0L));
+        long connectAuthAvgMs = Math.max(0L, extractLong(body, "connectAuthAvgMs", 0L));
+        long connectAuthMaxMs = Math.max(0L, extractLong(body, "connectAuthMaxMs", 0L));
+        long publishAclAllow = Math.max(0L, extractLong(body, "publishAclAllow", 0L));
+        long publishAclDeny = Math.max(0L, extractLong(body, "publishAclDeny", 0L));
+        long publishAclError = Math.max(0L, extractLong(body, "publishAclError", 0L));
+        long publishAclSlow = Math.max(0L, extractLong(body, "publishAclSlow", 0L));
+        long publishAclAvgMs = Math.max(0L, extractLong(body, "publishAclAvgMs", 0L));
+        long publishAclMaxMs = Math.max(0L, extractLong(body, "publishAclMaxMs", 0L));
 
         String role = "";
         for (EmbeddedAdminStateStore.NodeMetrics current : stateStore.listNodeMetrics(clusterId)) {
@@ -1231,8 +1297,30 @@ public class AdminPanelServer {
                 inbound,
                 outbound,
                 connections,
-                reportTime
+                reportTime,
+                connectAuthSuccess,
+                connectAuthFailure,
+                connectAuthError,
+                connectAuthSlow,
+                connectAuthAvgMs,
+                connectAuthMaxMs,
+                publishAclAllow,
+                publishAclDeny,
+                publishAclError,
+                publishAclSlow,
+                publishAclAvgMs,
+                publishAclMaxMs
         );
+    }
+
+    private static long securityMetricValue(
+            SecurityPipelineMetrics.Snapshot snapshot,
+            java.util.function.ToLongFunction<SecurityPipelineMetrics.Snapshot> extractor
+    ) {
+        if (snapshot == null || extractor == null) {
+            return 0L;
+        }
+        return Math.max(0L, extractor.applyAsLong(snapshot));
     }
 
     private EmbeddedAdminStateStore.ClientSnapshot parseClientSnapshot(String body) {
@@ -1470,7 +1558,12 @@ public class AdminPanelServer {
                 password == null ? current.password() : password,
                 normalize(extractString(segment, "table"), current.table()),
                 filters,
-                extractBoolean(segment, "autoCreateTable", current.autoCreateTable())
+                extractBoolean(segment, "autoCreateTable", current.autoCreateTable()),
+                extractInt(segment, "poolMinIdle", current.poolMinIdle()),
+                extractInt(segment, "poolMaxSize", current.poolMaxSize()),
+                extractLong(segment, "poolConnectionTimeoutMs", current.poolConnectionTimeoutMs()),
+                extractLong(segment, "poolIdleTimeoutMs", current.poolIdleTimeoutMs()),
+                extractLong(segment, "poolMaxLifetimeMs", current.poolMaxLifetimeMs())
         );
     }
 

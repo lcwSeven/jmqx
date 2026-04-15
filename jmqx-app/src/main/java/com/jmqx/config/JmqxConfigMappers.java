@@ -148,6 +148,11 @@ public final class JmqxConfigMappers {
         properties.setMysqlTable(config.getString("jmqx.bridge.mysql.table", properties.getMysqlTable()));
         properties.setMysqlSourceTopicFilters(config.getString("jmqx.bridge.mysql.sourceTopicFilters", properties.getMysqlSourceTopicFilters()));
         properties.setMysqlAutoCreateTable(config.getBoolean("jmqx.bridge.mysql.autoCreateTable", properties.isMysqlAutoCreateTable()));
+        properties.setMysqlPoolMinIdle(config.getInt("jmqx.bridge.mysql.pool.minIdle", properties.getMysqlPoolMinIdle()));
+        properties.setMysqlPoolMaxSize(config.getInt("jmqx.bridge.mysql.pool.maxSize", properties.getMysqlPoolMaxSize()));
+        properties.setMysqlPoolConnectionTimeoutMs(config.getLong("jmqx.bridge.mysql.pool.connectionTimeoutMs", properties.getMysqlPoolConnectionTimeoutMs()));
+        properties.setMysqlPoolIdleTimeoutMs(config.getLong("jmqx.bridge.mysql.pool.idleTimeoutMs", properties.getMysqlPoolIdleTimeoutMs()));
+        properties.setMysqlPoolMaxLifetimeMs(config.getLong("jmqx.bridge.mysql.pool.maxLifetimeMs", properties.getMysqlPoolMaxLifetimeMs()));
         return properties;
     }
 

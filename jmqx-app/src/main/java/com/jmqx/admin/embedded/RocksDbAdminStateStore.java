@@ -532,7 +532,7 @@ public class RocksDbAdminStateStore implements AdminStateRepository {
         try {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             DataOutputStream data = new DataOutputStream(out);
-            data.writeByte(2);
+            data.writeByte(3);
             data.writeBoolean(config.enabled());
             writeStringList(data, config.types());
             writeStringList(data, config.topicFilters());
@@ -561,6 +561,11 @@ public class RocksDbAdminStateStore implements AdminStateRepository {
             writeString(data, config.mysql().table());
             writeStringList(data, config.mysql().sourceTopicFilters());
             data.writeBoolean(config.mysql().autoCreateTable());
+            data.writeInt(config.mysql().poolMinIdle());
+            data.writeInt(config.mysql().poolMaxSize());
+            data.writeLong(config.mysql().poolConnectionTimeoutMs());
+            data.writeLong(config.mysql().poolIdleTimeoutMs());
+            data.writeLong(config.mysql().poolMaxLifetimeMs());
             data.flush();
             return out.toByteArray();
         } catch (Exception exception) {
@@ -572,7 +577,7 @@ public class RocksDbAdminStateStore implements AdminStateRepository {
         try {
             DataInputStream in = new DataInputStream(new ByteArrayInputStream(raw));
             int version = in.readByte();
-            if (version == 2) {
+            if (version == 3) {
                 return new EmbeddedAdminStateStore.BridgeConfig(
                         in.readBoolean(),
                         readStringList(in),
@@ -606,13 +611,63 @@ public class RocksDbAdminStateStore implements AdminStateRepository {
                                 readString(in),
                                 readString(in),
                                 readStringList(in),
-                                in.readBoolean()
+                                in.readBoolean(),
+                                in.readInt(),
+                                in.readInt(),
+                                in.readLong(),
+                                in.readLong(),
+                                in.readLong()
+                        )
+                );
+            }
+            if (version == 2) {
+                EmbeddedAdminStateStore.BridgeMysqlConfig defaults = EmbeddedAdminStateStore.BridgeMysqlConfig.defaults();
+                return new EmbeddedAdminStateStore.BridgeConfig(
+                        in.readBoolean(),
+                        readStringList(in),
+                        readStringList(in),
+                        in.readBoolean(),
+                        in.readInt(),
+                        in.readInt(),
+                        new EmbeddedAdminStateStore.BridgeKafkaConfig(
+                                in.readBoolean(),
+                                readString(in),
+                                readString(in),
+                                readStringList(in),
+                                readString(in),
+                                readString(in),
+                                readString(in)
+                        ),
+                        new EmbeddedAdminStateStore.BridgeRocketmqConfig(
+                                in.readBoolean(),
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                readStringList(in),
+                                in.readBoolean(),
+                                in.readInt()
+                        ),
+                        new EmbeddedAdminStateStore.BridgeMysqlConfig(
+                                in.readBoolean(),
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                readStringList(in),
+                                in.readBoolean(),
+                                defaults.poolMinIdle(),
+                                defaults.poolMaxSize(),
+                                defaults.poolConnectionTimeoutMs(),
+                                defaults.poolIdleTimeoutMs(),
+                                defaults.poolMaxLifetimeMs()
                         )
                 );
             }
             if (version != 1) {
                 return null;
             }
+            EmbeddedAdminStateStore.BridgeMysqlConfig defaults = EmbeddedAdminStateStore.BridgeMysqlConfig.defaults();
             return new EmbeddedAdminStateStore.BridgeConfig(
                     in.readBoolean(),
                     readStringList(in),
@@ -646,7 +701,12 @@ public class RocksDbAdminStateStore implements AdminStateRepository {
                             readString(in),
                             readString(in),
                             readStringList(in),
-                            in.readBoolean()
+                            in.readBoolean(),
+                            defaults.poolMinIdle(),
+                            defaults.poolMaxSize(),
+                            defaults.poolConnectionTimeoutMs(),
+                            defaults.poolIdleTimeoutMs(),
+                            defaults.poolMaxLifetimeMs()
                     )
             );
         } catch (Exception ignored) {
@@ -1226,7 +1286,7 @@ public class RocksDbAdminStateStore implements AdminStateRepository {
         try {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             DataOutputStream data = new DataOutputStream(out);
-            data.writeByte(1);
+            data.writeByte(2);
             writeString(data, metrics.nodeId());
             writeString(data, metrics.nodeIp());
             writeString(data, metrics.role());
@@ -1234,6 +1294,18 @@ public class RocksDbAdminStateStore implements AdminStateRepository {
             data.writeLong(metrics.outboundBytes());
             data.writeInt(metrics.connectedClients());
             data.writeLong(metrics.reportTime());
+            data.writeLong(metrics.connectAuthSuccess());
+            data.writeLong(metrics.connectAuthFailure());
+            data.writeLong(metrics.connectAuthError());
+            data.writeLong(metrics.connectAuthSlow());
+            data.writeLong(metrics.connectAuthAvgMs());
+            data.writeLong(metrics.connectAuthMaxMs());
+            data.writeLong(metrics.publishAclAllow());
+            data.writeLong(metrics.publishAclDeny());
+            data.writeLong(metrics.publishAclError());
+            data.writeLong(metrics.publishAclSlow());
+            data.writeLong(metrics.publishAclAvgMs());
+            data.writeLong(metrics.publishAclMaxMs());
             data.flush();
             return out.toByteArray();
         } catch (Exception exception) {
@@ -1244,16 +1316,59 @@ public class RocksDbAdminStateStore implements AdminStateRepository {
     private static EmbeddedAdminStateStore.NodeMetrics decodeNodeMetrics(byte[] raw) {
         try {
             DataInputStream in = new DataInputStream(new ByteArrayInputStream(raw));
-            if (in.readByte() != 1) {
+            int version = in.readByte();
+            if (version != 1 && version != 2) {
                 return null;
             }
+            String nodeId = readString(in);
+            String nodeIp = readString(in);
+            String role = readString(in);
+            long inboundBytes = in.readLong();
+            long outboundBytes = in.readLong();
+            int connectedClients = in.readInt();
+            long reportTime = in.readLong();
+            if (version == 1) {
+                return new EmbeddedAdminStateStore.NodeMetrics(
+                        nodeId,
+                        nodeIp,
+                        role,
+                        inboundBytes,
+                        outboundBytes,
+                        connectedClients,
+                        reportTime,
+                        0L,
+                        0L,
+                        0L,
+                        0L,
+                        0L,
+                        0L,
+                        0L,
+                        0L,
+                        0L,
+                        0L,
+                        0L,
+                        0L
+                );
+            }
             return new EmbeddedAdminStateStore.NodeMetrics(
-                    readString(in),
-                    readString(in),
-                    readString(in),
+                    nodeId,
+                    nodeIp,
+                    role,
+                    inboundBytes,
+                    outboundBytes,
+                    connectedClients,
+                    reportTime,
                     in.readLong(),
                     in.readLong(),
-                    in.readInt(),
+                    in.readLong(),
+                    in.readLong(),
+                    in.readLong(),
+                    in.readLong(),
+                    in.readLong(),
+                    in.readLong(),
+                    in.readLong(),
+                    in.readLong(),
+                    in.readLong(),
                     in.readLong()
             );
         } catch (Exception ignored) {

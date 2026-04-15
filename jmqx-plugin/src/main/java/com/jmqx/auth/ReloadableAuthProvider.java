@@ -2,6 +2,8 @@ package com.jmqx.auth;
 
 import com.jmqx.protocol.AuthResult;
 
+import java.util.concurrent.CompletableFuture;
+
 /**
  * @author liucaiwen
  * @date 2026/4/5
@@ -24,6 +26,11 @@ public class ReloadableAuthProvider implements AuthProvider {
     @Override
     public AuthResult authenticateResult(AuthRequest request) {
         return delegate.authenticateResult(request);
+    }
+
+    @Override
+    public CompletableFuture<AuthResult> authenticateAsync(AuthRequest request) {
+        return delegate.authenticateAsync(request);
     }
 
     @Override

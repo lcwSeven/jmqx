@@ -31,7 +31,18 @@ export function createInitialState() {
         mqttClient: null,
         realtimeNodeMap: {},
         refreshClientsTimer: null,
-        overview: { totalConnections: 0, totalInboundBytes: 0, totalOutboundBytes: 0, nodes: [] },
+        overview: {
+            totalConnections: 0,
+            totalInboundBytes: 0,
+            totalOutboundBytes: 0,
+            totalConnectAuthFailure: 0,
+            totalConnectAuthError: 0,
+            totalPublishAclDeny: 0,
+            totalPublishAclError: 0,
+            maxConnectAuthMs: 0,
+            maxPublishAclMs: 0,
+            nodes: []
+        },
         clients: { records: [], total: 0, pageNo: 1, pageSize: 20 },
         search: { clientId: "", userName: "", pageNo: 1, pageSize: 20 },
         selectedClient: null,
@@ -159,7 +170,12 @@ export function createInitialState() {
                 password: "",
                 table: "jmqx_bridge_message",
                 sourceTopicFilters: [],
-                autoCreateTable: true
+                autoCreateTable: true,
+                poolMinIdle: 1,
+                poolMaxSize: 8,
+                poolConnectionTimeoutMs: 3000,
+                poolIdleTimeoutMs: 60000,
+                poolMaxLifetimeMs: 600000
             }
         },
         bridgeTypeOptions: [
@@ -203,7 +219,12 @@ export function createInitialState() {
                 password: "",
                 table: "jmqx_bridge_message",
                 sourceTopicFilters: [],
-                autoCreateTable: true
+                autoCreateTable: true,
+                poolMinIdle: 1,
+                poolMaxSize: 8,
+                poolConnectionTimeoutMs: 3000,
+                poolIdleTimeoutMs: 60000,
+                poolMaxLifetimeMs: 600000
             }
         },
         aclCreateMode: false,

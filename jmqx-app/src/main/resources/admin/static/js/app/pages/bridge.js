@@ -59,7 +59,12 @@ export const bridgePageMethods = {
                 password: config.mysql?.password || "",
                 table: config.mysql?.table || "jmqx_bridge_message",
                 sourceTopicFilters: Array.isArray(config.mysql?.sourceTopicFilters) ? config.mysql.sourceTopicFilters : this.toLineList(config.mysql?.sourceTopicFilters || ""),
-                autoCreateTable: config.mysql?.autoCreateTable !== false
+                autoCreateTable: config.mysql?.autoCreateTable !== false,
+                poolMinIdle: Number(config.mysql?.poolMinIdle || 1),
+                poolMaxSize: Number(config.mysql?.poolMaxSize || 8),
+                poolConnectionTimeoutMs: Number(config.mysql?.poolConnectionTimeoutMs || 3000),
+                poolIdleTimeoutMs: Number(config.mysql?.poolIdleTimeoutMs || 60000),
+                poolMaxLifetimeMs: Number(config.mysql?.poolMaxLifetimeMs || 600000)
             }
         };
     },

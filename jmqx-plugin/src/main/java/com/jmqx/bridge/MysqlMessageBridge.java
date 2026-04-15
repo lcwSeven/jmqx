@@ -1,7 +1,9 @@
 package com.jmqx.bridge;
 
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
+
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -20,6 +22,7 @@ public class MysqlMessageBridge implements MessageBridge {
     private final String password;
     private final String table;
     private final String insertSql;
+    private final HikariDataSource dataSource;
 
     public MysqlMessageBridge(BridgeProperties properties) {
         this.url = properties.getMysqlUrl();
@@ -38,6 +41,8 @@ public class MysqlMessageBridge implements MessageBridge {
             }
         }
 
+        this.dataSource = buildDataSource(properties);
+
         if (properties.isMysqlAutoCreateTable()) {
             createTableIfNeeded();
         }
@@ -45,7 +50,7 @@ public class MysqlMessageBridge implements MessageBridge {
 
     @Override
     public void publish(BridgeMessage message) {
-        try (Connection connection = DriverManager.getConnection(url, user, password);
+        try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement(insertSql)) {
             statement.setString(1, message.clientId());
             statement.setString(2, message.topic());
@@ -57,6 +62,11 @@ public class MysqlMessageBridge implements MessageBridge {
         } catch (SQLException e) {
             LOG.warning("[BRIDGE][MYSQL] insert failed topic=" + message.topic() + ", error=" + e.getMessage());
         }
+    }
+
+    @Override
+    public void close() {
+        dataSource.close();
     }
 
     private void createTableIfNeeded() {
@@ -72,12 +82,32 @@ public class MysqlMessageBridge implements MessageBridge {
             + "INDEX idx_topic(topic(255)),"
             + "INDEX idx_published_at(published_at)"
             + ")";
-        try (Connection connection = DriverManager.getConnection(url, user, password);
+        try (Connection connection = dataSource.getConnection();
              Statement statement = connection.createStatement()) {
             statement.execute(ddl);
         } catch (SQLException e) {
             throw new IllegalStateException("create mysql bridge table failed", e);
         }
+    }
+
+    private HikariDataSource buildDataSource(BridgeProperties properties) {
+        HikariConfig config = new HikariConfig();
+        config.setJdbcUrl(url);
+        config.setUsername(user);
+        config.setPassword(password);
+        config.setPoolName("jmqx-bridge-mysql");
+        int maxPoolSize = Math.max(1, properties.getMysqlPoolMaxSize());
+        int minIdle = Math.max(0, Math.min(properties.getMysqlPoolMinIdle(), maxPoolSize));
+        config.setMaximumPoolSize(maxPoolSize);
+        config.setMinimumIdle(minIdle);
+        config.setConnectionTimeout(Math.max(250L, properties.getMysqlPoolConnectionTimeoutMs()));
+        config.setIdleTimeout(Math.max(10_000L, properties.getMysqlPoolIdleTimeoutMs()));
+        config.setMaxLifetime(Math.max(30_000L, properties.getMysqlPoolMaxLifetimeMs()));
+        String driver = properties.getMysqlDriver();
+        if (driver != null && !driver.isBlank()) {
+            config.setDriverClassName(driver.trim());
+        }
+        return new HikariDataSource(config);
     }
 
     private static String normalizeTableName(String tableName) {

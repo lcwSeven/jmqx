@@ -3,6 +3,7 @@ package com.jmqx.auth;
 import com.jmqx.protocol.AuthResult;
 
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -41,6 +42,26 @@ public class CachedAuthProvider implements AuthProvider {
             cleanup(now);
         }
         return result;
+    }
+
+    @Override
+    public CompletableFuture<AuthResult> authenticateAsync(AuthRequest request) {
+        if (ttlMillis <= 0) {
+            return delegate.authenticateAsync(request);
+        }
+        long now = System.currentTimeMillis();
+        CacheKey key = new CacheKey(request);
+        CacheValue hit = cache.get(key);
+        if (hit != null && hit.expireAt >= now) {
+            return CompletableFuture.completedFuture(hit.result);
+        }
+        return delegate.authenticateAsync(request).thenApply(result -> {
+            cache.put(key, new CacheValue(result, now + ttlMillis));
+            if ((accessCounter.incrementAndGet() & 0xFF) == 0) {
+                cleanup(System.currentTimeMillis());
+            }
+            return result;
+        });
     }
 
     private void cleanup(long now) {

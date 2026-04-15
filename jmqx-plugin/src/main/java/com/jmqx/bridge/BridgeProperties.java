@@ -34,6 +34,11 @@ public class BridgeProperties {
     private String mysqlTable = "jmqx_bridge_message";
     private String mysqlSourceTopicFilters = "";
     private boolean mysqlAutoCreateTable = true;
+    private int mysqlPoolMinIdle = 1;
+    private int mysqlPoolMaxSize = 8;
+    private long mysqlPoolConnectionTimeoutMs = 3000;
+    private long mysqlPoolIdleTimeoutMs = 60_000;
+    private long mysqlPoolMaxLifetimeMs = 600_000;
 
     public boolean isEnabled() {
         return enabled;
@@ -233,5 +238,45 @@ public class BridgeProperties {
 
     public void setMysqlAutoCreateTable(boolean mysqlAutoCreateTable) {
         this.mysqlAutoCreateTable = mysqlAutoCreateTable;
+    }
+
+    public int getMysqlPoolMinIdle() {
+        return mysqlPoolMinIdle;
+    }
+
+    public void setMysqlPoolMinIdle(int mysqlPoolMinIdle) {
+        this.mysqlPoolMinIdle = mysqlPoolMinIdle;
+    }
+
+    public int getMysqlPoolMaxSize() {
+        return mysqlPoolMaxSize;
+    }
+
+    public void setMysqlPoolMaxSize(int mysqlPoolMaxSize) {
+        this.mysqlPoolMaxSize = mysqlPoolMaxSize;
+    }
+
+    public long getMysqlPoolConnectionTimeoutMs() {
+        return mysqlPoolConnectionTimeoutMs;
+    }
+
+    public void setMysqlPoolConnectionTimeoutMs(long mysqlPoolConnectionTimeoutMs) {
+        this.mysqlPoolConnectionTimeoutMs = mysqlPoolConnectionTimeoutMs;
+    }
+
+    public long getMysqlPoolIdleTimeoutMs() {
+        return mysqlPoolIdleTimeoutMs;
+    }
+
+    public void setMysqlPoolIdleTimeoutMs(long mysqlPoolIdleTimeoutMs) {
+        this.mysqlPoolIdleTimeoutMs = mysqlPoolIdleTimeoutMs;
+    }
+
+    public long getMysqlPoolMaxLifetimeMs() {
+        return mysqlPoolMaxLifetimeMs;
+    }
+
+    public void setMysqlPoolMaxLifetimeMs(long mysqlPoolMaxLifetimeMs) {
+        this.mysqlPoolMaxLifetimeMs = mysqlPoolMaxLifetimeMs;
     }
 }

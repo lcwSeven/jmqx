@@ -1,6 +1,7 @@
 package com.jmqx.acl;
 
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -39,6 +40,26 @@ public class CachedAclAuthorizer implements AclAuthorizer {
             cleanup(now);
         }
         return decision;
+    }
+
+    @Override
+    public CompletableFuture<AclDecision> authorizeAsync(AclRequest request) {
+        if (ttlMillis <= 0) {
+            return delegate.authorizeAsync(request);
+        }
+        long now = System.currentTimeMillis();
+        CacheKey key = new CacheKey(request);
+        CacheValue hit = cache.get(key);
+        if (hit != null && hit.expireAt >= now) {
+            return CompletableFuture.completedFuture(hit.decision);
+        }
+        return delegate.authorizeAsync(request).thenApply(decision -> {
+            cache.put(key, new CacheValue(decision, now + ttlMillis));
+            if ((accessCounter.incrementAndGet() & 0xFF) == 0) {
+                cleanup(System.currentTimeMillis());
+            }
+            return decision;
+        });
     }
 
     private void cleanup(long now) {

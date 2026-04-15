@@ -1,6 +1,7 @@
 package com.jmqx.admin;
 
 import com.jmqx.admin.embedded.AdminAuthRuntime;
+import com.jmqx.broker.core.SecurityPipelineMetrics;
 import com.jmqx.session.SessionRegistry;
 import com.jmqx.transport.ConnectionMetrics;
 import okhttp3.Dispatcher;
@@ -21,6 +22,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -46,6 +48,7 @@ public class HttpAdminReporter implements AdminReporter {
     private final OkHttpClient httpClient;
     private final ExecutorService requestExecutor;
     private final ScheduledExecutorService scheduler;
+    private volatile Supplier<SecurityPipelineMetrics.Snapshot> securityMetricsSupplier;
 
     public HttpAdminReporter(String baseUrl,
                              String clusterId,
@@ -133,14 +136,41 @@ public class HttpAdminReporter implements AdminReporter {
                                   long outboundBytes,
                                   int connectedClients,
                                   long reportTime) {
+        upsertNodeMetrics(nodeId, nodeIp, inboundBytes, outboundBytes, connectedClients, reportTime, null);
+    }
+
+    private void upsertNodeMetrics(String nodeId,
+                                  String nodeIp,
+                                  long inboundBytes,
+                                  long outboundBytes,
+                                  int connectedClients,
+                                  long reportTime,
+                                  SecurityPipelineMetrics.Snapshot securityMetrics) {
         String body = "{"
                 + "\"nodeIp\":\"" + escape(nodeIp) + "\","
                 + "\"inboundBytes\":" + inboundBytes + ","
                 + "\"outboundBytes\":" + outboundBytes + ","
                 + "\"connectedClients\":" + connectedClients + ","
+                + "\"connectAuthSuccess\":" + securityMetricValue(securityMetrics, SecurityPipelineMetrics.Snapshot::connectAuthSuccess) + ","
+                + "\"connectAuthFailure\":" + securityMetricValue(securityMetrics, SecurityPipelineMetrics.Snapshot::connectAuthFailure) + ","
+                + "\"connectAuthError\":" + securityMetricValue(securityMetrics, SecurityPipelineMetrics.Snapshot::connectAuthError) + ","
+                + "\"connectAuthSlow\":" + securityMetricValue(securityMetrics, SecurityPipelineMetrics.Snapshot::connectAuthSlow) + ","
+                + "\"connectAuthAvgMs\":" + securityMetricValue(securityMetrics, SecurityPipelineMetrics.Snapshot::connectAuthAvgMs) + ","
+                + "\"connectAuthMaxMs\":" + securityMetricValue(securityMetrics, SecurityPipelineMetrics.Snapshot::connectAuthMaxMs) + ","
+                + "\"publishAclAllow\":" + securityMetricValue(securityMetrics, SecurityPipelineMetrics.Snapshot::publishAclAllow) + ","
+                + "\"publishAclDeny\":" + securityMetricValue(securityMetrics, SecurityPipelineMetrics.Snapshot::publishAclDeny) + ","
+                + "\"publishAclError\":" + securityMetricValue(securityMetrics, SecurityPipelineMetrics.Snapshot::publishAclError) + ","
+                + "\"publishAclSlow\":" + securityMetricValue(securityMetrics, SecurityPipelineMetrics.Snapshot::publishAclSlow) + ","
+                + "\"publishAclAvgMs\":" + securityMetricValue(securityMetrics, SecurityPipelineMetrics.Snapshot::publishAclAvgMs) + ","
+                + "\"publishAclMaxMs\":" + securityMetricValue(securityMetrics, SecurityPipelineMetrics.Snapshot::publishAclMaxMs) + ","
                 + "\"reportTime\":" + reportTime
                 + "}";
         requestAsync("POST", "/api/v1/internal/nodes/" + url(nodeId) + "/metrics", body);
+    }
+
+    @Override
+    public void setSecurityMetricsSupplier(Supplier<SecurityPipelineMetrics.Snapshot> supplier) {
+        this.securityMetricsSupplier = supplier;
     }
 
     @Override
@@ -161,13 +191,16 @@ public class HttpAdminReporter implements AdminReporter {
 
     private void reportNodeMetricsSafely() {
         try {
+            Supplier<SecurityPipelineMetrics.Snapshot> supplier = securityMetricsSupplier;
+            SecurityPipelineMetrics.Snapshot snapshot = supplier == null ? null : supplier.get();
             upsertNodeMetrics(
                     nodeId,
                     nodeIp,
                     connectionMetrics.getInboundBytes(),
                     connectionMetrics.getOutboundBytes(),
                     sessionRegistry == null ? 0 : sessionRegistry.list().size(),
-                    System.currentTimeMillis()
+                    System.currentTimeMillis(),
+                    snapshot
             );
         } catch (Exception exception) {
             LOG.log(Level.FINE, "report node metrics failed: " + exception.getMessage(), exception);
@@ -228,6 +261,16 @@ public class HttpAdminReporter implements AdminReporter {
 
     private static String url(String value) {
         return URLEncoder.encode(normalize(value, ""), StandardCharsets.UTF_8);
+    }
+
+    private static long securityMetricValue(
+            SecurityPipelineMetrics.Snapshot snapshot,
+            java.util.function.ToLongFunction<SecurityPipelineMetrics.Snapshot> extractor
+    ) {
+        if (snapshot == null || extractor == null) {
+            return 0L;
+        }
+        return Math.max(0L, extractor.applyAsLong(snapshot));
     }
 
     private static String escape(String value) {

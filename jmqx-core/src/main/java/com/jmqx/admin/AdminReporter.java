@@ -1,6 +1,9 @@
 package com.jmqx.admin;
 
+import com.jmqx.broker.core.SecurityPipelineMetrics;
+
 import java.util.List;
+import java.util.function.Supplier;
 
 /**
  * 管理端数据上报器。
@@ -29,6 +32,9 @@ public interface AdminReporter {
     }
 
     default void upsertNodeMetrics(String nodeId, String nodeIp, long inboundBytes, long outboundBytes, int connectedClients, long reportTime) {
+    }
+
+    default void setSecurityMetricsSupplier(Supplier<SecurityPipelineMetrics.Snapshot> supplier) {
     }
 
     default void shutdown() {
