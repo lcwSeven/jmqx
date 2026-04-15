@@ -46,6 +46,19 @@
 ./scripts/local-cluster/start-all.sh
 ```
 
+如果本机 `mvn` 不在 `PATH`，脚本会自动尝试以下位置：
+
+- 仓库根目录 `./mvnw`
+- `/Users/liucaiwen/Documents/maven/apache-maven-3.9.9/bin/mvn`
+- `/opt/homebrew/bin/mvn`
+- `/usr/local/bin/mvn`
+
+你也可以显式指定：
+
+```bash
+MAVEN_BIN=/absolute/path/to/mvn ./scripts/local-cluster/start-all.sh
+```
+
 查看状态：
 
 ```bash

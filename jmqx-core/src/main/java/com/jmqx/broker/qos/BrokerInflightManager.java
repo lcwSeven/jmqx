@@ -7,6 +7,7 @@ import com.jmqx.session.SessionRegistry;
 import com.jmqx.store.qos.Qos1InflightMessage;
 import com.jmqx.store.qos.Qos1InflightStore;
 import com.jmqx.store.qos.Qos2InboundInflightMessage;
+import com.jmqx.store.qos.Qos2InboundState;
 import com.jmqx.store.qos.Qos2InflightStore;
 import com.jmqx.store.qos.Qos2OutboundInflightMessage;
 import io.netty.channel.Channel;
@@ -40,7 +41,7 @@ public class BrokerInflightManager {
     private final Logger logger;
     private final ConcurrentMap<String, AtomicInteger> outboundPacketIdByClient = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, ConcurrentMap<Integer, OutboundInflightMessage>> outboundInflightByClient = new ConcurrentHashMap<>();
-    private final ConcurrentMap<String, ConcurrentMap<Integer, InboundQos2Publish>> inboundQos2ByClient = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, ConcurrentMap<Integer, Qos2InboundInflightMessage>> inboundQos2ByClient = new ConcurrentHashMap<>();
     private final DelayQueue<InflightRetryTask> retryQueue = new DelayQueue<>();
 
     public BrokerInflightManager(Qos1InflightStore qos1InflightStore, Qos2InflightStore qos2InflightStore, Logger logger) {
@@ -95,15 +96,29 @@ public class BrokerInflightManager {
     }
 
     public void saveInboundQos2(String clientId, int packetId, String topic, byte[] payload, boolean retain) {
-        ConcurrentMap<Integer, InboundQos2Publish> pending = inboundQos2ByClient
+        if (clientId == null || clientId.isBlank() || packetId <= 0) {
+            return;
+        }
+        ConcurrentMap<Integer, Qos2InboundInflightMessage> pending = inboundQos2ByClient
                 .computeIfAbsent(clientId, ignored -> new ConcurrentHashMap<>());
-        pending.computeIfAbsent(packetId, ignored -> new InboundQos2Publish(topic, payload.clone(), retain));
-        qos2InflightStore.saveInbound(clientId, new Qos2InboundInflightMessage(
+        Qos2InboundInflightMessage existing = pending.get(packetId);
+        if (existing == null) {
+            existing = qos2InflightStore.getInbound(clientId, packetId).orElse(null);
+            if (existing != null) {
+                pending.putIfAbsent(packetId, existing);
+            }
+        }
+        if (existing != null && existing.inboundState() == Qos2InboundState.WAIT_PUBREL) {
+            return;
+        }
+        Qos2InboundInflightMessage message = Qos2InboundInflightMessage.waitingPubRel(
                 packetId,
                 topic,
-                payload.clone(),
+                payload == null ? new byte[0] : payload.clone(),
                 retain
-        ));
+        );
+        pending.put(packetId, message);
+        qos2InflightStore.saveInbound(clientId, message);
     }
 
     public void onPubAck(String clientId, int packetId) {
@@ -142,23 +157,48 @@ public class BrokerInflightManager {
         return true;
     }
 
-    public InboundQos2Publish onPubRel(String clientId, int packetId) {
-        ConcurrentMap<Integer, InboundQos2Publish> pending = inboundQos2ByClient.get(clientId);
-        InboundQos2Publish publish = pending == null ? null : pending.remove(packetId);
-        if (publish == null) {
-            publish = qos2InflightStore.getInbound(clientId, packetId)
-                    .map(message -> new InboundQos2Publish(
-                            message.topic(),
-                            message.payload() == null ? new byte[0] : message.payload().clone(),
-                            message.retain()
-                    ))
-                    .orElse(null);
+    public InboundQos2ReleaseDecision onPubRel(String clientId, int packetId) {
+        Qos2InboundInflightMessage inbound = getInboundQos2(clientId, packetId);
+        if (inbound == null) {
+            return InboundQos2ReleaseDecision.missing();
         }
-        if (pending != null && pending.isEmpty()) {
-            inboundQos2ByClient.remove(clientId, pending);
+        if (inbound.inboundState() == Qos2InboundState.COMPLETED) {
+            return InboundQos2ReleaseDecision.completed();
+        }
+        return InboundQos2ReleaseDecision.process(new InboundQos2Publish(
+                inbound.topic(),
+                inbound.payload() == null ? new byte[0] : inbound.payload().clone(),
+                inbound.retain()
+        ));
+    }
+
+    public void markInboundQos2Completed(String clientId, int packetId) {
+        if (clientId == null || clientId.isBlank() || packetId <= 0) {
+            return;
+        }
+        Qos2InboundInflightMessage current = getInboundQos2(clientId, packetId);
+        if (current == null || current.inboundState() == Qos2InboundState.COMPLETED) {
+            return;
+        }
+        Qos2InboundInflightMessage completed = current.toCompleted();
+        ConcurrentMap<Integer, Qos2InboundInflightMessage> pending = inboundQos2ByClient
+                .computeIfAbsent(clientId, ignored -> new ConcurrentHashMap<>());
+        pending.put(packetId, completed);
+        qos2InflightStore.saveInbound(clientId, completed);
+    }
+
+    public void removeInboundQos2(String clientId, int packetId) {
+        if (clientId == null || clientId.isBlank() || packetId <= 0) {
+            return;
+        }
+        ConcurrentMap<Integer, Qos2InboundInflightMessage> pending = inboundQos2ByClient.get(clientId);
+        if (pending != null) {
+            pending.remove(packetId);
+            if (pending.isEmpty()) {
+                inboundQos2ByClient.remove(clientId, pending);
+            }
         }
         qos2InflightStore.removeInbound(clientId, packetId);
-        return publish;
     }
 
     public void onPubComp(String clientId, int packetId) {
@@ -326,22 +366,61 @@ public class BrokerInflightManager {
     }
 
     private void restoreInboundQos2State(String clientId) {
-        ConcurrentMap<Integer, InboundQos2Publish> inbound = new ConcurrentHashMap<>();
+        ConcurrentMap<Integer, Qos2InboundInflightMessage> inbound = new ConcurrentHashMap<>();
         for (Qos2InboundInflightMessage message : qos2InflightStore.listInbound(clientId)) {
             if (message == null || message.packetId() <= 0 || message.topic() == null || message.topic().isBlank()) {
                 continue;
             }
-            inbound.put(message.packetId(), new InboundQos2Publish(
-                    message.topic(),
-                    message.payload() == null ? new byte[0] : message.payload().clone(),
-                    message.retain()
-            ));
+            inbound.put(message.packetId(), message);
         }
         if (inbound.isEmpty()) {
             inboundQos2ByClient.remove(clientId);
             return;
         }
         inboundQos2ByClient.put(clientId, inbound);
+    }
+
+    private Qos2InboundInflightMessage getInboundQos2(String clientId, int packetId) {
+        if (clientId == null || clientId.isBlank() || packetId <= 0) {
+            return null;
+        }
+        ConcurrentMap<Integer, Qos2InboundInflightMessage> pending = inboundQos2ByClient
+                .computeIfAbsent(clientId, ignored -> new ConcurrentHashMap<>());
+        Qos2InboundInflightMessage current = pending.get(packetId);
+        if (current != null) {
+            return current;
+        }
+        Qos2InboundInflightMessage restored = qos2InflightStore.getInbound(clientId, packetId).orElse(null);
+        if (restored != null) {
+            pending.putIfAbsent(packetId, restored);
+            return pending.get(packetId);
+        }
+        if (pending.isEmpty()) {
+            inboundQos2ByClient.remove(clientId, pending);
+        }
+        return null;
+    }
+
+    public record InboundQos2ReleaseDecision(InboundQos2Publish publish, boolean alreadyCompleted) {
+        public static InboundQos2ReleaseDecision process(InboundQos2Publish publish) {
+            return new InboundQos2ReleaseDecision(publish, false);
+        }
+
+        public static InboundQos2ReleaseDecision completed() {
+            return new InboundQos2ReleaseDecision(null, true);
+        }
+
+        public static InboundQos2ReleaseDecision missing() {
+            return new InboundQos2ReleaseDecision(null, false);
+        }
+
+        public boolean shouldProcess() {
+            return publish != null;
+        }
+
+        public boolean shouldCleanupAfterAck() {
+            return publish != null || alreadyCompleted;
+        }
     }
 
     private void putOutboundInflight(

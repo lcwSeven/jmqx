@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 CLUSTER_ROOT="${CLUSTER_ROOT:-/tmp/jmqx-local}"
-MAVEN_BIN="${MAVEN_BIN:-mvn}"
+MAVEN_BIN="${MAVEN_BIN:-}"
 JAVA_BIN="${JAVA_BIN:-java}"
 MAVEN_REPO_LOCAL="${MAVEN_REPO_LOCAL:-/tmp/jmqx-m2}"
 JMQX_JAVA_OPTS="${JMQX_JAVA_OPTS:---add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED}"
@@ -23,6 +23,45 @@ NODE_ENDPOINTS="core-1=127.0.0.1:7900,core-2=127.0.0.1:7901,core-3=127.0.0.1:790
 DEPENDENCY_CP_FILE="$CLUSTER_ROOT/dependency-classpath.txt"
 RUNTIME_CP_FILE="$CLUSTER_ROOT/runtime-classpath.txt"
 NODES=(core-1 core-2 core-3 rep-1 rep-2)
+
+resolve_maven_bin() {
+    if [[ -n "${MAVEN_BIN:-}" ]]; then
+        if [[ -x "$MAVEN_BIN" ]]; then
+            echo "$MAVEN_BIN"
+            return 0
+        fi
+        echo "[error] MAVEN_BIN is set but not executable: $MAVEN_BIN" >&2
+        return 1
+    fi
+
+    if command -v mvn >/dev/null 2>&1; then
+        command -v mvn
+        return 0
+    fi
+
+    local -a candidates=(
+        "$REPO_ROOT/mvnw"
+        "/Users/liucaiwen/Documents/maven/apache-maven-3.9.9/bin/mvn"
+        "/opt/homebrew/bin/mvn"
+        "/usr/local/bin/mvn"
+    )
+    local candidate
+    for candidate in "${candidates[@]}"; do
+        if [[ -x "$candidate" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+
+    cat >&2 <<EOF
+[error] Maven executable not found.
+        You can fix this in one of these ways:
+        1. export MAVEN_BIN=/absolute/path/to/mvn
+        2. add mvn to PATH
+        3. put ./mvnw in the repository root
+EOF
+    return 1
+}
 
 node_dir() {
     echo "$CLUSTER_ROOT/$1"
@@ -63,12 +102,14 @@ build_runtime_classpath_file() {
 
 build_project() {
     ensure_cluster_root
-    echo "[build] compile jmqx-app and dependencies"
-    "$MAVEN_BIN" -Dmaven.repo.local="$MAVEN_REPO_LOCAL" -pl jmqx-app -am -DskipTests compile
+    local mvn_bin
+    mvn_bin="$(resolve_maven_bin)"
+    echo "[build] install jmqx-app and dependencies into local Maven repo"
+    "$mvn_bin" -Dmaven.repo.local="$MAVEN_REPO_LOCAL" -pl jmqx-app -am -DskipTests install
     echo "[build] resolve runtime classpath"
     local raw_cp_file
     raw_cp_file="$CLUSTER_ROOT/runtime-classpath.raw"
-    "$MAVEN_BIN" -q -Dmaven.repo.local="$MAVEN_REPO_LOCAL" -pl jmqx-app -am -DskipTests -Dexec.classpathScope=runtime -Dexec.executable=echo -Dexec.args=%classpath exec:exec > "$raw_cp_file"
+    "$mvn_bin" -q -Dmaven.repo.local="$MAVEN_REPO_LOCAL" -pl jmqx-app -am -DskipTests -Dexec.classpathScope=runtime -Dexec.executable=echo -Dexec.args=%classpath exec:exec > "$raw_cp_file"
     awk 'NF { last = $0 } END { print last }' "$raw_cp_file" > "$DEPENDENCY_CP_FILE"
     rm -f "$raw_cp_file"
     build_runtime_classpath_file

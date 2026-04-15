@@ -37,6 +37,7 @@ import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelFuture;
 import io.netty.handler.codec.mqtt.MqttConnectMessage;
 import io.netty.handler.codec.mqtt.MqttConnectReturnCode;
 import io.netty.handler.codec.mqtt.MqttMessage;
@@ -373,6 +374,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
                 : new String(message.payload().passwordInBytes(), StandardCharsets.UTF_8);
         String clientIp = resolveClientIp(ctx.channel());
 
+        // 校验黑名单
         if (clientBlacklist.isBlocked(clientId, clientIp)) {
             LOG.warning(() -> "[CONNECT] blacklisted client rejected, clientId=" + clientId + ", clientIp=" + clientIp);
             rejectConnection(
@@ -705,6 +707,11 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         inflightManager.onPubAck(clientId, packetId);
     }
 
+    /**
+     * QoS2 第二阶段：收到 PUBREC 后回复 PUBREL，等待 PUBCOMP 后再删除缓存。
+     * @param ctx 通道
+     * @param message 消息
+     */
     private void handlePubRec(ChannelHandlerContext ctx, MqttMessage message) {
         String clientId = currentClientId(ctx.channel());
         Integer packetId = MqttPacketFactory.extractPacketId(message);
@@ -716,14 +723,21 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         }
     }
 
+    /**
+     * QoS2 第三阶段：收到 PUBREL 后处理业务逻辑，并回复 PUBCOMP，等待 PUBCOMP 后再删除缓存。
+     * @param ctx 通道
+     * @param message 消息
+     */
     private void handlePubRel(ChannelHandlerContext ctx, MqttMessage message) {
         String clientId = currentClientId(ctx.channel());
         Integer packetId = MqttPacketFactory.extractPacketId(message);
         if (clientId == null || packetId == null) {
             return;
         }
-        InboundQos2Publish publish = inflightManager.onPubRel(clientId, packetId);
-        if (publish != null) {
+        BrokerInflightManager.InboundQos2ReleaseDecision decision = inflightManager.onPubRel(clientId, packetId);
+        if (decision.shouldProcess()) {
+            InboundQos2Publish publish = decision.publish();
+            // QoS2 业务处理
             processApplicationPublish(
                 clientId,
                 publish.topic(),
@@ -731,10 +745,23 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
                 capByMaxQos(MqttQoS.EXACTLY_ONCE.value()),
                 publish.retain()
             );
+            inflightManager.markInboundQos2Completed(clientId, packetId);
         }
-        ctx.writeAndFlush(MqttPacketFactory.buildPubCompMessage(packetId));
+        ChannelFuture future = ctx.writeAndFlush(MqttPacketFactory.buildPubCompMessage(packetId));
+        if (decision.shouldCleanupAfterAck()) {
+            future.addListener(writeFuture -> {
+                if (writeFuture.isSuccess()) {
+                    inflightManager.removeInboundQos2(clientId, packetId);
+                }
+            });
+        }
     }
 
+    /**
+     * QoS2 第四阶段：收到 PUBCOMP 后删除缓存。
+     * @param ctx 通道
+     * @param message 消息
+     */
     private void handlePubComp(ChannelHandlerContext ctx, MqttMessage message) {
         String clientId = currentClientId(ctx.channel());
         Integer packetId = MqttPacketFactory.extractPacketId(message);
@@ -995,8 +1022,8 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
                 channelsToFlush.add(channel);
                 continue;
             }
-            channel.write(MqttPacketFactory.buildQos2PublishMessage(topic, payload, packetId, false));
             inflightManager.trackInflightQos2(subscriber, packetId, topic, payload);
+            channel.write(MqttPacketFactory.buildQos2PublishMessage(topic, payload, packetId, false));
             channelsToFlush.add(channel);
         }
         for (Channel channel : channelsToFlush) {

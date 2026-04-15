@@ -309,10 +309,11 @@ public class RocksDbQos2InflightStore implements Qos2InflightStore {
     private static byte[] encodeInbound(Qos2InboundInflightMessage message) {
         byte[] topicBytes = message.topic() == null ? new byte[0] : message.topic().getBytes(StandardCharsets.UTF_8);
         byte[] payloadBytes = message.payload() == null ? new byte[0] : message.payload();
-        ByteBuffer buffer = ByteBuffer.allocate(1 + 4 + 1 + 4 + topicBytes.length + 4 + payloadBytes.length);
+        ByteBuffer buffer = ByteBuffer.allocate(1 + 4 + 1 + 1 + 4 + topicBytes.length + 4 + payloadBytes.length);
         buffer.put(VALUE_INBOUND);
         buffer.putInt(message.packetId());
         buffer.put((byte) (message.retain() ? 1 : 0));
+        buffer.put(message.state());
         buffer.putInt(topicBytes.length);
         buffer.put(topicBytes);
         buffer.putInt(payloadBytes.length);
@@ -331,7 +332,22 @@ public class RocksDbQos2InflightStore implements Qos2InflightStore {
             }
             int packetId = buffer.getInt();
             boolean retain = buffer.get() != 0;
-            int topicLen = buffer.getInt();
+            byte state = 0;
+            int topicLen;
+            if (buffer.remaining() >= 5) {
+                buffer.mark();
+                byte maybeState = buffer.get();
+                int maybeTopicLen = buffer.getInt();
+                if ((maybeState == 0 || maybeState == 1) && maybeTopicLen >= 0 && maybeTopicLen <= buffer.remaining()) {
+                    state = maybeState;
+                    topicLen = maybeTopicLen;
+                } else {
+                    buffer.reset();
+                    topicLen = buffer.getInt();
+                }
+            } else {
+                topicLen = buffer.getInt();
+            }
             if (topicLen < 0 || topicLen > buffer.remaining()) {
                 return null;
             }
@@ -347,7 +363,8 @@ public class RocksDbQos2InflightStore implements Qos2InflightStore {
                 packetId,
                 new String(topicBytes, StandardCharsets.UTF_8),
                 payloadBytes,
-                retain
+                retain,
+                state
             );
         } catch (Exception ignored) {
             return null;

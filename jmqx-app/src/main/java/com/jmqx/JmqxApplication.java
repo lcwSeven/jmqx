@@ -59,7 +59,6 @@ import com.jmqx.store.rocksdb.RocksDbQos1InflightStore;
 import com.jmqx.store.rocksdb.RocksDbQos2InflightStore;
 import com.jmqx.store.rocksdb.RocksDbWillMessageStore;
 import com.jmqx.store.async.AsyncQos1InflightStore;
-import com.jmqx.store.async.AsyncQos2InflightStore;
 import com.jmqx.store.async.AsyncWillMessageStore;
 import com.jmqx.store.qos.Qos1InflightStore;
 import com.jmqx.store.qos.Qos2InflightStore;
@@ -743,11 +742,8 @@ public class JmqxApplication {
             StartupContext context,
             SharedAsyncStoreExecutor sharedAsyncStoreExecutor
     ) {
-        Qos2InflightStore store = new RocksDbQos2InflightStore(context.qos2InflightRocksdbPath());
-        if (!context.storageAsyncSettings().enabled() || sharedAsyncStoreExecutor == null) {
-            return store;
-        }
-        return new AsyncQos2InflightStore(store, sharedAsyncStoreExecutor);
+        // QoS2 需要尽量缩小“已回协议确认但状态尚未落盘”的窗口，这里优先使用同步持久化。
+        return new RocksDbQos2InflightStore(context.qos2InflightRocksdbPath());
     }
 
     private static WillMessageStore buildWillMessageStore(
