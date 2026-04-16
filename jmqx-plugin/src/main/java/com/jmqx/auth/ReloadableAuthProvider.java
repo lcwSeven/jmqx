@@ -12,13 +12,13 @@ public class ReloadableAuthProvider implements AuthProvider {
     private volatile AuthProvider delegate;
 
     public ReloadableAuthProvider(AuthProvider delegate) {
-        this.delegate = delegate;
+        this.delegate = normalizeDelegate(delegate);
     }
 
     public void setDelegate(AuthProvider delegate) {
         AuthProvider previous = this.delegate;
-        this.delegate = delegate;
-        if (previous != null && previous != delegate) {
+        this.delegate = normalizeDelegate(delegate);
+        if (previous != null && previous != this.delegate) {
             previous.close();
         }
     }
@@ -45,5 +45,12 @@ public class ReloadableAuthProvider implements AuthProvider {
         if (current != null) {
             current.close();
         }
+    }
+
+    private static AuthProvider normalizeDelegate(AuthProvider delegate) {
+        if (delegate == null) {
+            return new AllowAllAuthProvider();
+        }
+        return delegate;
     }
 }

@@ -106,7 +106,6 @@ export function createInitialState() {
                 connectTimeoutMs: 1500,
                 pipelineCount: 2
             },
-            authFile: { path: "auth-users.txt" },
             authBuiltInDatabase: {
                 accountType: "username",
                 passwordHashAlgorithm: "sha256",
@@ -262,7 +261,6 @@ export function createInitialState() {
         ],
         authDatasourceOptions: [
             { key: "built_in_database", label: "内置数据库", icon: "🗄️" },
-            { key: "file", label: "文件", icon: "📄" },
             { key: "mysql", label: "MySQL", icon: "🐬" },
             { key: "postgresql", label: "PostgreSQL", icon: "🐘" },
             { key: "redis", label: "Redis", icon: "🧱" },
@@ -270,9 +268,8 @@ export function createInitialState() {
         ],
         authDraft: {
             method: "password",
-            datasource: "file",
+            datasource: "built_in_database",
             cacheTtlMs: 60000,
-            filePath: "auth-users.txt",
             builtInDatabaseAccountType: "username",
             builtInDatabasePasswordHashAlgorithm: "sha256",
             builtInDatabaseSaltPosition: "suffix",

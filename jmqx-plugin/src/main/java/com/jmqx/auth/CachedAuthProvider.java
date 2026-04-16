@@ -30,17 +30,13 @@ public class CachedAuthProvider implements AuthProvider {
         }
         long now = System.currentTimeMillis();
         CacheKey key = new CacheKey(request);
-        CacheValue hit = cache.get(key);
-        if (hit != null && hit.expireAt >= now) {
-            return hit.result;
+        CacheValue cached = cache.get(key);
+        if (isValid(cached, now)) {
+            return cached.result;
         }
 
         AuthResult result = delegate.authenticateResult(request);
-        cache.put(key, new CacheValue(result, now + ttlMillis));
-
-        if ((accessCounter.incrementAndGet() & 0xFF) == 0) {
-            cleanup(now);
-        }
+        putCacheValue(key, result, now);
         return result;
     }
 
@@ -51,17 +47,25 @@ public class CachedAuthProvider implements AuthProvider {
         }
         long now = System.currentTimeMillis();
         CacheKey key = new CacheKey(request);
-        CacheValue hit = cache.get(key);
-        if (hit != null && hit.expireAt >= now) {
-            return CompletableFuture.completedFuture(hit.result);
+        CacheValue cached = cache.get(key);
+        if (isValid(cached, now)) {
+            return CompletableFuture.completedFuture(cached.result);
         }
         return delegate.authenticateAsync(request).thenApply(result -> {
-            cache.put(key, new CacheValue(result, now + ttlMillis));
-            if ((accessCounter.incrementAndGet() & 0xFF) == 0) {
-                cleanup(System.currentTimeMillis());
-            }
+            putCacheValue(key, result, System.currentTimeMillis());
             return result;
         });
+    }
+
+    private boolean isValid(CacheValue value, long now) {
+        return value != null && value.expireAt >= now;
+    }
+
+    private void putCacheValue(CacheKey key, AuthResult result, long now) {
+        cache.put(key, new CacheValue(result, now + ttlMillis));
+        if ((accessCounter.incrementAndGet() & 0xFF) == 0) {
+            cleanup(now);
+        }
     }
 
     private void cleanup(long now) {
@@ -108,9 +112,10 @@ public class CachedAuthProvider implements AuthProvider {
             if (this == o) {
                 return true;
             }
-            if (!(o instanceof CacheKey cacheKey)) {
+            if (!(o instanceof CacheKey)) {
                 return false;
             }
+            CacheKey cacheKey = (CacheKey) o;
             return Objects.equals(clientId, cacheKey.clientId);
         }
 

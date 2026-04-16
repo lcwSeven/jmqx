@@ -1,5 +1,6 @@
 package com.jmqx.acl;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
@@ -12,21 +13,16 @@ public class ChainedAclAuthorizer implements AclAuthorizer {
     private final boolean defaultAllow;
 
     public ChainedAclAuthorizer(List<AclAuthorizer> chain, boolean defaultAllow) {
-        this.chain = chain;
+        this.chain = chain == null ? new ArrayList<>() : new ArrayList<>(chain);
         this.defaultAllow = defaultAllow;
     }
 
     @Override
     public AclDecision authorize(AclRequest request) {
-        if (chain != null) {
-            for (AclAuthorizer authorizer : chain) {
-                if (authorizer == null) {
-                    continue;
-                }
-                AclDecision decision = authorizer.authorize(request);
-                if (decision == AclDecision.ALLOW || decision == AclDecision.DENY) {
-                    return decision;
-                }
+        for (AclAuthorizer authorizer : chain) {
+            AclDecision decision = authorizeBySingleAuthorizer(authorizer, request);
+            if (decision == AclDecision.ALLOW || decision == AclDecision.DENY) {
+                return decision;
             }
         }
         return defaultAllow ? AclDecision.ALLOW : AclDecision.DENY;
@@ -34,22 +30,38 @@ public class ChainedAclAuthorizer implements AclAuthorizer {
 
     @Override
     public CompletableFuture<AclDecision> authorizeAsync(AclRequest request) {
-        return authorizeAsync(request, 0);
+        CompletableFuture<AclDecision> future = new CompletableFuture<>();
+        authorizeAsync(request, 0, future);
+        return future;
     }
 
-    private CompletableFuture<AclDecision> authorizeAsync(AclRequest request, int index) {
-        if (chain == null || index >= chain.size()) {
-            return CompletableFuture.completedFuture(defaultAllow ? AclDecision.ALLOW : AclDecision.DENY);
+    private AclDecision authorizeBySingleAuthorizer(AclAuthorizer authorizer, AclRequest request) {
+        if (authorizer == null) {
+            return AclDecision.NOT_FOUND;
+        }
+        return authorizer.authorize(request);
+    }
+
+    private void authorizeAsync(AclRequest request, int index, CompletableFuture<AclDecision> future) {
+        if (index >= chain.size()) {
+            future.complete(defaultAllow ? AclDecision.ALLOW : AclDecision.DENY);
+            return;
         }
         AclAuthorizer authorizer = chain.get(index);
         if (authorizer == null) {
-            return authorizeAsync(request, index + 1);
+            authorizeAsync(request, index + 1, future);
+            return;
         }
-        return authorizer.authorizeAsync(request).thenCompose(decision -> {
-            if (decision == AclDecision.ALLOW || decision == AclDecision.DENY) {
-                return CompletableFuture.completedFuture(decision);
+        authorizer.authorizeAsync(request).whenComplete((decision, error) -> {
+            if (error != null) {
+                future.completeExceptionally(error);
+                return;
             }
-            return authorizeAsync(request, index + 1);
+            if (decision == AclDecision.ALLOW || decision == AclDecision.DENY) {
+                future.complete(decision);
+                return;
+            }
+            authorizeAsync(request, index + 1, future);
         });
     }
 }

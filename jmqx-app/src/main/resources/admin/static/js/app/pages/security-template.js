@@ -273,10 +273,6 @@ export const securityPageTemplate = `
           <span class="field-label">缓存时间（毫秒）</span>
           <el-input-number v-model="authDraft.cacheTtlMs" :min="0" controls-position="right" />
         </label>
-        <label class="field" v-if="authDraft.datasource==='file'">
-          <span class="field-label">用户文件路径</span>
-          <el-input v-model="authDraft.filePath" placeholder="conf/auth-users.txt"/>
-        </label>
         <label class="field" v-if="authDraft.datasource==='built_in_database'">
           <span class="field-label">账号类型</span>
           <el-select v-model="authDraft.builtInDatabaseAccountType">

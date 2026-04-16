@@ -16,4 +16,7 @@ public interface AclAuthorizer {
     default boolean isAllowed(AclRequest request) {
         return authorize(request) == AclDecision.ALLOW;
     }
+
+    default void close() {
+    }
 }

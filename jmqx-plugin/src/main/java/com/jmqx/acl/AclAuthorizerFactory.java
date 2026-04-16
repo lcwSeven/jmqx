@@ -1,13 +1,11 @@
 package com.jmqx.acl;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
 import java.util.ServiceLoader;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 /**
  * @author liucaiwen
@@ -35,21 +33,23 @@ public final class AclAuthorizerFactory {
     ) {
         List<String> chainTypes = parseChain(properties.getChain());
         if (!chainTypes.isEmpty()) {
-            List<AclAuthorizer> chain = chainTypes.stream()
-                    .map(plugins::get)
-                    .filter(Objects::nonNull)
-                    .map(plugin -> plugin.create(properties))
-                    .collect(Collectors.toList());
+            List<AclAuthorizer> chain = new ArrayList<>();
+            for (String chainType : chainTypes) {
+                AclAuthorizerPlugin plugin = plugins.get(chainType);
+                if (plugin != null) {
+                    chain.add(plugin.create(properties));
+                }
+            }
             return new ChainedAclAuthorizer(chain, properties.isDefaultAllow());
         }
         return plugins.get("allow_all").create(properties);
     }
 
     private static void registerBuiltins(Map<String, AclAuthorizerPlugin> plugins) {
-        plugins.put("allow_all", new NamedPlugin("allow_all", p -> new AllowAllAclAuthorizer()));
-        plugins.put("http", new NamedPlugin("http", HttpAclAuthorizer::new));
-        plugins.put("redis", new NamedPlugin("redis", RedisAclAuthorizer::new));
-        plugins.put("file", new NamedPlugin("file", FileAclAuthorizer::new));
+        plugins.put("allow_all", new AllowAllPlugin());
+        plugins.put("http", new HttpPlugin());
+        plugins.put("redis", new RedisPlugin());
+        plugins.put("file", new FilePlugin());
     }
 
     private static void loadExtensions(Map<String, AclAuthorizerPlugin> plugins) {
@@ -60,13 +60,18 @@ public final class AclAuthorizerFactory {
     }
 
     private static List<String> parseChain(String chainRaw) {
+        List<String> result = new ArrayList<>();
         if (chainRaw == null || chainRaw.isBlank()) {
-            return List.of();
+            return result;
         }
-        return Stream.of(chainRaw.split(","))
-                .map(AclAuthorizerFactory::normalizeChainType)
-                .filter(type -> !type.isBlank() && !"allow_all".equals(type))
-                .collect(Collectors.toList());
+        String[] values = chainRaw.split(",");
+        for (String value : values) {
+            String normalized = normalizeChainType(value);
+            if (!normalized.isBlank() && !"allow_all".equals(normalized)) {
+                result.add(normalized);
+            }
+        }
+        return result;
     }
 
     private static String normalizeChainType(String type) {
@@ -80,31 +85,51 @@ public final class AclAuthorizerFactory {
      * @author liucaiwen
      * @date 2026/4/4
      */
-    private static class NamedPlugin implements AclAuthorizerPlugin {
-        private final String type;
-        private final Creator creator;
-
-        private NamedPlugin(String type, Creator creator) {
-            this.type = type;
-            this.creator = creator;
-        }
-
+    private static class AllowAllPlugin implements AclAuthorizerPlugin {
         @Override
         public String type() {
-            return type;
+            return "allow_all";
         }
 
         @Override
         public AclAuthorizer create(AclProperties properties) {
-            return creator.create(properties);
+            return new AllowAllAclAuthorizer();
         }
     }
 
-    /**
-     * @author liucaiwen
-     * @date 2026/4/4
-     */
-    private interface Creator {
-        AclAuthorizer create(AclProperties properties);
+    private static class HttpPlugin implements AclAuthorizerPlugin {
+        @Override
+        public String type() {
+            return "http";
+        }
+
+        @Override
+        public AclAuthorizer create(AclProperties properties) {
+            return new HttpAclAuthorizer(properties);
+        }
+    }
+
+    private static class RedisPlugin implements AclAuthorizerPlugin {
+        @Override
+        public String type() {
+            return "redis";
+        }
+
+        @Override
+        public AclAuthorizer create(AclProperties properties) {
+            return new RedisAclAuthorizer(properties);
+        }
+    }
+
+    private static class FilePlugin implements AclAuthorizerPlugin {
+        @Override
+        public String type() {
+            return "file";
+        }
+
+        @Override
+        public AclAuthorizer create(AclProperties properties) {
+            return new FileAclAuthorizer(properties);
+        }
     }
 }

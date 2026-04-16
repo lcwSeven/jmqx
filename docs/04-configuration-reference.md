@@ -142,12 +142,6 @@ HTTP：
 | `jmqx.auth.http.url` | `http://127.0.0.1:8080/auth/check` | 鉴权接口 |
 | `jmqx.auth.http.timeoutMs` | `2000` | 超时时间（毫秒） |
 
-File：
-
-| 配置项 | 默认值 | 说明 |
-|---|---|---|
-| `jmqx.auth.file.path` | `auth-users.txt` | 本地用户文件 |
-
 Redis：
 
 | 配置项 | 默认值 | 说明 |

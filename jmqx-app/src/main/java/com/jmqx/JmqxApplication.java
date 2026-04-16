@@ -1187,9 +1187,7 @@ public class JmqxApplication {
                         authProperties.getHttpConnectTimeoutMs(),
                         authProperties.getHttpPipelineCount()
                 ),
-                new EmbeddedAdminStateStore.AuthFileConfig(
-                        authProperties.getFilePath()
-                ),
+                EmbeddedAdminStateStore.AuthFileConfig.defaults(),
                 new EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig(
                         authProperties.getBuiltInDatabaseAccountType(),
                         authProperties.getBuiltInDatabasePasswordHashAlgorithm(),
@@ -1306,9 +1304,6 @@ public class JmqxApplication {
             if (!securityConfig.authEnabled()) {
                 authProperties.setChain("");
             } else {
-                if (authChain.isEmpty()) {
-                    authChain = List.of("file");
-                }
                 authProperties.setChain(String.join(",", authChain));
             }
             authProperties.setHttpMethod(securityConfig.authHttp().method());
@@ -1321,7 +1316,6 @@ public class JmqxApplication {
             authProperties.setHttpRequestTimeoutMs(securityConfig.authHttp().requestTimeoutMs());
             authProperties.setHttpConnectTimeoutMs(securityConfig.authHttp().connectTimeoutMs());
             authProperties.setHttpPipelineCount(securityConfig.authHttp().pipelineCount());
-            authProperties.setFilePath(securityConfig.authFile().path());
             authProperties.setBuiltInDatabaseAccountType(securityConfig.authBuiltInDatabase().accountType());
             authProperties.setBuiltInDatabasePasswordHashAlgorithm(securityConfig.authBuiltInDatabase().passwordHashAlgorithm());
             authProperties.setBuiltInDatabaseSaltPosition(securityConfig.authBuiltInDatabase().saltPosition());

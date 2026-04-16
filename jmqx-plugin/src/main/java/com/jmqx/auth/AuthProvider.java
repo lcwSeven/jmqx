@@ -1,6 +1,5 @@
 package com.jmqx.auth;
 
-import com.jmqx.protocol.AuthDecision;
 import com.jmqx.protocol.AuthResult;
 
 import java.util.concurrent.CompletableFuture;
@@ -10,9 +9,6 @@ import java.util.concurrent.CompletableFuture;
  * @date 2026/4/4
  */
 public interface AuthProvider {
-
-
-
     AuthResult authenticateResult(AuthRequest request);
 
     default CompletableFuture<AuthResult> authenticateAsync(AuthRequest request) {

@@ -28,17 +28,13 @@ public class CachedAclAuthorizer implements AclAuthorizer {
         }
         long now = System.currentTimeMillis();
         CacheKey key = new CacheKey(request);
-        CacheValue hit = cache.get(key);
-        if (hit != null && hit.expireAt >= now) {
-            return hit.decision;
+        CacheValue cached = cache.get(key);
+        if (isValid(cached, now)) {
+            return cached.decision;
         }
 
         AclDecision decision = delegate.authorize(request);
-        cache.put(key, new CacheValue(decision, now + ttlMillis));
-
-        if ((accessCounter.incrementAndGet() & 0xFF) == 0) {
-            cleanup(now);
-        }
+        putCacheValue(key, decision, now);
         return decision;
     }
 
@@ -49,17 +45,25 @@ public class CachedAclAuthorizer implements AclAuthorizer {
         }
         long now = System.currentTimeMillis();
         CacheKey key = new CacheKey(request);
-        CacheValue hit = cache.get(key);
-        if (hit != null && hit.expireAt >= now) {
-            return CompletableFuture.completedFuture(hit.decision);
+        CacheValue cached = cache.get(key);
+        if (isValid(cached, now)) {
+            return CompletableFuture.completedFuture(cached.decision);
         }
         return delegate.authorizeAsync(request).thenApply(decision -> {
-            cache.put(key, new CacheValue(decision, now + ttlMillis));
-            if ((accessCounter.incrementAndGet() & 0xFF) == 0) {
-                cleanup(System.currentTimeMillis());
-            }
+            putCacheValue(key, decision, System.currentTimeMillis());
             return decision;
         });
+    }
+
+    private boolean isValid(CacheValue value, long now) {
+        return value != null && value.expireAt >= now;
+    }
+
+    private void putCacheValue(CacheKey key, AclDecision decision, long now) {
+        cache.put(key, new CacheValue(decision, now + ttlMillis));
+        if ((accessCounter.incrementAndGet() & 0xFF) == 0) {
+            cleanup(now);
+        }
     }
 
     private void cleanup(long now) {
@@ -92,9 +96,10 @@ public class CachedAclAuthorizer implements AclAuthorizer {
             if (this == o) {
                 return true;
             }
-            if (!(o instanceof CacheKey cacheKey)) {
+            if (!(o instanceof CacheKey)) {
                 return false;
             }
+            CacheKey cacheKey = (CacheKey) o;
             return Objects.equals(clientId, cacheKey.clientId)
                 && Objects.equals(username, cacheKey.username)
                 && Objects.equals(topic, cacheKey.topic)

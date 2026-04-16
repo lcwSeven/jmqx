@@ -255,7 +255,7 @@ export const securityPageMethods = {
         const fallbackDatasource = this.availableAuthDatasourceOptions.length
             ? this.availableAuthDatasourceOptions[0].key
             : this.mapPluginToDatasource(primary);
-        this.applyAuthDraftFromPlugin(this.mapDatasourceToPlugin(fallbackDatasource || "file"));
+        this.applyAuthDraftFromPlugin(this.mapDatasourceToPlugin(fallbackDatasource || "built_in_database"));
     },
     cancelAuthCreate() {
         this.authCreateMode = false;
@@ -287,7 +287,7 @@ export const securityPageMethods = {
     },
     authDatasourceLabel() {
         const hit = this.authDatasourceOptions.find(item => item.key === this.authDraft.datasource);
-        return hit ? hit.label : "文件";
+        return hit ? hit.label : "内置数据库";
     },
     parseHttpHeaders(text) {
         const rows = String(text || "")
@@ -341,17 +341,17 @@ export const securityPageMethods = {
         if (datasource === "redis") {
             return "redis";
         }
-        if (datasource === "file") {
-            return "file";
-        }
         if (datasource === "postgresql") {
             return "postgresql";
         }
-        return "mysql";
+        if (datasource === "mysql") {
+            return "mysql";
+        }
+        return "built_in_database";
     },
     mapPluginToDatasource(plugin) {
         if (!plugin) {
-            return "file";
+            return "built_in_database";
         }
         if (plugin === "built_in_database") {
             return "built_in_database";
@@ -362,14 +362,17 @@ export const securityPageMethods = {
         if (plugin === "redis") {
             return "redis";
         }
-        return plugin === "postgresql" ? "postgresql" : "mysql";
+        if (plugin === "postgresql") {
+            return "postgresql";
+        }
+        if (plugin === "mysql") {
+            return "mysql";
+        }
+        return "built_in_database";
     },
     authPluginDisplayName(plugin) {
         if (plugin === "built_in_database") {
             return "内置数据库";
-        }
-        if (plugin === "file") {
-            return "文件";
         }
         if (plugin === "http") {
             return "HTTP 服务";
@@ -389,9 +392,6 @@ export const securityPageMethods = {
         if (plugin === "built_in_database") {
             const config = this.securityConfig.authBuiltInDatabase || {};
             return `${config.accountType || "username"} · ${config.passwordHashAlgorithm || "plain"} · ${config.saltPosition || "disable"}`;
-        }
-        if (plugin === "file") {
-            return this.securityConfig.authFile?.path || "auth-users.txt";
         }
         if (plugin === "http") {
             return this.securityConfig.authHttp?.url || "-";
@@ -520,10 +520,9 @@ export const securityPageMethods = {
         }
     },
     applyAuthDraftFromPlugin(plugin) {
-        const normalizedPlugin = plugin || "file";
+        const normalizedPlugin = plugin || "built_in_database";
         this.authDraft.datasource = this.mapPluginToDatasource(normalizedPlugin);
         this.authDraft.cacheTtlMs = Number(this.securityConfig.cacheTtlMs || 60000);
-        this.authDraft.filePath = this.securityConfig.authFile?.path || "auth-users.txt";
         this.authDraft.builtInDatabaseAccountType = this.securityConfig.authBuiltInDatabase?.accountType || "username";
         this.authDraft.builtInDatabasePasswordHashAlgorithm = this.securityConfig.authBuiltInDatabase?.passwordHashAlgorithm || "sha256";
         this.authDraft.builtInDatabaseSaltPosition = this.securityConfig.authBuiltInDatabase?.saltPosition || "suffix";
@@ -568,12 +567,6 @@ export const securityPageMethods = {
                 accountType: this.authDraft.builtInDatabaseAccountType || "username",
                 passwordHashAlgorithm: this.authDraft.builtInDatabasePasswordHashAlgorithm || "sha256",
                 saltPosition: this.authDraft.builtInDatabaseSaltPosition || "suffix"
-            };
-            return;
-        }
-        if (plugin === "file") {
-            this.securityConfig.authFile = {
-                path: this.authDraft.filePath || "auth-users.txt"
             };
             return;
         }
@@ -639,7 +632,7 @@ export const securityPageMethods = {
             ? config.authChain
             : this.toCommaList(config.authChain || ""))
             .map(item => String(item || "").trim().toLowerCase())
-            .filter(item => item && item !== "allow_all");
+            .filter(item => item && item !== "allow_all" && item !== "file");
         return {
             aclEnabled: config.aclEnabled === true && normalizedAclChain.length > 0,
             aclChain: normalizedAclChain,
@@ -674,9 +667,6 @@ export const securityPageMethods = {
                 requestTimeoutMs: Number(config.authHttp?.requestTimeoutMs || config.authHttp?.timeoutMs || 2000),
                 connectTimeoutMs: Number(config.authHttp?.connectTimeoutMs || 1500),
                 pipelineCount: Number(config.authHttp?.pipelineCount || 2)
-            },
-            authFile: {
-                path: config.authFile?.path || "auth-users.txt"
             },
             authBuiltInDatabase: {
                 accountType: config.authBuiltInDatabase?.accountType || "username",

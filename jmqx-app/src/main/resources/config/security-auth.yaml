@@ -21,9 +21,6 @@ jmqx:
       requestTimeoutMs: 2000
       connectTimeoutMs: 1500
       pipelineCount: 2
-    # File auth backend.
-    file:
-      path: auth-users.txt
     # Built-in database auth backend.
     builtInDatabase:
       accountType: username

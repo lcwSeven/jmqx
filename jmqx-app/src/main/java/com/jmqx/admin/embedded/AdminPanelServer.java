@@ -874,7 +874,6 @@ public class AdminPanelServer {
                 + "\"authChain\":" + toStringArray(config.authChain()) + ","
                 + "\"cacheTtlMs\":" + config.cacheTtlMs() + ","
                 + "\"authHttp\":" + toAuthHttpJson(config.authHttp()) + ","
-                + "\"authFile\":" + toAuthFileJson(config.authFile()) + ","
                 + "\"authBuiltInDatabase\":" + toAuthBuiltInDatabaseJson(config.authBuiltInDatabase()) + ","
                 + "\"authRedis\":" + toAuthRedisJson(config.authRedis()) + ","
                 + "\"authMysql\":" + toAuthMysqlJson(config.authMysql()) + ","
@@ -975,12 +974,6 @@ public class AdminPanelServer {
                 + "\"requestTimeoutMs\":" + config.requestTimeoutMs() + ","
                 + "\"connectTimeoutMs\":" + config.connectTimeoutMs() + ","
                 + "\"pipelineCount\":" + config.pipelineCount()
-                + "}";
-    }
-
-    private static String toAuthFileJson(EmbeddedAdminStateStore.AuthFileConfig config) {
-        return "{"
-                + "\"path\":\"" + escape(config.path()) + "\""
                 + "}";
     }
 
@@ -1233,7 +1226,6 @@ public class AdminPanelServer {
         EmbeddedAdminStateStore.AclFileConfig aclFile = parseAclFileConfig(body, current.aclFile());
         EmbeddedAdminStateStore.AclRedisConfig aclRedis = parseAclRedisConfig(body, current.aclRedis());
         EmbeddedAdminStateStore.AuthHttpConfig authHttp = parseAuthHttpConfig(body, current.authHttp());
-        EmbeddedAdminStateStore.AuthFileConfig authFile = parseAuthFileConfig(body, current.authFile());
         EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig authBuiltInDatabase = parseAuthBuiltInDatabaseConfig(body, current.authBuiltInDatabase());
         EmbeddedAdminStateStore.AuthRedisConfig authRedis = parseAuthRedisConfig(body, current.authRedis());
         EmbeddedAdminStateStore.AuthMysqlConfig authMysql = parseAuthMysqlConfig(body, current.authMysql());
@@ -1249,7 +1241,7 @@ public class AdminPanelServer {
                 authChain,
                 cacheTtlMs,
                 authHttp,
-                authFile,
+                current.authFile(),
                 authBuiltInDatabase,
                 authRedis,
                 authMysql,
@@ -1617,19 +1609,6 @@ public class AdminPanelServer {
                 extractInt(segment, "requestTimeoutMs", extractInt(segment, "timeoutMs", current.requestTimeoutMs())),
                 extractInt(segment, "connectTimeoutMs", current.connectTimeoutMs()),
                 extractInt(segment, "pipelineCount", current.pipelineCount())
-        );
-    }
-
-    private static EmbeddedAdminStateStore.AuthFileConfig parseAuthFileConfig(
-            String body,
-            EmbeddedAdminStateStore.AuthFileConfig current
-    ) {
-        String segment = extractObject(body, "authFile");
-        if (segment == null) {
-            return current;
-        }
-        return new EmbeddedAdminStateStore.AuthFileConfig(
-                normalize(extractString(segment, "path"), current.path())
         );
     }
 

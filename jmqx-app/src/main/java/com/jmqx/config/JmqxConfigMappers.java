@@ -72,7 +72,6 @@ public final class JmqxConfigMappers {
         properties.setHttpRequestTimeoutMs(config.getInt("jmqx.auth.http.requestTimeoutMs", config.getInt("jmqx.auth.http.timeoutMs", properties.getHttpRequestTimeoutMs())));
         properties.setHttpConnectTimeoutMs(config.getInt("jmqx.auth.http.connectTimeoutMs", properties.getHttpConnectTimeoutMs()));
         properties.setHttpPipelineCount(config.getInt("jmqx.auth.http.pipelineCount", properties.getHttpPipelineCount()));
-        properties.setFilePath(config.getString("jmqx.auth.file.path", properties.getFilePath()));
         properties.setBuiltInDatabaseAccountType(config.getString("jmqx.auth.builtInDatabase.accountType", properties.getBuiltInDatabaseAccountType()));
         properties.setBuiltInDatabasePasswordHashAlgorithm(config.getString("jmqx.auth.builtInDatabase.passwordHashAlgorithm", properties.getBuiltInDatabasePasswordHashAlgorithm()));
         properties.setBuiltInDatabaseSaltPosition(config.getString("jmqx.auth.builtInDatabase.saltPosition", properties.getBuiltInDatabaseSaltPosition()));
@@ -199,7 +198,7 @@ public final class JmqxConfigMappers {
 
     public static List<String> resolveAuthChain(AuthProperties authProperties) {
         List<String> fromChain = normalizePluginList(splitCommaList(authProperties.getChain()));
-        return filterAllowAll(fromChain);
+        return filterRemovedAuthPlugins(filterAllowAll(fromChain));
     }
 
     public static List<String> resolveAclChain(AclProperties aclProperties) {
@@ -250,6 +249,20 @@ public final class JmqxConfigMappers {
         List<String> result = new ArrayList<>();
         for (String value : values) {
             if ("allow_all".equalsIgnoreCase(value)) {
+                continue;
+            }
+            result.add(value);
+        }
+        return result;
+    }
+
+    private static List<String> filterRemovedAuthPlugins(List<String> values) {
+        if (values == null || values.isEmpty()) {
+            return List.of();
+        }
+        List<String> result = new ArrayList<>();
+        for (String value : values) {
+            if ("file".equalsIgnoreCase(value)) {
                 continue;
             }
             result.add(value);

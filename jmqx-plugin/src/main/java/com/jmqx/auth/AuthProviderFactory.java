@@ -1,13 +1,11 @@
 package com.jmqx.auth;
 
 import java.util.HashMap;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
 import java.util.ServiceLoader;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 /**
  * Auth provider 装配工厂。
@@ -39,35 +37,43 @@ public final class AuthProviderFactory {
     ) {
         List<String> chainTypes = parseChain(properties.getChain());
         if (!chainTypes.isEmpty()) {
-            // 链式模式下只保留配置中显式存在的插件，顺序完全以配置为准。
-            List<AuthProvider> chain = chainTypes.stream()
-                .map(plugins::get)
-                .filter(Objects::nonNull)
-                .map(plugin -> plugin.create(properties))
-                .collect(Collectors.toList());
+            List<AuthProvider> chain = new ArrayList<>();
+            for (String chainType : chainTypes) {
+                AuthProviderPlugin plugin = plugins.get(chainType);
+                if (plugin != null) {
+                    chain.add(plugin.create(properties));
+                }
+            }
+            if (chain.isEmpty()) {
+                return plugins.get("allow_all").create(properties);
+            }
             return new ChainedAuthProvider(chain);
         }
         return plugins.get("allow_all").create(properties);
     }
 
     private static List<String> parseChain(String chainRaw) {
+        List<String> result = new ArrayList<>();
         if (chainRaw == null || chainRaw.isBlank()) {
-            return List.of();
+            return result;
         }
-        return Stream.of(chainRaw.split(","))
-            .map(AuthProviderFactory::normalizeChainType)
-            .filter(type -> !type.isBlank())
-            .collect(Collectors.toList());
+        String[] values = chainRaw.split(",");
+        for (String value : values) {
+            String normalized = normalizeChainType(value);
+            if (!normalized.isBlank()) {
+                result.add(normalized);
+            }
+        }
+        return result;
     }
 
     private static void registerBuiltins(Map<String, AuthProviderPlugin> plugins) {
-        plugins.put("allow_all", new NamedPlugin("allow_all", p -> new AllowAllAuthProvider()));
-        plugins.put("built_in_database", new NamedPlugin("built_in_database", BuiltInDatabaseAuthProvider::new));
-        plugins.put("http", new NamedPlugin("http", HttpAuthProvider::new));
-        plugins.put("file", new NamedPlugin("file", FileAuthProvider::new));
-        plugins.put("redis", new NamedPlugin("redis", RedisAuthProvider::new));
-        plugins.put("mysql", new NamedPlugin("mysql", JdbcAuthProvider::mysql));
-        plugins.put("postgresql", new NamedPlugin("postgresql", JdbcAuthProvider::postgresql));
+        plugins.put("allow_all", new AllowAllPlugin());
+        plugins.put("built_in_database", new BuiltInDatabasePlugin());
+        plugins.put("http", new HttpPlugin());
+        plugins.put("redis", new RedisPlugin());
+        plugins.put("mysql", new MysqlPlugin());
+        plugins.put("postgresql", new PostgresqlPlugin());
     }
 
     private static void loadExtensions(Map<String, AuthProviderPlugin> plugins) {
@@ -88,31 +94,77 @@ public final class AuthProviderFactory {
      * @author liucaiwen
      * @date 2026/4/4
      */
-    private static class NamedPlugin implements AuthProviderPlugin {
-        private final String type;
-        private final Creator creator;
-
-        private NamedPlugin(String type, Creator creator) {
-            this.type = type;
-            this.creator = creator;
-        }
-
+    private static class AllowAllPlugin implements AuthProviderPlugin {
         @Override
         public String type() {
-            return type;
+            return "allow_all";
         }
 
         @Override
         public AuthProvider create(AuthProperties properties) {
-            return creator.create(properties);
+            return new AllowAllAuthProvider();
         }
     }
 
-    /**
-     * @author liucaiwen
-     * @date 2026/4/4
-     */
-    private interface Creator {
-        AuthProvider create(AuthProperties properties);
+    private static class BuiltInDatabasePlugin implements AuthProviderPlugin {
+        @Override
+        public String type() {
+            return "built_in_database";
+        }
+
+        @Override
+        public AuthProvider create(AuthProperties properties) {
+            return new BuiltInDatabaseAuthProvider(properties);
+        }
+    }
+
+    private static class HttpPlugin implements AuthProviderPlugin {
+        @Override
+        public String type() {
+            return "http";
+        }
+
+        @Override
+        public AuthProvider create(AuthProperties properties) {
+            return new HttpAuthProvider(properties);
+        }
+    }
+
+
+
+    private static class RedisPlugin implements AuthProviderPlugin {
+        @Override
+        public String type() {
+            return "redis";
+        }
+
+        @Override
+        public AuthProvider create(AuthProperties properties) {
+            return new RedisAuthProvider(properties);
+        }
+    }
+
+    private static class MysqlPlugin implements AuthProviderPlugin {
+        @Override
+        public String type() {
+            return "mysql";
+        }
+
+        @Override
+        public AuthProvider create(AuthProperties properties) {
+            return JdbcAuthProvider.mysql(properties);
+        }
+    }
+
+    private static class PostgresqlPlugin implements AuthProviderPlugin {
+        @Override
+        public String type() {
+            return "postgresql";
+        }
+
+        @Override
+        public AuthProvider create(AuthProperties properties) {
+            return JdbcAuthProvider.postgresql(properties);
+        }
     }
 }

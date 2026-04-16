@@ -19,8 +19,6 @@ public class AuthProperties {
     private int httpConnectTimeoutMs = 1500;
     private int httpPipelineCount = 2;
 
-    private String filePath = "auth-users.txt";
-
     private static final String BUILT_IN_DATABASE_PATH = "data/auth-built-in-rocksdb";
 
     private String builtInDatabaseAccountType = "username";
@@ -156,14 +154,6 @@ public class AuthProperties {
 
     public void setHttpTimeoutMs(int httpTimeoutMs) {
         this.httpRequestTimeoutMs = httpTimeoutMs;
-    }
-
-    public String getFilePath() {
-        return filePath;
-    }
-
-    public void setFilePath(String filePath) {
-        this.filePath = filePath;
     }
 
     public String getBuiltInDatabasePath() {
