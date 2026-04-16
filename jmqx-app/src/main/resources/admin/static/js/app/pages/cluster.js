@@ -13,10 +13,10 @@ export const clusterPageMethods = {
             };
             await saveClusterConfig(this.currentClusterId, payload);
             await this.loadAuditLogs();
-            this.message = "集群配置保存成功";
+            this.message = "集群部署配置已保存，重启或重部署后生效";
             this.error = "";
         } catch (e) {
-            this.error = "保存集群配置失败: " + e.message;
+            this.error = "保存集群部署配置失败: " + e.message;
         }
     }
 };

@@ -166,7 +166,7 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
         if (existing == null) {
             return;
         }
-        state.clientSnapshots.put(clientId, new ClientSnapshot(
+        state.clientSnapshots.put(existing.clientId(), new ClientSnapshot(
                 existing.clientId(),
                 existing.nodeId(),
                 existing.clientIp(),
@@ -880,6 +880,7 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
             connectedAt = Math.max(0L, connectedAt);
             subscribedTopics = normalizeList(subscribedTopics);
         }
+
     }
 
     /**

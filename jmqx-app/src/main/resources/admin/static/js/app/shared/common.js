@@ -1,10 +1,34 @@
 import { changeAdminPassword, clearStoredAdminAuth, fetchAdminSession, fetchClusters, storeAdminAuth } from "../../api.js";
+import { normalizeAdminLocale, storeAdminLocale, translate } from "../i18n.js";
 import { createInitialState } from "../state.js";
 
 export const commonMethods = {
+    tr(key, params) {
+        return translate(this.locale, key, params);
+    },
+    switchLocale(locale) {
+        this.locale = normalizeAdminLocale(locale);
+        storeAdminLocale(this.locale);
+        this.message = "";
+        this.error = "";
+    },
+    handleLocaleCommand(locale) {
+        this.switchLocale(locale);
+    },
+    currentUiLocale() {
+        return this.locale === "en-US" ? "en-US" : "zh-CN";
+    },
     clearTips() {
         this.message = "";
         this.error = "";
+    },
+    toggleSidebar() {
+        this.sidebarCollapsed = !this.sidebarCollapsed;
+        try {
+            window.localStorage.setItem("jmqx-admin-sidebar-collapsed", this.sidebarCollapsed ? "1" : "0");
+        } catch (e) {
+            // Ignore local storage failures.
+        }
     },
     setMenu(menu) {
         this.activeMenu = menu;
@@ -81,18 +105,18 @@ export const commonMethods = {
                 this.adminAuthenticated = false;
                 this.disconnectDashboardStream();
                 this.resetAdminWorkspace();
-                this.error = "请输入内嵌管理后台账号密码";
+                this.error = this.tr("message.adminAuthRequired");
                 return;
             }
             throw e;
         }
         const tasks = [
-            { label: "登录会话", run: () => this.loadAdminSession() },
-            { label: "集群概览", run: () => this.refreshOverview() },
-            { label: "客户端列表", run: () => this.queryClients() },
-            { label: "黑名单", optional: true, run: () => this.loadBlacklistEntries() },
-            { label: "安全配置", run: () => this.loadSecurityConfig() },
-            { label: "桥接配置", run: () => this.loadBridgeConfig() }
+            { label: this.tr("message.sessionLabel"), run: () => this.loadAdminSession() },
+            { label: this.tr("menu.overview"), run: () => this.refreshOverview() },
+            { label: this.tr("menu.clients"), run: () => this.queryClients() },
+            { label: this.tr("menu.blacklist"), optional: true, run: () => this.loadBlacklistEntries() },
+            { label: this.tr("message.securityConfigLabel"), run: () => this.loadSecurityConfig() },
+            { label: this.tr("message.bridgeConfigLabel"), run: () => this.loadBridgeConfig() }
         ];
         const results = await Promise.allSettled(tasks.map(task => task.run()));
         const failures = [];
@@ -111,18 +135,22 @@ export const commonMethods = {
             this.adminAuthenticated = false;
             this.disconnectDashboardStream();
             this.resetAdminWorkspace();
-            this.error = "请输入内嵌管理后台账号密码";
+            this.error = this.tr("message.adminAuthRequired");
             return;
         }
         this.adminAuthRequired = false;
         this.adminAuthenticated = true;
         const blockingFailures = failures.filter(item => !item.optional);
         if (blockingFailures.length > 0) {
-            this.error = "加载集群数据失败: " + blockingFailures.map(item => item.label + "（" + item.message + "）").join("；");
+            this.error = this.tr("message.loadClusterDataFailed", {
+                details: blockingFailures.map(item => item.label + " (" + item.message + ")").join("; ")
+            });
         }
         const optionalFailures = failures.filter(item => item.optional);
         if (optionalFailures.length > 0) {
-            this.message = optionalFailures.map(item => item.label + "暂不可用，已跳过加载").join("；");
+            this.message = optionalFailures
+                .map(item => this.tr("message.optionalLoadSkipped", { label: item.label }))
+                .join("; ");
         }
     },
     async loadClusters() {
@@ -159,10 +187,10 @@ export const commonMethods = {
             await this.reloadCurrentClusterData();
             if (this.adminAuthenticated) {
                 this.connectDashboardStream();
-                this.message = `已切换到集群 ${this.currentClusterId}`;
+                this.message = this.tr("message.clusterSwitched", { clusterId: this.currentClusterId });
             }
         } catch (e) {
-            this.error = "切换集群失败: " + (e?.message || "request failed");
+            this.error = this.tr("message.switchClusterFailed", { message: e?.message || "request failed" });
         }
     },
     async loadAdminSession() {
@@ -183,10 +211,10 @@ export const commonMethods = {
             await this.reloadCurrentClusterData();
             if (this.adminAuthenticated) {
                 this.connectDashboardStream();
-                this.message = "管理后台登录成功";
+                this.message = this.tr("message.loginSuccess");
             }
         } catch (e) {
-            this.error = "登录失败: " + (e?.message || "request failed");
+            this.error = this.tr("message.loginFailed", { message: e?.message || "request failed" });
         }
     },
     openAdminPasswordDialog() {
@@ -202,15 +230,15 @@ export const commonMethods = {
     async submitAdminPasswordChange() {
         this.clearTips();
         if (!this.adminPasswordForm.currentPassword) {
-            this.error = "请输入当前密码";
+            this.error = this.tr("message.currentPasswordRequired");
             return;
         }
         if (!this.adminPasswordForm.newPassword) {
-            this.error = "请输入新密码";
+            this.error = this.tr("message.newPasswordRequired");
             return;
         }
         if (this.adminPasswordForm.newPassword !== this.adminPasswordForm.confirmPassword) {
-            this.error = "两次输入的新密码不一致";
+            this.error = this.tr("message.passwordMismatch");
             return;
         }
         await changeAdminPassword({
@@ -226,7 +254,7 @@ export const commonMethods = {
         this.adminPasswordForm.confirmPassword = "";
         this.disconnectDashboardStream();
         this.connectDashboardStream();
-        this.message = "管理后台密码已更新";
+        this.message = this.tr("message.passwordUpdated");
     },
     handleAdminMenuCommand(command) {
         if (command === "change-password") {
@@ -244,8 +272,8 @@ export const commonMethods = {
         this.adminAuthRequired = true;
         this.resetAdminWorkspace();
         this.adminLoginForm.password = "";
-        this.message = "";
-        this.error = "已退出登录";
+        this.error = "";
+        this.message = this.tr("message.loggedOut");
     },
     toCommaList(val) {
         if (Array.isArray(val)) {
@@ -273,10 +301,10 @@ export const commonMethods = {
         if (!Number.isFinite(timestamp) || timestamp <= 0) {
             return "-";
         }
-        return new Date(timestamp).toLocaleString(undefined, { hour12: false });
+        return new Date(timestamp).toLocaleString(this.currentUiLocale(), { hour12: false });
     },
     formatNumber(value) {
         const num = Number(value || 0);
-        return Number.isFinite(num) ? num.toLocaleString() : "0";
+        return Number.isFinite(num) ? num.toLocaleString(this.currentUiLocale()) : "0";
     }
 };

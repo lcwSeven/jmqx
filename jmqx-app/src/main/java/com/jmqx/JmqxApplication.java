@@ -261,11 +261,8 @@ public class JmqxApplication {
                         aclAuthorizer,
                         securityConfig
                 ),
-                (clusterId, clusterConfig) -> applyRuntimeClusterConfig(
-                        sharedSubscriptionManager,
-                        context.sharedSlowThreshold(),
-                        clusterConfig
-                ),
+                (clusterId, clusterConfig) -> {
+                },
                 (clusterId, bridgeConfig) -> applyRuntimeBridgeConfig(
                         context.bridgeProperties(),
                         messageBridge,
@@ -1428,20 +1425,6 @@ public class JmqxApplication {
                 );
             }
         }
-    }
-
-    private static void applyRuntimeClusterConfig(
-            SharedSubscriptionManager sharedSubscriptionManager,
-            int slowConsumerStrikeThreshold,
-            EmbeddedAdminStateStore.ClusterConfig clusterConfig
-    ) {
-        if (sharedSubscriptionManager == null || clusterConfig == null) {
-            return;
-        }
-        sharedSubscriptionManager.reconfigure(
-                clusterConfig.sharedSubscriptionMaxMembersPerGroup(),
-                slowConsumerStrikeThreshold
-        );
     }
 
     private static List<String> splitCommaList(String raw) {

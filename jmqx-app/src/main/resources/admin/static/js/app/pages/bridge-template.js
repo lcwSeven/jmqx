@@ -2,38 +2,38 @@ export const bridgePageTemplate = `
   <section class="panel auth-surface" v-if="activeMenu==='bridge' && !bridgeCreateMode">
     <div class="section-head">
       <div>
-        <h2 class="title auth-title">桥接全局配置</h2>
-        <div class="section-subtitle">全局 Topic Filters 和异步桥接参数会统一作用到所有已创建桥接器。</div>
+        <h2 class="title auth-title">{{ tr('bridge.global.title') }}</h2>
+        <div class="section-subtitle">{{ tr('bridge.global.subtitle') }}</div>
       </div>
-      <el-button type="primary" @click="saveBridgeGlobalConfig">保存全局配置</el-button>
+      <el-button type="primary" @click="saveBridgeGlobalConfig">{{ tr('bridge.global.save') }}</el-button>
     </div>
 
     <div class="form-grid auth-config-grid auth-config-stack">
       <label class="field">
-        <span class="field-label">全局 Topic Filters</span>
+        <span class="field-label">{{ tr('bridge.global.topicFilters') }}</span>
         <el-input
           :model-value="joinLine(bridgeConfig.topicFilters)"
           type="textarea"
           :rows="4"
-          placeholder="留空表示桥接所有非 Dashboard 主题，每行一个 topic filter"
+          :placeholder="tr('bridge.global.placeholder')"
           @input="bridgeConfig.topicFilters = $event"
         />
-        <div class="hint">留空表示桥接所有非 Dashboard 主题；填写后仅桥接命中的主题。</div>
+        <div class="hint">{{ tr('bridge.global.hint') }}</div>
       </label>
 
       <details class="advanced-block">
-        <summary class="advanced-summary">高级配置：异步桥接</summary>
+        <summary class="advanced-summary">{{ tr('bridge.global.advanced') }}</summary>
         <div class="advanced-fields">
           <label class="field">
-            <span class="field-label">启用异步桥接</span>
-            <el-switch v-model="bridgeConfig.asyncEnabled" active-text="是" inactive-text="否"></el-switch>
+            <span class="field-label">{{ tr('bridge.global.asyncEnabled') }}</span>
+            <el-switch v-model="bridgeConfig.asyncEnabled" :active-text="tr('common.yes')" :inactive-text="tr('common.no')"></el-switch>
           </label>
           <label class="field">
-            <span class="field-label">异步队列容量</span>
+            <span class="field-label">{{ tr('bridge.global.asyncQueueCapacity') }}</span>
             <el-input-number v-model="bridgeConfig.asyncQueueCapacity" :min="1024" controls-position="right" />
           </label>
           <label class="field">
-            <span class="field-label">异步 Worker 数</span>
+            <span class="field-label">{{ tr('bridge.global.asyncWorkerCount') }}</span>
             <el-input-number v-model="bridgeConfig.asyncWorkerCount" :min="1" controls-position="right" />
           </label>
         </div>
@@ -41,23 +41,23 @@ export const bridgePageTemplate = `
     </div>
 
     <div class="auth-chain-preview">
-      <div class="field-label">当前桥接器</div>
+      <div class="field-label">{{ tr('bridge.global.currentBridges') }}</div>
       <div class="auth-chain-preview-value">
-        {{ joinComma(bridgeConfig.types) || '未创建桥接器' }}
+        {{ joinComma(bridgeConfig.types) || tr('bridge.global.empty') }}
       </div>
-      <div class="hint">桥接器之间互相独立，不存在链式执行顺序；是否生效由各自的启用状态决定。</div>
+      <div class="hint">{{ tr('bridge.global.chainHint') }}</div>
     </div>
 
     <div class="auth-list-toolbar bridge-list-toolbar">
       <div>
-        <h2 class="title auth-title">桥接器列表</h2>
-        <div class="section-subtitle">创建和管理具体的 Kafka、RocketMQ、MySQL 桥接器。</div>
+        <h2 class="title auth-title">{{ tr('bridge.list.title') }}</h2>
+        <div class="section-subtitle">{{ tr('bridge.list.subtitle') }}</div>
       </div>
-      <el-button type="primary" size="large" @click="openBridgeCreate" :disabled="!availableBridgeDatasourceOptions.length">+ 创建</el-button>
+      <el-button type="primary" size="large" @click="openBridgeCreate" :disabled="!availableBridgeDatasourceOptions.length">{{ tr('bridge.list.create') }}</el-button>
     </div>
 
     <el-table v-if="bridgeEntries.length" :data="bridgeEntries" stripe class="ep-table auth-ep-table">
-      <el-table-column label="桥接器" min-width="280">
+      <el-table-column :label="tr('bridge.list.column.bridge')" min-width="280">
         <template #default="scope">
           <div class="auth-main-cell">
             <div class="auth-main-name">{{ scope.row.displayName }}</div>
@@ -66,57 +66,57 @@ export const bridgePageTemplate = `
         </template>
       </el-table-column>
 
-      <el-table-column label="状态" width="140">
+      <el-table-column :label="tr('bridge.list.column.status')" width="140">
         <template #default="scope">
           <el-tag :type="bridgeEntryEnabled(scope.row.type) ? 'success' : 'info'" effect="light">
-            {{ bridgeEntryEnabled(scope.row.type) ? '已启用' : '已停用' }}
+            {{ bridgeEntryEnabled(scope.row.type) ? tr('status.enabled') : tr('status.disabled') }}
           </el-tag>
         </template>
       </el-table-column>
 
-      <el-table-column label="局部 Topic Filters" min-width="240">
+      <el-table-column :label="tr('bridge.list.column.localFilters')" min-width="240">
         <template #default="scope">
           {{ scope.row.type === 'rocketmq'
-              ? (joinComma(bridgeConfig.rocketmq.sourceTopicFilters) || '未配置')
+              ? (joinComma(bridgeConfig.rocketmq.sourceTopicFilters) || tr('status.notConfigured'))
               : scope.row.type === 'mysql'
-                  ? (joinComma(bridgeConfig.mysql.sourceTopicFilters) || '未配置')
-                  : (joinComma(bridgeConfig.kafka.sourceTopicFilters) || '未配置') }}
+                  ? (joinComma(bridgeConfig.mysql.sourceTopicFilters) || tr('status.notConfigured'))
+                  : (joinComma(bridgeConfig.kafka.sourceTopicFilters) || tr('status.notConfigured')) }}
         </template>
       </el-table-column>
 
-      <el-table-column label="操作" min-width="240">
+      <el-table-column :label="tr('bridge.list.column.actions')" min-width="240">
         <template #default="scope">
           <div class="auth-actions ep-actions auth-list-actions">
             <el-switch
               :model-value="bridgeEntryEnabled(scope.row.type)"
-              active-text="启用"
-              inactive-text="停用"
+              :active-text="tr('bridge.list.enable')"
+              :inactive-text="tr('bridge.list.disable')"
               @change="toggleBridgeEntryEnabled(scope.row.type, $event)"
             />
-            <el-button size="small" @click="openBridgeSettings(scope.row.type)">设置</el-button>
-            <el-button size="small" type="danger" plain @click="removeBridgeEntry(scope.row.type)">删除</el-button>
+            <el-button size="small" @click="openBridgeSettings(scope.row.type)">{{ tr('security.common.edit') }}</el-button>
+            <el-button size="small" type="danger" plain @click="removeBridgeEntry(scope.row.type)">{{ tr('security.common.delete') }}</el-button>
           </div>
         </template>
       </el-table-column>
     </el-table>
 
-    <el-empty v-else description="暂无桥接器配置。" class="auth-empty"></el-empty>
+    <el-empty v-else :description="tr('bridge.list.empty')" class="auth-empty"></el-empty>
   </section>
 
   <section class="panel auth-surface" v-if="activeMenu==='bridge' && bridgeCreateMode">
     <div class="auth-create-header">
-      <el-button plain @click="cancelBridgeCreate">返回</el-button>
+      <el-button plain @click="cancelBridgeCreate">{{ tr('common.back') }}</el-button>
       <span class="auth-sep">|</span>
-      <h2 class="title auth-title">{{ bridgeEditingType ? '设置桥接器' : '创建桥接器' }}</h2>
+      <h2 class="title auth-title">{{ bridgeEditingType ? tr('bridge.edit.title') : tr('bridge.create.title') }}</h2>
     </div>
 
     <el-steps :active="bridgeStep" align-center finish-status="success" class="auth-steps">
-      <el-step title="桥接器类型"></el-step>
-      <el-step title="配置参数"></el-step>
+      <el-step :title="tr('bridge.step.type')"></el-step>
+      <el-step :title="tr('bridge.step.config')"></el-step>
     </el-steps>
 
     <div v-if="bridgeStep===1">
-      <div class="auth-hint">选择要创建的桥接器类型</div>
+      <div class="auth-hint">{{ tr('bridge.hint.selectType') }}</div>
       <div class="auth-option-grid datasource-grid">
         <el-button
           v-for="item in bridgeDraftDatasourceOptions"
@@ -125,156 +125,156 @@ export const bridgePageTemplate = `
           :type="bridgeDraft.datasource===item.key ? 'primary' : 'default'"
           :plain="bridgeDraft.datasource!==item.key"
           @click="selectBridgeDatasource(item.key)">
-          <span class="ds-icon">{{ item.icon }}</span>{{ item.label }}
+          <span class="ds-icon">{{ item.icon }}</span>{{ tr(item.label) }}
         </el-button>
       </div>
     </div>
 
     <div v-if="bridgeStep===2">
-      <div class="auth-hint">当前桥接器：{{ bridgeDatasourceLabel() }}</div>
+      <div class="auth-hint">{{ tr('bridge.hint.current', { value: bridgeDatasourceLabel() }) }}</div>
 
       <div class="form-grid auth-config-grid auth-config-stack">
         <div class="auth-chain-preview">
-          <div class="field-label">保存后生效的桥接器</div>
+          <div class="field-label">{{ tr('bridge.chainAfterSave') }}</div>
           <div class="auth-chain-preview-value">
-            {{ joinComma(bridgeEditingType ? bridgeConfig.types : [...bridgeConfig.types, bridgeDraft.datasource].filter((value, index, array) => value && array.indexOf(value) === index)) || '未创建桥接器' }}
+            {{ joinComma(bridgeEditingType ? bridgeConfig.types : [...bridgeConfig.types, bridgeDraft.datasource].filter((value, index, array) => value && array.indexOf(value) === index)) || tr('bridge.global.empty') }}
           </div>
-          <div class="hint">全局 Topic Filters 请在上一页顶部配置；这里仅维护当前桥接器自己的连接和目标参数。</div>
+          <div class="hint">{{ tr('bridge.hint.parameters') }}</div>
         </div>
 
         <label class="field">
-          <span class="field-label">启用当前桥接器</span>
+          <span class="field-label">{{ tr('bridge.field.enableCurrent') }}</span>
           <el-switch
             v-if="bridgeDraft.datasource==='rocketmq'"
             v-model="bridgeDraft.rocketmq.enabled"
-            active-text="启用"
-            inactive-text="停用"
+            :active-text="tr('bridge.list.enable')"
+            :inactive-text="tr('bridge.list.disable')"
           ></el-switch>
           <el-switch
             v-else-if="bridgeDraft.datasource==='mysql'"
             v-model="bridgeDraft.mysql.enabled"
-            active-text="启用"
-            inactive-text="停用"
+            :active-text="tr('bridge.list.enable')"
+            :inactive-text="tr('bridge.list.disable')"
           ></el-switch>
           <el-switch
             v-else
             v-model="bridgeDraft.kafka.enabled"
-            active-text="启用"
-            inactive-text="停用"
+            :active-text="tr('bridge.list.enable')"
+            :inactive-text="tr('bridge.list.disable')"
           ></el-switch>
-          <div class="hint">每个桥接器都可以单独启用或停用，不影响其他桥接器。</div>
+          <div class="hint">{{ tr('bridge.hint.enableCurrent') }}</div>
         </label>
 
         <template v-if="bridgeDraft.datasource==='kafka'">
           <label class="field">
-            <span class="field-label">Bootstrap Servers</span>
+            <span class="field-label">{{ tr('bridge.field.bootstrapServers') }}</span>
             <el-input v-model="bridgeDraft.kafka.bootstrapServers" placeholder="127.0.0.1:9092" />
           </label>
           <label class="field">
-            <span class="field-label">目标 Topic</span>
+            <span class="field-label">{{ tr('bridge.field.targetTopic') }}</span>
             <el-input v-model="bridgeDraft.kafka.topic" placeholder="jmqx-messages" />
           </label>
           <label class="field">
-            <span class="field-label">局部 Topic Filters</span>
+            <span class="field-label">{{ tr('bridge.field.localTopicFilters') }}</span>
             <el-input
               :model-value="joinLine(bridgeDraft.kafka.sourceTopicFilters)"
               type="textarea"
               :rows="3"
-              placeholder="每行一个 topic filter，留空表示不过滤"
+              :placeholder="tr('bridge.placeholder.localTopicFilters')"
               @input="bridgeDraft.kafka.sourceTopicFilters = $event"
             />
           </label>
           <label class="field">
-            <span class="field-label">acks</span>
+            <span class="field-label">{{ tr('bridge.field.acks') }}</span>
             <el-input v-model="bridgeDraft.kafka.acks" placeholder="1" />
           </label>
           <label class="field">
-            <span class="field-label">clientId</span>
+            <span class="field-label">{{ tr('bridge.field.clientId') }}</span>
             <el-input v-model="bridgeDraft.kafka.clientId" placeholder="jmqx-bridge" />
           </label>
           <label class="field">
-            <span class="field-label">compressionType</span>
+            <span class="field-label">{{ tr('bridge.field.compressionType') }}</span>
             <el-input v-model="bridgeDraft.kafka.compressionType" placeholder="none" />
           </label>
         </template>
 
         <template v-if="bridgeDraft.datasource==='rocketmq'">
           <label class="field">
-            <span class="field-label">NameServer</span>
+            <span class="field-label">{{ tr('bridge.field.nameServer') }}</span>
             <el-input v-model="bridgeDraft.rocketmq.nameServer" placeholder="127.0.0.1:9876" />
           </label>
           <label class="field">
-            <span class="field-label">Producer Group</span>
+            <span class="field-label">{{ tr('bridge.field.producerGroup') }}</span>
             <el-input v-model="bridgeDraft.rocketmq.producerGroup" placeholder="jmqx-bridge-group" />
           </label>
           <label class="field">
-            <span class="field-label">目标 Topic</span>
+            <span class="field-label">{{ tr('bridge.field.targetTopic') }}</span>
             <el-input v-model="bridgeDraft.rocketmq.topic" placeholder="JMQX_MESSAGES" />
           </label>
           <label class="field">
-            <span class="field-label">局部 Topic Filters</span>
+            <span class="field-label">{{ tr('bridge.field.localTopicFilters') }}</span>
             <el-input
               :model-value="joinLine(bridgeDraft.rocketmq.sourceTopicFilters)"
               type="textarea"
               :rows="3"
-              placeholder="每行一个 topic filter，留空表示不过滤"
+              :placeholder="tr('bridge.placeholder.localTopicFilters')"
               @input="bridgeDraft.rocketmq.sourceTopicFilters = $event"
             />
           </label>
           <label class="field">
-            <span class="field-label">同步发送</span>
-            <el-switch v-model="bridgeDraft.rocketmq.syncSend" active-text="是" inactive-text="否"></el-switch>
+            <span class="field-label">{{ tr('bridge.field.syncSend') }}</span>
+            <el-switch v-model="bridgeDraft.rocketmq.syncSend" :active-text="tr('common.yes')" :inactive-text="tr('common.no')"></el-switch>
           </label>
           <label class="field">
-            <span class="field-label">超时时间（毫秒）</span>
+            <span class="field-label">{{ tr('bridge.field.timeoutMs') }}</span>
             <el-input-number v-model="bridgeDraft.rocketmq.timeoutMs" :min="100" controls-position="right" />
           </label>
         </template>
 
         <template v-if="bridgeDraft.datasource==='mysql'">
           <label class="field">
-            <span class="field-label">JDBC Driver</span>
+            <span class="field-label">{{ tr('bridge.field.jdbcDriver') }}</span>
             <el-input v-model="bridgeDraft.mysql.driver" placeholder="com.mysql.cj.jdbc.Driver" />
           </label>
           <label class="field">
-            <span class="field-label">JDBC URL</span>
+            <span class="field-label">{{ tr('bridge.field.jdbcUrl') }}</span>
             <el-input v-model="bridgeDraft.mysql.url" placeholder="jdbc:mysql://127.0.0.1:3306/jmqx" />
           </label>
           <label class="field">
-            <span class="field-label">用户名</span>
+            <span class="field-label">{{ tr('bridge.field.username') }}</span>
             <el-input v-model="bridgeDraft.mysql.user" placeholder="root" />
           </label>
           <label class="field">
-            <span class="field-label">密码</span>
+            <span class="field-label">{{ tr('bridge.field.password') }}</span>
             <el-input v-model="bridgeDraft.mysql.password" type="password" show-password />
           </label>
           <label class="field">
-            <span class="field-label">表名</span>
+            <span class="field-label">{{ tr('bridge.field.tableName') }}</span>
             <el-input v-model="bridgeDraft.mysql.table" placeholder="jmqx_bridge_message" />
           </label>
           <label class="field">
-            <span class="field-label">局部 Topic Filters</span>
+            <span class="field-label">{{ tr('bridge.field.localTopicFilters') }}</span>
             <el-input
               :model-value="joinLine(bridgeDraft.mysql.sourceTopicFilters)"
               type="textarea"
               :rows="3"
-              placeholder="每行一个 topic filter，留空表示不过滤"
+              :placeholder="tr('bridge.placeholder.localTopicFilters')"
               @input="bridgeDraft.mysql.sourceTopicFilters = $event"
             />
           </label>
           <label class="field">
-            <span class="field-label">自动建表</span>
-            <el-switch v-model="bridgeDraft.mysql.autoCreateTable" active-text="是" inactive-text="否"></el-switch>
+            <span class="field-label">{{ tr('bridge.field.autoCreateTable') }}</span>
+            <el-switch v-model="bridgeDraft.mysql.autoCreateTable" :active-text="tr('common.yes')" :inactive-text="tr('common.no')"></el-switch>
           </label>
         </template>
       </div>
     </div>
 
     <div class="auth-footer-actions">
-      <el-button @click="cancelBridgeCreate">取消</el-button>
-      <el-button v-if="bridgeStep>1" @click="previousBridgeStep">上一步</el-button>
-      <el-button type="primary" v-if="bridgeStep<2" @click="nextBridgeStep">下一步</el-button>
-      <el-button type="primary" v-if="bridgeStep===2" @click="createBridgeAndSave">{{ bridgeEditingType ? '保存' : '创建' }}</el-button>
+      <el-button @click="cancelBridgeCreate">{{ tr('common.cancel') }}</el-button>
+      <el-button v-if="bridgeStep>1" @click="previousBridgeStep">{{ tr('common.previous') }}</el-button>
+      <el-button type="primary" v-if="bridgeStep<2" @click="nextBridgeStep">{{ tr('common.next') }}</el-button>
+      <el-button type="primary" v-if="bridgeStep===2" @click="createBridgeAndSave">{{ bridgeEditingType ? tr('common.save') : tr('common.create') }}</el-button>
     </div>
   </section>
 `;

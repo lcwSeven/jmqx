@@ -1,5 +1,20 @@
+import { getAdminLocaleOptions, getStoredAdminLocale } from "./i18n.js";
+
+const SIDEBAR_COLLAPSED_STORAGE_KEY = "jmqx-admin-sidebar-collapsed";
+
+function getStoredSidebarCollapsed() {
+    try {
+        return window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === "1";
+    } catch (e) {
+        return false;
+    }
+}
+
 export function createInitialState() {
     return {
+        locale: getStoredAdminLocale(),
+        availableLocales: getAdminLocaleOptions(),
+        sidebarCollapsed: getStoredSidebarCollapsed(),
         activeMenu: "overview",
         message: "",
         error: "",
@@ -27,7 +42,7 @@ export function createInitialState() {
         clusters: [],
         currentClusterId: "default",
         clusterSelectionTouched: false,
-        mqttStatus: "未连接",
+        mqttStatus: "status.mqtt.disconnected",
         mqttClient: null,
         realtimeNodeMap: {},
         refreshClientsTimer: null,
@@ -230,12 +245,12 @@ export function createInitialState() {
         aclEditingPlugin: "",
         aclStep: 1,
         aclMethodOptions: [
-            { key: "topic", label: "Topic ACL" }
+            { key: "topic", label: "security.acl.method.topic" }
         ],
         aclDatasourceOptions: [
-            { key: "file", label: "文件", icon: "📄" },
-            { key: "redis", label: "Redis", icon: "🧱" },
-            { key: "http", label: "HTTP 服务", icon: "🌐" }
+            { key: "file", label: "security.acl.datasource.file", icon: "📄" },
+            { key: "redis", label: "security.acl.datasource.redis", icon: "🧱" },
+            { key: "http", label: "security.acl.datasource.http", icon: "🌐" }
         ],
         aclDraft: {
             method: "topic",
@@ -257,14 +272,14 @@ export function createInitialState() {
         authEditingPlugin: "",
         authStep: 1,
         authMethodOptions: [
-            { key: "password", label: "Password-Base" }
+            { key: "password", label: "security.auth.method.password" }
         ],
         authDatasourceOptions: [
-            { key: "built_in_database", label: "内置数据库", icon: "🗄️" },
-            { key: "mysql", label: "MySQL", icon: "🐬" },
-            { key: "postgresql", label: "PostgreSQL", icon: "🐘" },
-            { key: "redis", label: "Redis", icon: "🧱" },
-            { key: "http", label: "HTTP 服务", icon: "🌐" }
+            { key: "built_in_database", label: "security.auth.datasource.builtInDatabase", icon: "🗄️" },
+            { key: "mysql", label: "security.auth.datasource.mysql", icon: "🐬" },
+            { key: "postgresql", label: "security.auth.datasource.postgresql", icon: "🐘" },
+            { key: "redis", label: "security.auth.datasource.redis", icon: "🧱" },
+            { key: "http", label: "security.auth.datasource.http", icon: "🌐" }
         ],
         authDraft: {
             method: "password",

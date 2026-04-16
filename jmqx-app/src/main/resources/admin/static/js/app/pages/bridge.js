@@ -16,10 +16,10 @@ export const bridgePageMethods = {
             await saveBridgeConfig(this.currentClusterId, payload);
             this.bridgeConfig = this.normalizeBridgeConfig(payload);
             await this.loadAuditLogs();
-            this.message = "桥接配置保存成功";
+            this.message = this.tr("bridge.message.saved");
             this.error = "";
         } catch (e) {
-            this.error = "保存桥接配置失败: " + e.message;
+            this.error = this.tr("bridge.message.saveFailed", { message: e.message });
         }
     },
     normalizeBridgeConfig(config = {}) {
@@ -100,11 +100,11 @@ export const bridgePageMethods = {
     },
     bridgeDatasourceLabel() {
         const hit = this.bridgeDatasourceOptions.find(item => item.key === this.bridgeDraft.datasource);
-        return hit ? hit.label : "Kafka";
+        return hit ? this.tr(hit.label) : "Kafka";
     },
     openBridgeCreate() {
         if (!this.availableBridgeDatasourceOptions.length) {
-            this.error = "可用的桥接器类型已经全部创建";
+            this.error = this.tr("bridge.message.allUsed");
             return;
         }
         this.bridgeCreateMode = true;
@@ -155,11 +155,11 @@ export const bridgePageMethods = {
         try {
             const type = String(this.bridgeDraft.datasource || "").trim().toLowerCase();
             if (!type) {
-                this.error = "请选择桥接器类型";
+                this.error = this.tr("bridge.message.typeRequired");
                 return;
             }
             if (!this.bridgeEditingType && this.bridgeConfig.types.includes(type)) {
-                this.error = "同一种桥接器已存在，请直接编辑该项配置";
+                this.error = this.tr("bridge.message.duplicate");
                 return;
             }
             this.applyBridgeDraftToBridgeConfig(type);
@@ -173,10 +173,10 @@ export const bridgePageMethods = {
             this.bridgeCreateMode = false;
             this.bridgeEditingType = "";
             this.bridgeStep = 1;
-            this.message = "桥接器配置已保存";
+            this.message = this.tr("bridge.message.saved");
             this.error = "";
         } catch (e) {
-            this.error = "保存桥接器配置失败: " + e.message;
+            this.error = this.tr("bridge.message.saveFailed", { message: e.message });
         }
     },
     async removeBridgeEntry(type) {
@@ -192,10 +192,10 @@ export const bridgePageMethods = {
             }
             this.bridgeConfig.enabled = this.bridgeConfig.kafka.enabled || this.bridgeConfig.rocketmq.enabled || this.bridgeConfig.mysql.enabled;
             await this.saveBridgeConfig();
-            this.message = "桥接器已移除";
+            this.message = this.tr("bridge.message.removed");
             this.error = "";
         } catch (e) {
-            this.error = "删除桥接器失败: " + e.message;
+            this.error = this.tr("bridge.message.removeFailed", { message: e.message });
         }
     },
     applyBridgeDraftFromType(type) {

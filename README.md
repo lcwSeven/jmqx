@@ -166,7 +166,6 @@ Retained 常用参数：
 - 客户端列表与详情：`clientId / username / IP / keepalive / 连接方式 / 订阅主题`
 - ACL 鉴权配置：启用状态、插件链、缓存时间
 - 连接鉴权配置：启用状态、插件链、缓存时间、向导式创建
-- 集群配置：共享订阅成员上限等参数
 
 ### 数据打通状态
 
@@ -178,10 +177,11 @@ Retained 常用参数：
 已打通（写链路，动态生效）：
 
 - `security/config` 保存后，动态重载 AUTH / ACL 插件链（无须重启）
-- `cluster/config` 中 `sharedSubscriptionMaxMembersPerGroup` 保存后，动态更新共享订阅限制
+- `bridge/config` 保存后，动态重载桥接器配置（无须重启）
 
-暂未动态生效（仅管理态保存）：
+集群配置（仅管理态保存，需重启或重部署生效）：
 
+- `sharedSubscriptionMaxMembersPerGroup`
 - `coreNodes / replicantNodes / coreAcceptClientConnections`
 
 详细设计与接口见 [管理页面（Admin Console）](docs/06-admin-console.md)。

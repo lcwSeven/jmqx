@@ -9,7 +9,7 @@ export const clientsPageMethods = {
         if (!Array.isArray(this.clients.records)) {
             this.clients.records = [];
         }
-        const idx = this.clients.records.findIndex(item => item.clientId === event.clientId);
+        const idx = this.clients.records.findIndex(item => item?.clientId === event.clientId);
         if (event.event === "connected") {
             const row = {
                 clientId: event.clientId,
@@ -44,7 +44,7 @@ export const clientsPageMethods = {
         try {
             this.selectedClient = await fetchClientDetail(this.currentClusterId, clientId);
         } catch (e) {
-            this.error = "加载客户端详情失败: " + e.message;
+            this.error = this.tr("clients.message.loadDetailFailed", { message: e.message });
         }
     },
     removeClientFromVisibleList(clientId) {
@@ -69,11 +69,11 @@ export const clientsPageMethods = {
         if (messageBox?.confirm) {
             try {
                 await messageBox.confirm(
-                    `确认踢掉客户端 ${clientId} 吗？`,
-                    "踢下线客户端",
+                    this.tr("clients.message.kickConfirm", { clientId }),
+                    this.tr("clients.message.kickTitle"),
                     {
-                        confirmButtonText: "确认踢下线",
-                        cancelButtonText: "取消",
+                        confirmButtonText: this.tr("clients.message.kickConfirmButton"),
+                        cancelButtonText: this.tr("common.cancel"),
                         type: "warning"
                     }
                 );
@@ -84,10 +84,10 @@ export const clientsPageMethods = {
         try {
             await kickClient(this.currentClusterId, clientId);
             this.removeClientFromVisibleList(clientId);
-            this.message = `客户端 ${clientId} 已发起踢下线`;
+            this.message = this.tr("clients.message.kickRequested", { clientId });
             this.error = "";
         } catch (e) {
-            this.error = "踢客户端失败: " + e.message;
+            this.error = this.tr("clients.message.kickFailed", { message: e.message });
         }
     },
     async blockClientByClientId(clientId) {
@@ -97,7 +97,7 @@ export const clientsPageMethods = {
                 this.removeClientFromVisibleList(clientId);
             }
         } catch (e) {
-            this.error = "加入 clientId 黑名单失败: " + e.message;
+            this.error = this.tr("clients.message.blockClientIdFailed", { message: e.message });
         }
     },
     async blockClientByIp(clientIp, clientId) {
@@ -110,7 +110,7 @@ export const clientsPageMethods = {
                 }
             }
         } catch (e) {
-            this.error = "加入 IP 黑名单失败: " + e.message;
+            this.error = this.tr("clients.message.blockIpFailed", { message: e.message });
         }
     }
 };

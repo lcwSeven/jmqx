@@ -9,7 +9,7 @@ export const blacklistPageMethods = {
         const normalizedType = type === "ip" ? "ip" : "clientId";
         const normalizedValue = String(value || "").trim();
         if (!normalizedValue) {
-            this.error = normalizedType === "ip" ? "请输入要拉黑的 IP" : "请输入要拉黑的 clientId";
+            this.error = normalizedType === "ip" ? this.tr("blacklist.message.missingIp") : this.tr("blacklist.message.missingClientId");
             return false;
         }
         const data = await createBlacklistEntry(this.currentClusterId, {
@@ -20,8 +20,8 @@ export const blacklistPageMethods = {
         this.blacklistForm.type = normalizedType;
         this.blacklistForm.value = "";
         this.message = normalizedType === "ip"
-            ? `IP ${normalizedValue} 已加入黑名单`
-            : `clientId ${normalizedValue} 已加入黑名单`;
+            ? this.tr("blacklist.message.createdIp", { value: normalizedValue })
+            : this.tr("blacklist.message.createdClientId", { value: normalizedValue });
         this.error = "";
         return true;
     },
@@ -32,7 +32,7 @@ export const blacklistPageMethods = {
                 await this.queryClients();
             }
         } catch (e) {
-            this.error = "新增黑名单失败: " + e.message;
+            this.error = this.tr("blacklist.message.createFailed", { message: e.message });
         }
     },
     async removeBlacklistEntry(entry) {
@@ -42,11 +42,14 @@ export const blacklistPageMethods = {
         const messageBox = globalThis.ElementPlus?.ElMessageBox;
         if (messageBox?.confirm) {
             await messageBox.confirm(
-                `确认从黑名单中移除 ${entry.type === "ip" ? "IP" : "clientId"} ${entry.value} 吗？`,
-                "移除黑名单",
+                this.tr("blacklist.message.removeConfirm", {
+                    type: entry.type === "ip" ? this.tr("blacklist.type.ip") : this.tr("blacklist.type.clientId"),
+                    value: entry.value
+                }),
+                this.tr("blacklist.message.removeTitle"),
                 {
-                    confirmButtonText: "确认移除",
-                    cancelButtonText: "取消",
+                    confirmButtonText: this.tr("blacklist.message.removeConfirmButton"),
+                    cancelButtonText: this.tr("common.cancel"),
                     type: "warning"
                 }
             );
@@ -54,16 +57,19 @@ export const blacklistPageMethods = {
         try {
             const data = await deleteBlacklistEntry(this.currentClusterId, entry.type, entry.value);
             this.blacklistEntries = Array.isArray(data?.records) ? data.records : [];
-            this.message = `${entry.type === "ip" ? "IP" : "clientId"} ${entry.value} 已移出黑名单`;
+            this.message = this.tr("blacklist.message.removed", {
+                type: entry.type === "ip" ? this.tr("blacklist.type.ip") : this.tr("blacklist.type.clientId"),
+                value: entry.value
+            });
             this.error = "";
         } catch (e) {
             if (e?.message === "cancel") {
                 return;
             }
-            this.error = "移除黑名单失败: " + e.message;
+            this.error = this.tr("blacklist.message.removeFailed", { message: e.message });
         }
     },
     blacklistTypeLabel(type) {
-        return type === "ip" ? "IP" : "clientId";
+        return type === "ip" ? this.tr("blacklist.type.ip") : this.tr("blacklist.type.clientId");
     }
 };

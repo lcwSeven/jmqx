@@ -2,32 +2,32 @@ export const clientsPageTemplate = `
   <section class="panel" v-if="activeMenu==='clients' && !selectedClient">
     <div class="section-head">
       <div>
-        <h2 class="title">客户端列表</h2>
+        <h2 class="title">{{ tr('clients.title') }}</h2>
         <div class="section-subtitle">{{ clientsSummaryText }}</div>
       </div>
     </div>
     <div class="toolbar">
-      <input v-model="search.clientId" placeholder="客户端 ID"/>
-      <input v-model="search.userName" placeholder="用户名"/>
-      <button class="btn" @click="queryClients">查询</button>
-      <button class="btn secondary" @click="search={clientId:'',userName:'',pageNo:1,pageSize:20};queryClients()">重置</button>
+      <input v-model="search.clientId" :placeholder="tr('clients.search.clientId')"/>
+      <input v-model="search.userName" :placeholder="tr('clients.search.username')"/>
+      <button class="btn" @click="queryClients">{{ tr('clients.search.submit') }}</button>
+      <button class="btn secondary" @click="search={clientId:'',userName:'',pageNo:1,pageSize:20};queryClients()">{{ tr('clients.search.reset') }}</button>
     </div>
     <div class="chips toolbar-chips">
-      <span class="chip">页面容量 {{ clients.pageSize }}</span>
-      <span class="chip">实时刷新已启用</span>
-      <span class="chip">点击行查看详情</span>
+      <span class="chip">{{ tr('clients.chip.pageSize', { size: clients.pageSize }) }}</span>
+      <span class="chip">{{ tr('clients.chip.realtime') }}</span>
+      <span class="chip">{{ tr('clients.chip.detailHint') }}</span>
     </div>
     <table class="data-table">
       <thead>
       <tr>
-        <th>客户端 ID</th>
-        <th>用户名</th>
-        <th>节点</th>
-        <th>IP</th>
-        <th>Keepalive</th>
-        <th>连接方式</th>
-        <th>上线时间</th>
-        <th>操作</th>
+        <th>{{ tr('clients.table.clientId') }}</th>
+        <th>{{ tr('clients.table.username') }}</th>
+        <th>{{ tr('clients.table.node') }}</th>
+        <th>{{ tr('clients.table.ip') }}</th>
+        <th>{{ tr('clients.table.keepalive') }}</th>
+        <th>{{ tr('clients.table.connectionType') }}</th>
+        <th>{{ tr('clients.table.connectedAt') }}</th>
+        <th>{{ tr('clients.table.actions') }}</th>
       </tr>
       </thead>
       <tbody>
@@ -41,45 +41,45 @@ export const clientsPageTemplate = `
         <td>{{ formatDateTime(c.connectedAt) }}</td>
         <td>
           <div class="table-actions">
-            <el-button type="warning" link @click.stop="kickClient(c.clientId)">踢下线</el-button>
-            <el-button type="danger" link @click.stop="blockClientByClientId(c.clientId)">拉黑 clientId</el-button>
-            <el-button v-if="c.clientIp && c.clientIp !== 'unknown'" type="danger" link @click.stop="blockClientByIp(c.clientIp, c.clientId)">拉黑 IP</el-button>
+            <el-button type="warning" link @click.stop="kickClient(c.clientId)">{{ tr('clients.action.kick') }}</el-button>
+            <el-button type="danger" link @click.stop="blockClientByClientId(c.clientId)">{{ tr('clients.action.blockClientId') }}</el-button>
+            <el-button v-if="c.clientIp && c.clientIp !== 'unknown'" type="danger" link @click.stop="blockClientByIp(c.clientIp, c.clientId)">{{ tr('clients.action.blockIp') }}</el-button>
           </div>
         </td>
       </tr>
       </tbody>
     </table>
-    <div class="hint">总记录: {{ clients.total }}，列表会在连接事件后自动刷新。</div>
+    <div class="hint">{{ tr('clients.footer.total', { total: clients.total }) }}</div>
   </section>
 
   <section class="panel" v-if="activeMenu==='clients' && selectedClient">
     <div class="section-head">
       <div>
-        <h2 class="title">客户端详情</h2>
-        <div class="section-subtitle">查看连接属性、会话信息和当前订阅主题。</div>
+        <h2 class="title">{{ tr('clients.detail.title') }}</h2>
+        <div class="section-subtitle">{{ tr('clients.detail.subtitle') }}</div>
       </div>
     </div>
     <div class="toolbar">
-      <button class="btn secondary" @click="selectedClient=null">返回列表</button>
-      <button class="btn warning" @click="kickClient(selectedClient.session.clientId)">踢下线</button>
-      <button class="btn danger" @click="blockClientByClientId(selectedClient.session.clientId)">拉黑 clientId</button>
-      <button class="btn danger" v-if="selectedClient.session.clientIp && selectedClient.session.clientIp !== 'unknown'" @click="blockClientByIp(selectedClient.session.clientIp, selectedClient.session.clientId)">拉黑 IP</button>
+      <button class="btn secondary" @click="selectedClient=null">{{ tr('clients.detail.back') }}</button>
+      <button class="btn warning" @click="kickClient(selectedClient.session.clientId)">{{ tr('clients.action.kick') }}</button>
+      <button class="btn danger" @click="blockClientByClientId(selectedClient.session.clientId)">{{ tr('clients.action.blockClientId') }}</button>
+      <button class="btn danger" v-if="selectedClient.session.clientIp && selectedClient.session.clientIp !== 'unknown'" @click="blockClientByIp(selectedClient.session.clientIp, selectedClient.session.clientId)">{{ tr('clients.action.blockIp') }}</button>
     </div>
     <table class="data-table detail-table">
       <tbody>
-      <tr><th>客户端 ID</th><td>{{ selectedClient.session.clientId }}</td></tr>
-      <tr><th>用户名</th><td>{{ selectedClient.session.username || '-' }}</td></tr>
-      <tr><th>节点</th><td>{{ selectedClient.session.nodeId }}</td></tr>
-      <tr><th>IP</th><td>{{ selectedClient.session.clientIp }}</td></tr>
-      <tr><th>Keepalive</th><td>{{ selectedClient.session.keepAliveSeconds }}</td></tr>
-      <tr><th>连接方式</th><td>{{ selectedClient.session.connectionType }}</td></tr>
-      <tr><th>上线时间</th><td>{{ formatDateTime(selectedClient.session.connectedAt) }}</td></tr>
+      <tr><th>{{ tr('clients.table.clientId') }}</th><td>{{ selectedClient.session.clientId }}</td></tr>
+      <tr><th>{{ tr('clients.table.username') }}</th><td>{{ selectedClient.session.username || '-' }}</td></tr>
+      <tr><th>{{ tr('clients.table.node') }}</th><td>{{ selectedClient.session.nodeId }}</td></tr>
+      <tr><th>{{ tr('clients.table.ip') }}</th><td>{{ selectedClient.session.clientIp }}</td></tr>
+      <tr><th>{{ tr('clients.table.keepalive') }}</th><td>{{ selectedClient.session.keepAliveSeconds }}</td></tr>
+      <tr><th>{{ tr('clients.table.connectionType') }}</th><td>{{ selectedClient.session.connectionType }}</td></tr>
+      <tr><th>{{ tr('clients.table.connectedAt') }}</th><td>{{ formatDateTime(selectedClient.session.connectedAt) }}</td></tr>
       </tbody>
     </table>
-    <div class="hint">订阅主题</div>
+    <div class="hint">{{ tr('clients.detail.subscribedTopics') }}</div>
     <div class="chips">
       <span class="chip" v-for="topic in selectedClient.subscribedTopics" :key="topic">{{ topic }}</span>
-      <span class="hint" v-if="selectedClient.subscribedTopics.length===0">暂无订阅主题</span>
+      <span class="hint" v-if="selectedClient.subscribedTopics.length===0">{{ tr('clients.detail.noTopics') }}</span>
     </div>
   </section>
 `;

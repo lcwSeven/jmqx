@@ -56,22 +56,22 @@ export const builtInUsersPageMethods = {
             this.builtInUserForm = { userId: "", password: "", superuser: false };
             this.builtInUserDialogs.create = false;
             await this.loadBuiltInUsers();
-            this.message = "内置数据库用户已添加";
+            this.message = this.tr("builtInUsers.message.created");
             this.error = "";
         } catch (e) {
-            this.error = "添加内置数据库用户失败: " + e.message;
+            this.error = this.tr("builtInUsers.message.createFailed", { message: e.message });
         }
     },
     async importBuiltInUserRecords() {
         try {
             if (!this.builtInUserImportFile) {
-                this.error = "请先选择 CSV 文件";
+                this.error = this.tr("builtInUsers.message.selectCsv");
                 return;
             }
             const text = await this.readBuiltInCsvFile(this.builtInUserImportFile);
             const lines = this.parseBuiltInCsvLines(text);
             if (!lines.length) {
-                this.error = "CSV 文件中没有可导入的用户";
+                this.error = this.tr("builtInUsers.message.emptyCsv");
                 return;
             }
             const result = await importBuiltInUsers(this.currentClusterId, lines);
@@ -84,17 +84,19 @@ export const builtInUsersPageMethods = {
                 saltPosition: result?.data?.saltPosition || this.builtInUsers.saltPosition,
                 records: this.normalizeBuiltInUserRecords(result?.data?.records)
             };
-            this.message = "已导入 " + Number(result?.imported || 0) + " 个内置数据库用户";
+            this.message = this.tr("builtInUsers.message.imported", {
+                count: Number(result?.imported || 0)
+            });
             this.error = "";
         } catch (e) {
-            this.error = "导入内置数据库用户失败: " + e.message;
+            this.error = this.tr("builtInUsers.message.importFailed", { message: e.message });
         }
     },
     readBuiltInCsvFile(file) {
         return new Promise((resolve, reject) => {
             const reader = new FileReader();
             reader.onload = () => resolve(String(reader.result || ""));
-            reader.onerror = () => reject(new Error("读取 CSV 文件失败"));
+            reader.onerror = () => reject(new Error(this.tr("builtInUsers.message.readCsvFailed")));
             reader.readAsText(file, "UTF-8");
         });
     },
@@ -129,10 +131,10 @@ export const builtInUsersPageMethods = {
         try {
             await deleteBuiltInUser(this.currentClusterId, userId);
             await this.loadBuiltInUsers();
-            this.message = "内置数据库用户已删除";
+            this.message = this.tr("builtInUsers.message.deleted");
             this.error = "";
         } catch (e) {
-            this.error = "删除内置数据库用户失败: " + e.message;
+            this.error = this.tr("builtInUsers.message.deleteFailed", { message: e.message });
         }
     }
 };

@@ -11,9 +11,9 @@ export const overviewPageMethods = {
     nodeHealthLabel(node) {
         const ts = Number(node?.lastReportTime || 0);
         if (!ts) {
-            return "未知";
+            return this.tr("overview.nodeHealth.unknown");
         }
-        return Date.now() - ts <= 15000 ? "在线" : "延迟";
+        return Date.now() - ts <= 15000 ? this.tr("overview.nodeHealth.online") : this.tr("overview.nodeHealth.stale");
     },
     nodeHealthClass(node) {
         const ts = Number(node?.lastReportTime || 0);
@@ -33,11 +33,11 @@ export const overviewPageMethods = {
     },
     nodeSecurityRiskLabel(node) {
         if (Number(node?.connectAuthError || 0) > 0 || Number(node?.publishAclError || 0) > 0) {
-            return "有异常";
+            return this.tr("overview.nodeRisk.errors");
         }
         if (Number(node?.connectAuthFailure || 0) > 0 || Number(node?.publishAclDeny || 0) > 0) {
-            return "有拒绝";
+            return this.tr("overview.nodeRisk.denied");
         }
-        return "稳定";
+        return this.tr("overview.nodeRisk.stable");
     }
 };

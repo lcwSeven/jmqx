@@ -122,7 +122,10 @@ export function fetchClients(clusterId, search) {
 }
 
 export function fetchClientDetail(clusterId, clientId) {
-    return request(API_BASE + "/clients/" + encodeURIComponent(clientId) + "?clusterId=" + encodeURIComponent(clusterId));
+    const query = new URLSearchParams({
+        clusterId: clusterId || "default"
+    });
+    return request(API_BASE + "/clients/" + encodeURIComponent(clientId) + "?" + query.toString());
 }
 
 export function kickClient(clusterId, clientId) {

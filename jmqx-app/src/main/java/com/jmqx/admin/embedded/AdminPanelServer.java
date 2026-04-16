@@ -636,8 +636,9 @@ public class AdminPanelServer {
 
     private String buildOverviewJson(String clusterId) {
         upsertLocalNodeSnapshot(clusterId);
+        upsertLocalClientSnapshots(clusterId);
         List<EmbeddedAdminStateStore.NodeMetrics> nodes = stateStore.listNodeMetrics(clusterId);
-        int connections = 0;
+        int connections = stateStore.listClientSnapshots(clusterId).size();
         long inbound = 0;
         long outbound = 0;
         long connectAuthFailure = 0;
@@ -652,7 +653,6 @@ public class AdminPanelServer {
             if (i > 0) {
                 nodeJson.append(",");
             }
-            connections += Math.max(0, node.connectedClients());
             inbound += Math.max(0, node.inboundBytes());
             outbound += Math.max(0, node.outboundBytes());
             connectAuthFailure += Math.max(0L, node.connectAuthFailure());

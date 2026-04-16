@@ -1,38 +1,42 @@
 export const adminComputed = {
     activeMenuLabel() {
         const labels = {
-            overview: "集群概览",
-            clients: this.selectedClient ? "客户端详情" : "客户端列表",
-            blacklist: "黑名单",
-            acl: this.aclCreateMode ? "创建 ACL" : "ACL 鉴权",
-            auth: this.authCreateMode ? "创建认证" : "连接鉴权",
-            "built-in-users": "内置数据库用户管理",
-            bridge: "桥接配置"
+            overview: "menu.overview",
+            clients: this.selectedClient ? "menu.clientDetails" : "menu.clients",
+            blacklist: "menu.blacklist",
+            acl: this.aclCreateMode ? "menu.aclCreate" : "menu.acl",
+            auth: this.authCreateMode ? "menu.authCreate" : "menu.auth",
+            "built-in-users": "menu.builtInUsers",
+            bridge: "menu.bridge"
         };
-        return labels[this.activeMenu] || "JMQX Admin";
+        return this.tr(labels[this.activeMenu] || "app.brand.console");
     },
     activeMenuDescription() {
         const descriptions = {
-            overview: "实时查看节点负载、流量和运行态变化。",
-            clients: "搜索在线客户端，快速定位连接和订阅信息。",
-            blacklist: "按 clientId 或 IP 管理黑名单，并立即阻断命中连接。",
-            acl: "统一管理主题发布与订阅的 ACL 数据源配置。",
-            auth: "统一管理客户端接入认证与数据源配置。",
-            "built-in-users": "添加、导入和删除内置数据库认证用户。",
-            bridge: "统一配置 Kafka、RocketMQ、MySQL 桥接目标与主题过滤策略。"
+            overview: "description.overview",
+            clients: "description.clients",
+            blacklist: "description.blacklist",
+            acl: "description.acl",
+            auth: "description.auth",
+            "built-in-users": "description.builtInUsers",
+            bridge: "description.bridge"
         };
-        return descriptions[this.activeMenu] || "";
+        return this.tr(descriptions[this.activeMenu] || "");
     },
     builtInUserIdMatchHint() {
-        return this.builtInUsers.accountType === "clientId"
-            ? "客户端会使用 clientId + password 与内置数据库中的 userId + password 比较。"
-            : "客户端会使用 username + password 与内置数据库中的 userId + password 比较。";
+        const hint = this.builtInUsers.accountType === "clientId"
+            ? "hint.builtInUser.clientId"
+            : "hint.builtInUser.username";
+        return this.tr(hint);
     },
     builtInAccountFieldLabel() {
         return this.builtInUsers.accountType === "clientId" ? "clientId" : "username";
     },
     adminRoleLabel() {
-        return this.adminSession?.superAdmin ? "超级管理员" : (this.adminSession?.role || "未登录");
+        return this.adminSession?.superAdmin ? this.tr("admin.role.superAdmin") : (this.adminSession?.role || this.tr("admin.role.unknown"));
+    },
+    mqttStatusLabel() {
+        return this.tr(this.mqttStatus);
     },
     currentClusterDisplayName() {
         const current = Array.isArray(this.clusters)
@@ -69,9 +73,9 @@ export const adminComputed = {
     },
     authStatusText() {
         if (!this.hasAuthRecord()) {
-            return "未配置";
+            return this.tr("status.notConfigured");
         }
-        return this.securityConfig.authEnabled ? "已启用" : "已停用";
+        return this.securityConfig.authEnabled ? this.tr("status.enabled") : this.tr("status.disabled");
     },
     authStatusClass() {
         if (!this.hasAuthRecord()) {
@@ -108,9 +112,9 @@ export const adminComputed = {
     },
     aclStatusText() {
         if (!this.aclEntries.length) {
-            return "未配置";
+            return this.tr("status.notConfigured");
         }
-        return this.securityConfig.aclEnabled ? "已启用" : "已停用";
+        return this.securityConfig.aclEnabled ? this.tr("status.enabled") : this.tr("status.disabled");
     },
     aclStatusClass() {
         if (!this.aclEntries.length) {
@@ -151,13 +155,19 @@ export const adminComputed = {
     clientsSummaryText() {
         const total = Number(this.clients.total || 0);
         const keyword = [this.search.clientId, this.search.userName].filter(Boolean).join(" / ");
-        return keyword ? `共 ${total} 条结果，筛选条件：${keyword}` : `共 ${total} 个在线客户端`;
+        return keyword
+            ? this.tr("summary.clients.filtered", { total, keyword })
+            : this.tr("summary.clients.total", { total });
     },
     blacklistSummaryText() {
-        return `共 ${Array.isArray(this.blacklistEntries) ? this.blacklistEntries.length : 0} 条黑名单规则`;
+        return this.tr("summary.blacklist.total", {
+            count: Array.isArray(this.blacklistEntries) ? this.blacklistEntries.length : 0
+        });
     },
     auditSummaryText() {
-        return `最近 ${Array.isArray(this.auditLogs) ? this.auditLogs.length : 0} 条审计记录`;
+        return this.tr("summary.audit.recent", {
+            count: Array.isArray(this.auditLogs) ? this.auditLogs.length : 0
+        });
     },
     filteredAuditLogs() {
         if (!Array.isArray(this.auditLogs)) {

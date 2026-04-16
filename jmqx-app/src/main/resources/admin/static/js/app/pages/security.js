@@ -13,10 +13,10 @@ export const securityPageMethods = {
             await saveSecurityConfig(this.currentClusterId, payload);
             this.securityConfig = payload;
             await this.loadAuditLogs();
-            this.message = "安全配置保存成功";
+            this.message = this.tr("security.message.securitySaved");
             this.error = "";
         } catch (e) {
-            this.error = "保存安全配置失败: " + e.message;
+            this.error = this.tr("security.message.securitySaveFailed", { message: e.message });
         }
     },
     async saveAclConfig() {
@@ -24,7 +24,7 @@ export const securityPageMethods = {
     },
     openAclCreate() {
         if (!this.availableAclDatasourceOptions.length) {
-            this.error = "可用的 ACL 数据源已经全部加入当前 ACL 链";
+            this.error = this.tr("security.message.aclAllUsed");
             return;
         }
         this.aclCreateMode = true;
@@ -60,11 +60,11 @@ export const securityPageMethods = {
     },
     aclMethodLabel() {
         const hit = this.aclMethodOptions.find(item => item.key === this.aclDraft.method);
-        return hit ? hit.label : "Topic ACL";
+        return hit ? this.tr(hit.label) : this.tr("security.acl.method.topic");
     },
     aclDatasourceLabel() {
         const hit = this.aclDatasourceOptions.find(item => item.key === this.aclDraft.datasource);
-        return hit ? hit.label : "文件";
+        return hit ? this.tr(hit.label) : this.tr("security.acl.datasource.file");
     },
     mapAclDatasourceToPlugin(datasource) {
         if (datasource === "http") {
@@ -86,12 +86,12 @@ export const securityPageMethods = {
     },
     aclPluginDisplayName(plugin) {
         if (plugin === "http") {
-            return "HTTP 服务";
+            return this.tr("security.acl.datasource.http");
         }
         if (plugin === "redis") {
             return "Redis";
         }
-        return "文件";
+        return this.tr("security.acl.datasource.file");
     },
     describeAclPlugin(plugin) {
         if (plugin === "http") {
@@ -120,7 +120,7 @@ export const securityPageMethods = {
         try {
             const plugin = this.mapAclDatasourceToPlugin(this.aclDraft.datasource);
             if (!this.aclEditingPlugin && this.securityConfig.aclChain.includes(plugin)) {
-                this.error = "同一种 ACL 数据源已存在，请直接编辑该项配置";
+                this.error = this.tr("security.message.aclDuplicate");
                 return;
             }
             this.securityConfig.aclEnabled = true;
@@ -135,10 +135,10 @@ export const securityPageMethods = {
             this.aclCreateMode = false;
             this.aclEditingPlugin = "";
             this.aclStep = 1;
-            this.message = "ACL 鉴权配置已保存";
+            this.message = this.tr("security.message.aclSaved");
             this.error = "";
         } catch (e) {
-            this.error = "保存 ACL 配置失败: " + e.message;
+            this.error = this.tr("security.message.aclSaveFailed", { message: e.message });
         }
     },
     async toggleAclEnabled() {
@@ -166,7 +166,7 @@ export const securityPageMethods = {
             this.securityConfig.aclChain = previousChain;
             return;
         }
-        this.message = "ACL 链顺序已更新";
+        this.message = this.tr("security.message.aclOrderUpdated");
     },
     async moveAclEntryDown(plugin) {
         const previousChain = Array.isArray(this.securityConfig.aclChain) ? [...this.securityConfig.aclChain] : [];
@@ -183,7 +183,7 @@ export const securityPageMethods = {
             this.securityConfig.aclChain = previousChain;
             return;
         }
-        this.message = "ACL 链顺序已更新";
+        this.message = this.tr("security.message.aclOrderUpdated");
     },
     async removeAclEntry(plugin) {
         try {
@@ -193,10 +193,10 @@ export const securityPageMethods = {
                 this.securityConfig.aclEnabled = false;
             }
             await this.saveAclConfig();
-            this.message = "ACL 数据源已移除";
+            this.message = this.tr("security.message.aclRemoved");
             this.error = "";
         } catch (e) {
-            this.error = "删除 ACL 数据源失败: " + e.message;
+            this.error = this.tr("security.message.aclRemoveFailed", { message: e.message });
         }
     },
     applyAclDraftFromPlugin(plugin) {
@@ -283,11 +283,11 @@ export const securityPageMethods = {
     },
     authMethodLabel() {
         const hit = this.authMethodOptions.find(item => item.key === this.authDraft.method);
-        return hit ? hit.label : "Password-Base";
+        return hit ? this.tr(hit.label) : this.tr("security.auth.method.password");
     },
     authDatasourceLabel() {
         const hit = this.authDatasourceOptions.find(item => item.key === this.authDraft.datasource);
-        return hit ? hit.label : "内置数据库";
+        return hit ? this.tr(hit.label) : this.tr("security.auth.datasource.builtInDatabase");
     },
     parseHttpHeaders(text) {
         const rows = String(text || "")
@@ -372,10 +372,10 @@ export const securityPageMethods = {
     },
     authPluginDisplayName(plugin) {
         if (plugin === "built_in_database") {
-            return "内置数据库";
+            return this.tr("security.auth.datasource.builtInDatabase");
         }
         if (plugin === "http") {
-            return "HTTP 服务";
+            return this.tr("security.auth.datasource.http");
         }
         if (plugin === "redis") {
             return "Redis";
@@ -424,7 +424,7 @@ export const securityPageMethods = {
         try {
             const plugin = this.mapDatasourceToPlugin(this.authDraft.datasource);
             if (!this.authEditingPlugin && this.securityConfig.authChain.includes(plugin)) {
-                this.error = "同一种鉴权方式已存在，请直接编辑该项配置";
+                this.error = this.tr("security.message.authDuplicate");
                 return;
             }
             this.securityConfig.authEnabled = true;
@@ -439,9 +439,9 @@ export const securityPageMethods = {
             this.authCreateMode = false;
             this.authEditingPlugin = "";
             this.authStep = 1;
-            this.message = "连接鉴权配置已保存";
+            this.message = this.tr("security.message.authSaved");
         } catch (e) {
-            this.error = "创建认证失败: " + e.message;
+            this.error = this.tr("security.message.authCreateFailed", { message: e.message });
         }
     },
     async toggleAuthEnabled() {
@@ -477,8 +477,8 @@ export const securityPageMethods = {
         if (messageBox?.confirm) {
             try {
                 await messageBox.confirm(message, title, {
-                    confirmButtonText: "确认删除",
-                    cancelButtonText: "取消",
+                    confirmButtonText: this.tr("common.delete"),
+                    cancelButtonText: this.tr("common.cancel"),
                     type: "warning",
                     confirmButtonClass: "el-button--danger"
                 });
@@ -493,8 +493,8 @@ export const securityPageMethods = {
         try {
             if (plugin === "built_in_database") {
                 const confirmed = await this.confirmDangerAction(
-                    "删除内置数据库鉴权",
-                    "删除后会同时清空内置数据库中的全部用户数据，且无法恢复。是否继续？"
+                    this.tr("security.message.removeBuiltInAuthTitle"),
+                    this.tr("security.message.removeBuiltInAuthBody")
                 );
                 if (!confirmed) {
                     return;
@@ -512,11 +512,11 @@ export const securityPageMethods = {
                 this.activeMenu = "auth";
             }
             this.message = plugin === "built_in_database"
-                ? "已删除内置数据库鉴权，并清空全部内置数据库用户"
-                : "认证方式已移除";
+                ? this.tr("security.message.builtInAuthRemoved")
+                : this.tr("security.message.authRemoved");
             this.error = "";
         } catch (e) {
-            this.error = "删除认证方式失败: " + e.message;
+            this.error = this.tr("security.message.authRemoveFailed", { message: e.message });
         }
     },
     applyAuthDraftFromPlugin(plugin) {

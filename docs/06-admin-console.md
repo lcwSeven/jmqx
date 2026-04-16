@@ -6,7 +6,7 @@ JMQX 管理页面是 `jmqx-app` 的内嵌控制台，目标是提供：
 
 - Broker 运行态可观测（连接、流量、客户端状态）
 - 安全策略可配置（ACL / AUTH）
-- 部分配置动态生效（降低重启频率）
+- 安全与桥接配置动态生效（降低重启频率）
 
 该管理页面默认与 Broker 同进程启动，适合单机与中小规模集群运维场景。
 
@@ -64,11 +64,6 @@ JMQX 管理页面是 `jmqx-app` 的内嵌控制台，目标是提供：
 - 连接鉴权配置页（向导式创建）
 - 插件链、缓存时间、启用状态可配置
 
-### 4.4 集群配置
-
-- 支持配置展示与保存
-- 当前已动态生效项：`sharedSubscriptionMaxMembersPerGroup`
-
 ## 5. 接口总览（/api/v1）
 
 | 接口 | 方法 | 用途 |
@@ -78,7 +73,7 @@ JMQX 管理页面是 `jmqx-app` 的内嵌控制台，目标是提供：
 | `/clients` | GET | 查询客户端列表 |
 | `/clients/{clientId}` | GET | 查询客户端详情 |
 | `/security/config` | GET/PUT | 查询/更新 ACL 与 AUTH 配置 |
-| `/cluster/config` | GET/PUT | 查询/更新集群配置 |
+| `/cluster/config` | GET/PUT | 查询/保存集群部署配置 |
 | `/cluster/full-config` | GET | 查询完整配置 |
 
 ## 6. 数据打通与生效范围
@@ -103,23 +98,24 @@ JMQX 管理页面是 `jmqx-app` 的内嵌控制台，目标是提供：
 - `PUT /security/config`
   - 动态重载 `ReloadableAuthProvider`
   - 动态重载 `ReloadableAclAuthorizer`
-- `PUT /cluster/config`
-  - 动态更新 `SharedSubscriptionManager` 的订阅上限参数
+- `PUT /bridge/config`
+  - 动态重载桥接器配置
 
-### 6.3 写链路（当前仅管理态保存）
+### 6.3 集群配置（当前仅管理态保存）
 
+- `sharedSubscriptionMaxMembersPerGroup`
 - `coreNodes`
 - `replicantNodes`
 - `coreAcceptClientConnections`
 
-以上字段已可在页面编辑保存，但尚未接入运行时热更新。
+以上字段只用于保存部署期望值，不会在运行中热更新；变更后需要重启或重部署节点才会生效。
 
 ## 7. 运维建议
 
 1. 生产环境建议将管理页面监听在内网地址，并结合网关做访问控制。
 2. 对 `security/config` 变更建立审计（谁在何时修改了插件链与缓存时间）。
 3. 将 `$SYS/dashboard` 主题纳入监控采集，便于定位页面与 Broker 数据差异。
-4. 对“动态生效项”与“仅保存项”做发布前确认，避免误判配置已生效。
+4. 将集群配置视为部署配置，不要在运行中修改后直接假设已生效。
 
 ## 8. 常见排障
 
@@ -143,6 +139,6 @@ JMQX 管理页面是 `jmqx-app` 的内嵌控制台，目标是提供：
 
 检查：
 
-- 是否属于“当前仅管理态保存”字段
+- 是否属于“当前仅管理态保存”的集群配置字段
 - AUTH/ACL 插件链配置是否合法（插件名、地址、凭据）
 - 日志中是否出现插件初始化异常

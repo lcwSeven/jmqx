@@ -6,11 +6,11 @@ export const dashboardMethods = {
     connectDashboardStream() {
         const mqttWsUrl = this.resolveDashboardWsUrl();
         if (!window.mqtt || !mqttWsUrl) {
-            this.mqttStatus = "MQTT 库不可用";
+            this.mqttStatus = "status.mqtt.unavailable";
             return;
         }
         this.disconnectDashboardStream();
-        this.mqttStatus = "连接中";
+        this.mqttStatus = "status.mqtt.connecting";
         const clientId = "admin-" + Math.random().toString(16).slice(2, 10);
         const client = window.mqtt.connect(mqttWsUrl, {
             clientId,
@@ -22,18 +22,20 @@ export const dashboardMethods = {
         });
         this.mqttClient = client;
         client.on("connect", () => {
-            this.mqttStatus = "已连接";
+            this.mqttStatus = "status.mqtt.connected";
             this.resubscribeDashboardTopics();
         });
         client.on("reconnect", () => {
-            this.mqttStatus = "重连中";
+            this.mqttStatus = "status.mqtt.reconnecting";
         });
         client.on("error", err => {
-            this.mqttStatus = "连接异常";
-            this.error = "Dashboard 实时通道异常: " + (err?.message || "unknown");
+            this.mqttStatus = "status.mqtt.error";
+            this.error = this.tr("message.dashboardError", {
+                message: err?.message || "unknown"
+            });
         });
         client.on("close", () => {
-            this.mqttStatus = "已断开";
+            this.mqttStatus = "status.mqtt.disconnected";
         });
         client.on("message", (topic, payload) => {
             this.onDashboardMessage(topic, payload);
@@ -48,7 +50,7 @@ export const dashboardMethods = {
             }
             this.mqttClient = null;
         }
-        this.mqttStatus = "未连接";
+        this.mqttStatus = "status.mqtt.disconnected";
     },
     resubscribeDashboardTopics() {
         if (!this.mqttClient || !this.mqttClient.connected) {
@@ -100,7 +102,10 @@ export const dashboardMethods = {
                 clearTimeout(this.refreshClientsTimer);
             }
             this.refreshClientsTimer = setTimeout(() => {
-                this.queryClients();
+                Promise.all([
+                    this.queryClients(),
+                    this.loadOverview()
+                ]);
                 this.refreshClientsTimer = null;
             }, 500);
         }
@@ -109,7 +114,6 @@ export const dashboardMethods = {
     recalculateOverviewFromRealtimeNodes() {
         const nodes = Object.values(this.realtimeNodeMap || {});
         this.overview.nodes = nodes;
-        this.overview.totalConnections = nodes.reduce((acc, node) => acc + Number(node.connectedClients || 0), 0);
         this.overview.totalInboundBytes = nodes.reduce((acc, node) => acc + Number(node.inboundBytes || 0), 0);
         this.overview.totalOutboundBytes = nodes.reduce((acc, node) => acc + Number(node.outboundBytes || 0), 0);
         this.overview.totalConnectAuthFailure = nodes.reduce((acc, node) => acc + Number(node.connectAuthFailure || 0), 0);

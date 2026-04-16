@@ -8,103 +8,111 @@ import { bridgePageTemplate } from "./pages/bridge-template.js";
 export const adminTemplate = `
       <div v-if="adminAuthRequired && !adminAuthenticated" class="admin-login-shell">
         <section class="admin-login-card panel">
-          <div class="eyebrow">JMQX Admin</div>
-          <h1 class="hero-title">管理后台登录</h1>
-          <p class="hero-desc">请输入内嵌管理后台账号密码后，再访问配置接口和实时 Dashboard。</p>
+          <div class="login-actions">
+            <el-select :model-value="locale" size="small" class="locale-switch" @change="switchLocale">
+              <el-option
+                v-for="localeOption in availableLocales"
+                :key="localeOption.value"
+                :value="localeOption.value"
+                :label="tr(localeOption.labelKey)"
+              ></el-option>
+            </el-select>
+          </div>
+          <div class="login-brand">
+            <img class="login-brand-logo" src="/admin/image/logo.png" alt="JMQX logo"/>
+          </div>
+          <div class="eyebrow">{{ tr('app.brand.console') }}</div>
+          <h1 class="hero-title">{{ tr('login.title') }}</h1>
+          <p class="hero-desc">{{ tr('login.description') }}</p>
           <div v-if="error" class="error">{{ error }}</div>
           <label class="field">
-            <span class="field-label">用户名</span>
-            <el-input v-model="adminLoginForm.username" placeholder="admin" @keyup.enter="loginAdminPanel"/>
+            <span class="field-label">{{ tr('login.username') }}</span>
+            <el-input v-model="adminLoginForm.username" :placeholder="tr('login.username')" @keyup.enter="loginAdminPanel"/>
           </label>
           <label class="field">
-            <span class="field-label">密码</span>
-            <el-input v-model="adminLoginForm.password" type="password" show-password placeholder="请输入密码" @keyup.enter="loginAdminPanel"/>
+            <span class="field-label">{{ tr('login.password') }}</span>
+            <el-input v-model="adminLoginForm.password" type="password" show-password :placeholder="tr('login.password.placeholder')" @keyup.enter="loginAdminPanel"/>
           </label>
           <div class="admin-login-actions">
-            <el-button type="primary" size="large" @click="loginAdminPanel">登录后台</el-button>
+            <el-button type="primary" size="large" @click="loginAdminPanel">{{ tr('login.submit') }}</el-button>
           </div>
         </section>
       </div>
-      <div v-else class="layout">
+      <div v-else class="layout" :class="{ 'layout-collapsed': sidebarCollapsed }">
         <aside class="sidebar">
-          <div class="logo-wrap">
-            <div class="logo">JMQX Admin</div>
-            <div class="logo-sub">Cluster Console</div>
-            <div class="logo-role">{{ adminRoleLabel }}</div>
+          <div class="sidebar-head">
+            <button class="sidebar-toggle" type="button" @click="toggleSidebar" :title="sidebarCollapsed ? tr('sidebar.expand') : tr('sidebar.collapse')">
+              {{ sidebarCollapsed ? '›' : '‹' }}
+            </button>
           </div>
-          <div class="menu-title">监控</div>
-          <button class="menu-item" :class="{active: activeMenu==='overview'}" @click="setMenu('overview')">集群概览</button>
-          <button class="menu-item" :class="{active: activeMenu==='clients'}" @click="setMenu('clients')">客户端列表</button>
-          <div class="menu-title">安全策略</div>
-          <button class="menu-item" :class="{active: activeMenu==='blacklist'}" @click="setMenu('blacklist')">黑名单</button>
-          <button class="menu-item" :class="{active: activeMenu==='acl'}" @click="setMenu('acl')">ACL 鉴权</button>
-          <button class="menu-item" :class="{active: activeMenu==='auth'}" @click="setMenu('auth')">连接鉴权</button>
-          <div class="menu-title">系统配置</div>
-          <button class="menu-item" :class="{active: activeMenu==='bridge'}" @click="setMenu('bridge')">桥接配置</button>
-          <div class="sidebar-footer">
-            <div class="sidebar-foot-label">账号</div>
-            <div class="sidebar-foot-value">{{ adminSession.username || '-' }}</div>
-            <div class="sidebar-foot-label">权限</div>
-            <div class="sidebar-status">{{ adminRoleLabel }}</div>
-            <div class="sidebar-foot-label">Cluster</div>
-            <div class="sidebar-foot-value">{{ currentClusterDisplayName }}</div>
-            <div class="sidebar-foot-label">Realtime</div>
-            <div class="sidebar-status">{{ mqttStatus }}</div>
+          <div v-if="!sidebarCollapsed" class="sidebar-body">
+            <div class="logo-wrap">
+              <div class="logo">{{ tr('app.brand.console') }}</div>
+              <div class="logo-sub">{{ tr('app.brand.subtitle') }}</div>
+              <div class="logo-role">{{ adminRoleLabel }}</div>
+            </div>
+            <div class="menu-title">{{ tr('sidebar.section.observability') }}</div>
+            <button class="menu-item" :class="{active: activeMenu==='overview'}" @click="setMenu('overview')">{{ tr('menu.overview') }}</button>
+            <button class="menu-item" :class="{active: activeMenu==='clients'}" @click="setMenu('clients')">{{ tr('menu.clients') }}</button>
+            <div class="menu-title">{{ tr('sidebar.section.security') }}</div>
+            <button class="menu-item" :class="{active: activeMenu==='blacklist'}" @click="setMenu('blacklist')">{{ tr('menu.blacklist') }}</button>
+            <button class="menu-item" :class="{active: activeMenu==='acl'}" @click="setMenu('acl')">{{ tr('menu.acl') }}</button>
+            <button class="menu-item" :class="{active: activeMenu==='auth'}" @click="setMenu('auth')">{{ tr('menu.auth') }}</button>
+            <div class="menu-title">{{ tr('sidebar.section.system') }}</div>
+            <button class="menu-item" :class="{active: activeMenu==='bridge'}" @click="setMenu('bridge')">{{ tr('menu.bridge') }}</button>
           </div>
         </aside>
         <main class="content">
-          <section class="hero panel">
-            <div>
-              <div class="eyebrow">JMQX Control Surface</div>
-              <h1 class="hero-title">{{ activeMenuLabel }}</h1>
-              <p class="hero-desc">{{ activeMenuDescription }}</p>
+          <section class="page-header panel">
+            <div class="page-header-main">
+              <div class="eyebrow">{{ tr('app.brand.console') }}</div>
+              <h1 class="page-title">{{ activeMenuLabel }}</h1>
+              <p class="page-desc">{{ activeMenuDescription }}</p>
             </div>
-            <div class="hero-side">
-	              <div class="hero-account">
-	                <div class="hero-account-meta">
-	                  <span class="hero-account-name">{{ adminSession.username || 'admin' }}</span>
-	                  <span class="hero-account-role">{{ adminRoleLabel }}</span>
-	                </div>
-                <el-dropdown trigger="click" @command="handleAdminMenuCommand">
-                  <el-button>
-                    账号设置
+            <div class="page-header-side">
+              <div class="page-toolbar page-toolbar-compact">
+                <div class="cluster-switch cluster-switch-inline">
+                  <span class="toolbar-label">{{ tr('hero.currentCluster') }}</span>
+                  <el-select
+                    :model-value="currentClusterId"
+                    :placeholder="tr('cluster.select.placeholder')"
+                    @change="switchCluster"
+                  >
+                    <el-option
+                      v-for="cluster in clusters"
+                      :key="cluster.clusterId"
+                      :label="cluster.displayName ? cluster.displayName + ' (' + cluster.clusterId + ')' : cluster.clusterId"
+                      :value="cluster.clusterId"
+                    />
+                  </el-select>
+                </div>
+                <el-dropdown trigger="click" @command="handleLocaleCommand">
+                  <el-button class="toolbar-icon-button" :title="tr('toolbar.language')">
+                    <span class="toolbar-icon-glyph">🌐</span>
                   </el-button>
                   <template #dropdown>
                     <el-dropdown-menu>
-                      <el-dropdown-item command="change-password">修改密码</el-dropdown-item>
-                      <el-dropdown-item command="logout" divided>退出登录</el-dropdown-item>
+                      <el-dropdown-item
+                        v-for="localeOption in availableLocales"
+                        :key="localeOption.value"
+                        :command="localeOption.value"
+                      >
+                        {{ tr(localeOption.labelKey) }}
+                      </el-dropdown-item>
                     </el-dropdown-menu>
-	                  </template>
-	                </el-dropdown>
-	              </div>
-	              <div class="cluster-switch">
-	                <span class="hero-pill-label">当前集群</span>
-	                <el-select
-	                  :model-value="currentClusterId"
-	                  placeholder="请选择集群"
-	                  @change="switchCluster"
-	                >
-	                  <el-option
-	                    v-for="cluster in clusters"
-	                    :key="cluster.clusterId"
-	                    :label="cluster.displayName ? cluster.displayName + ' (' + cluster.clusterId + ')' : cluster.clusterId"
-	                    :value="cluster.clusterId"
-	                  />
-	                </el-select>
-	              </div>
-	              <div class="hero-metrics">
-	                <div class="hero-pill">
-	                  <span class="hero-pill-label">Cluster</span>
-	                  <strong>{{ currentClusterDisplayName }}</strong>
-	                </div>
-                <div class="hero-pill">
-                  <span class="hero-pill-label">Dashboard</span>
-                  <strong>{{ mqttStatus }}</strong>
-                </div>
-                <div class="hero-pill">
-                  <span class="hero-pill-label">Nodes</span>
-                  <strong>{{ totalNodes }}</strong>
-                </div>
+                  </template>
+                </el-dropdown>
+                <el-dropdown trigger="click" @command="handleAdminMenuCommand">
+                  <el-button class="toolbar-account-button">
+                    {{ tr('account.settings') }}
+                  </el-button>
+                  <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="change-password">{{ tr('account.changePassword') }}</el-dropdown-item>
+                    <el-dropdown-item command="logout" divided>{{ tr('account.signOut') }}</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+                </el-dropdown>
               </div>
             </div>
           </section>
@@ -113,29 +121,29 @@ export const adminTemplate = `
           <div v-if="error" class="error">{{ error }}</div>
           <el-dialog
             v-model="adminDialogs.password"
-            title="修改管理后台密码"
+            :title="tr('dialog.password.title')"
             width="460px"
             append-to-body
             destroy-on-close
           >
             <div class="form-stack">
               <label class="field">
-                <span class="field-label">当前密码</span>
-                <el-input v-model="adminPasswordForm.currentPassword" type="password" show-password placeholder="请输入当前密码"/>
+                <span class="field-label">{{ tr('dialog.password.current') }}</span>
+                <el-input v-model="adminPasswordForm.currentPassword" type="password" show-password :placeholder="tr('dialog.password.current.placeholder')"/>
               </label>
               <label class="field">
-                <span class="field-label">新密码</span>
-                <el-input v-model="adminPasswordForm.newPassword" type="password" show-password placeholder="请输入新密码"/>
+                <span class="field-label">{{ tr('dialog.password.new') }}</span>
+                <el-input v-model="adminPasswordForm.newPassword" type="password" show-password :placeholder="tr('dialog.password.new.placeholder')"/>
               </label>
               <label class="field">
-                <span class="field-label">确认新密码</span>
-                <el-input v-model="adminPasswordForm.confirmPassword" type="password" show-password placeholder="请再次输入新密码"/>
+                <span class="field-label">{{ tr('dialog.password.confirm') }}</span>
+                <el-input v-model="adminPasswordForm.confirmPassword" type="password" show-password :placeholder="tr('dialog.password.confirm.placeholder')"/>
               </label>
             </div>
             <template #footer>
               <div class="dialog-actions">
-                <el-button @click="closeAdminPasswordDialog">取消</el-button>
-                <el-button type="primary" @click="submitAdminPasswordChange">保存密码</el-button>
+                <el-button @click="closeAdminPasswordDialog">{{ tr('common.cancel') }}</el-button>
+                <el-button type="primary" @click="submitAdminPasswordChange">{{ tr('dialog.password.save') }}</el-button>
               </div>
             </template>
           </el-dialog>
