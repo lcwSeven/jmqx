@@ -1187,7 +1187,6 @@ public class JmqxApplication {
                         authProperties.getHttpConnectTimeoutMs(),
                         authProperties.getHttpPipelineCount()
                 ),
-                EmbeddedAdminStateStore.AuthFileConfig.defaults(),
                 new EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig(
                         authProperties.getBuiltInDatabaseAccountType(),
                         authProperties.getBuiltInDatabasePasswordHashAlgorithm(),

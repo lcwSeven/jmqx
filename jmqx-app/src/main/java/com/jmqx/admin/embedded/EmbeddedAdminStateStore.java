@@ -306,7 +306,6 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
             List<String> authChain,
             long cacheTtlMs,
             AuthHttpConfig authHttp,
-            AuthFileConfig authFile,
             AuthBuiltInDatabaseConfig authBuiltInDatabase,
             AuthRedisConfig authRedis,
             AuthMysqlConfig authMysql,
@@ -328,7 +327,6 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
                     authChain,
                     cacheTtlMs,
                     AuthHttpConfig.defaults(),
-                    AuthFileConfig.defaults(),
                     AuthBuiltInDatabaseConfig.defaults(),
                     AuthRedisConfig.defaults(),
                     AuthMysqlConfig.defaults(),
@@ -342,7 +340,6 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
                               List<String> authChain,
                               long cacheTtlMs,
                               AuthHttpConfig authHttp,
-                              AuthFileConfig authFile,
                               AuthBuiltInDatabaseConfig authBuiltInDatabase,
                               AuthRedisConfig authRedis,
                               AuthMysqlConfig authMysql,
@@ -358,12 +355,25 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
                     authChain,
                     cacheTtlMs,
                     authHttp,
-                    authFile,
                     authBuiltInDatabase,
                     authRedis,
                     authMysql,
                     authPostgresql
             );
+        }
+
+        public SecurityConfig(boolean aclEnabled,
+                              List<String> aclChain,
+                              boolean authEnabled,
+                              List<String> authChain,
+                              long cacheTtlMs,
+                              AuthHttpConfig authHttp,
+                              AuthFileConfig authFile,
+                              AuthBuiltInDatabaseConfig authBuiltInDatabase,
+                              AuthRedisConfig authRedis,
+                              AuthMysqlConfig authMysql,
+                              AuthPostgresqlConfig authPostgresql) {
+            this(aclEnabled, aclChain, authEnabled, authChain, cacheTtlMs, authHttp, authBuiltInDatabase, authRedis, authMysql, authPostgresql);
         }
 
         public SecurityConfig(boolean aclEnabled,
@@ -386,11 +396,43 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
                     authChain,
                     cacheTtlMs,
                     AuthHttpConfig.defaults(),
-                    AuthFileConfig.defaults(),
                     AuthBuiltInDatabaseConfig.defaults(),
                     AuthRedisConfig.defaults(),
                     AuthMysqlConfig.defaults(),
                     AuthPostgresqlConfig.defaults()
+            );
+        }
+
+        public SecurityConfig(boolean aclEnabled,
+                              List<String> aclChain,
+                              boolean aclDefaultAllow,
+                              AclHttpConfig aclHttp,
+                              AclFileConfig aclFile,
+                              AclRedisConfig aclRedis,
+                              boolean authEnabled,
+                              List<String> authChain,
+                              long cacheTtlMs,
+                              AuthHttpConfig authHttp,
+                              AuthFileConfig authFile,
+                              AuthBuiltInDatabaseConfig authBuiltInDatabase,
+                              AuthRedisConfig authRedis,
+                              AuthMysqlConfig authMysql,
+                              AuthPostgresqlConfig authPostgresql) {
+            this(
+                    aclEnabled,
+                    aclChain,
+                    aclDefaultAllow,
+                    aclHttp,
+                    aclFile,
+                    aclRedis,
+                    authEnabled,
+                    authChain,
+                    cacheTtlMs,
+                    authHttp,
+                    authBuiltInDatabase,
+                    authRedis,
+                    authMysql,
+                    authPostgresql
             );
         }
 
@@ -401,7 +443,6 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
             aclFile = aclFile == null ? AclFileConfig.defaults() : aclFile;
             aclRedis = aclRedis == null ? AclRedisConfig.defaults() : aclRedis;
             authHttp = authHttp == null ? AuthHttpConfig.defaults() : authHttp;
-            authFile = authFile == null ? AuthFileConfig.defaults() : authFile;
             authBuiltInDatabase = authBuiltInDatabase == null ? AuthBuiltInDatabaseConfig.defaults() : authBuiltInDatabase;
             authRedis = authRedis == null ? AuthRedisConfig.defaults() : authRedis;
             authMysql = authMysql == null ? AuthMysqlConfig.defaults() : authMysql;
@@ -420,7 +461,6 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
                     List.of(),
                     60_000,
                     AuthHttpConfig.defaults(),
-                    AuthFileConfig.defaults(),
                     AuthBuiltInDatabaseConfig.defaults(),
                     AuthRedisConfig.defaults(),
                     AuthMysqlConfig.defaults(),

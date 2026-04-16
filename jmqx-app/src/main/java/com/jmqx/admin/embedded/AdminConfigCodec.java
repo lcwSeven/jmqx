@@ -319,7 +319,7 @@ public final class AdminConfigCodec {
         try {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             DataOutputStream data = new DataOutputStream(out);
-            data.writeByte(11);
+            data.writeByte(12);
             data.writeBoolean(config.aclEnabled());
             writeStringList(data, config.aclChain());
             data.writeBoolean(config.aclDefaultAllow());
@@ -346,7 +346,6 @@ public final class AdminConfigCodec {
             data.writeInt(config.authHttp().requestTimeoutMs());
             data.writeInt(config.authHttp().connectTimeoutMs());
             data.writeInt(config.authHttp().pipelineCount());
-            writeString(data, config.authFile().path());
             writeString(data, config.authBuiltInDatabase().accountType());
             writeString(data, config.authBuiltInDatabase().passwordHashAlgorithm());
             writeString(data, config.authBuiltInDatabase().saltPosition());
@@ -457,6 +456,77 @@ public final class AdminConfigCodec {
         try {
             DataInputStream in = new DataInputStream(new ByteArrayInputStream(raw));
             int version = in.readByte();
+            if (version == 12) {
+                return new EmbeddedAdminStateStore.SecurityConfig(
+                        in.readBoolean(),
+                        readStringList(in),
+                        in.readBoolean(),
+                        new EmbeddedAdminStateStore.AclHttpConfig(
+                                readString(in),
+                                in.readInt(),
+                                readString(in)
+                        ),
+                        new EmbeddedAdminStateStore.AclFileConfig(readString(in)),
+                        new EmbeddedAdminStateStore.AclRedisConfig(
+                                readString(in),
+                                in.readInt(),
+                                readString(in),
+                                in.readInt(),
+                                readString(in),
+                                in.readInt()
+                        ),
+                        in.readBoolean(),
+                        readStringList(in),
+                        in.readLong(),
+                        new EmbeddedAdminStateStore.AuthHttpConfig(
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                in.readBoolean(),
+                                readString(in),
+                                in.readInt(),
+                                in.readInt(),
+                                in.readInt(),
+                                in.readInt(),
+                                in.readInt()
+                        ),
+                        new EmbeddedAdminStateStore.AuthBuiltInDatabaseConfig(
+                                readString(in),
+                                readString(in),
+                                readString(in)
+                        ),
+                        new EmbeddedAdminStateStore.AuthRedisConfig(
+                                readString(in),
+                                in.readInt(),
+                                readString(in),
+                                in.readInt(),
+                                readString(in),
+                                in.readInt()
+                        ),
+                        new EmbeddedAdminStateStore.AuthMysqlConfig(
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                in.readInt(),
+                                in.readInt(),
+                                in.readLong(),
+                                in.readLong(),
+                                in.readLong()
+                        ),
+                        new EmbeddedAdminStateStore.AuthPostgresqlConfig(
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                readString(in),
+                                in.readInt(),
+                                in.readInt(),
+                                in.readLong(),
+                                in.readLong(),
+                                in.readLong()
+                        )
+                );
+            }
             if (version == 11) {
                 return new EmbeddedAdminStateStore.SecurityConfig(
                         in.readBoolean(),

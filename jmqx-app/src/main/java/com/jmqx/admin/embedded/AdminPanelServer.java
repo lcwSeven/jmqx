@@ -1241,7 +1241,6 @@ public class AdminPanelServer {
                 authChain,
                 cacheTtlMs,
                 authHttp,
-                current.authFile(),
                 authBuiltInDatabase,
                 authRedis,
                 authMysql,
