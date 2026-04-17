@@ -207,9 +207,20 @@ public class JmqxApplication {
                 context.sharedMaxSubscribers(),
                 context.sharedSlowThreshold()
         );
+        AdminStateRepository adminStateRepository = buildAdminStateRepository(context.adminPanelSettings());
+        EmbeddedAdminStateStore.SecurityConfig initialSecurityConfig = adminStateRepository != null
+                && adminStateRepository.hasSecurityConfig(context.adminSyncSettings().clusterId())
+                ? adminStateRepository.getSecurityConfig(context.adminSyncSettings().clusterId())
+                : buildInitialSecurityConfig(context.authProperties(), context.aclProperties());
         ReloadableAuthProvider authProvider = new ReloadableAuthProvider(AuthProviderFactory.create(context.authProperties()));
         ReloadableAclAuthorizer aclAuthorizer = new ReloadableAclAuthorizer(AclAuthorizerFactory.create(context.aclProperties()));
-        AdminStateRepository adminStateRepository = buildAdminStateRepository(context.adminPanelSettings());
+        applyRuntimeSecurityConfig(
+                context.authProperties(),
+                context.aclProperties(),
+                authProvider,
+                aclAuthorizer,
+                initialSecurityConfig
+        );
         AdminAuthRuntime adminAuthRuntime = new AdminAuthRuntime(resolveAdminAuthConfig(adminStateRepository, context.adminAuthSettings()));
         ReloadableMessageBridge messageBridge = new ReloadableMessageBridge(MessageBridgeFactory.create(context.bridgeProperties()));
         AtomicReference<MqttBrokerMessageHandler> brokerMessageHandlerRef = new AtomicReference<>();
@@ -411,7 +422,7 @@ public class JmqxApplication {
                 adminAuthRuntime,
                 adminStateRepository,
                 builtInDatabaseUserService,
-                buildInitialSecurityConfig(context.authProperties(), context.aclProperties()),
+                initialSecurityConfig,
                 buildInitialClusterConfig(context),
                 initialBridgeConfig,
                 (clusterId, securityConfig) -> metadataRuntime.gateway().submit(new MetadataCommand(
