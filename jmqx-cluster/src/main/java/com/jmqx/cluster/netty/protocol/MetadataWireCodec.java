@@ -91,17 +91,14 @@ public final class MetadataWireCodec {
                     writeNullable(dataOutput, message.leaderEndpoint());
                     writeNullable(dataOutput, message.errorMessage());
                 }
-                case MetadataMessageType.SUBSCRIBE_REQUEST -> {
+                case MetadataMessageType.SUBSCRIBE_REQUEST,
+                     MetadataMessageType.ACK_REQUEST -> {
                     writeNullable(dataOutput, message.nodeId());
                     dataOutput.writeLong(message.lastAppliedLogIndex());
                 }
                 case MetadataMessageType.EVENT -> {
                     writeCommand(dataOutput, message.command());
                     dataOutput.writeLong(message.logIndex());
-                }
-                case MetadataMessageType.ACK_REQUEST -> {
-                    writeNullable(dataOutput, message.nodeId());
-                    dataOutput.writeLong(message.lastAppliedLogIndex());
                 }
                 case MetadataMessageType.ACK_RESPONSE -> dataOutput.writeBoolean(message.success());
                 case MetadataMessageType.RESET -> dataOutput.writeLong(message.logIndex());
@@ -119,41 +116,35 @@ public final class MetadataWireCodec {
             DataInputStream input = new DataInputStream(new ByteArrayInputStream(payload));
             return switch (type) {
                 case MetadataMessageType.SUBMIT_REQUEST -> new MetadataWireMessage(
-                    type, requestId, readCommand(input), 0L, 0L, null, false, null, null
+                        type, requestId, readCommand(input), 0L, 0L, null, false, null, null
                 );
                 case MetadataMessageType.SUBMIT_RESPONSE -> new MetadataWireMessage(
-                    type,
-                    requestId,
-                    null,
-                    input.readLong(),
-                    0L,
-                    null,
-                    input.readBoolean(),
-                    readNullable(input),
-                    readNullable(input)
+                        type,
+                        requestId,
+                        null,
+                        input.readLong(),
+                        0L,
+                        null,
+                        input.readBoolean(),
+                        readNullable(input),
+                        readNullable(input)
                 );
-                case MetadataMessageType.SUBSCRIBE_REQUEST -> {
+                case MetadataMessageType.SUBSCRIBE_REQUEST,
+                     MetadataMessageType.ACK_REQUEST -> {
                     String nodeId = readNullable(input);
                     long lastAppliedLogIndex = input.readLong();
                     yield new MetadataWireMessage(
-                        type, requestId, null, 0L, lastAppliedLogIndex, nodeId, false, null, null
+                            type, requestId, null, 0L, lastAppliedLogIndex, nodeId, false, null, null
                     );
                 }
                 case MetadataMessageType.EVENT -> new MetadataWireMessage(
-                    type, requestId, readCommand(input), input.readLong(), 0L, null, false, null, null
+                        type, requestId, readCommand(input), input.readLong(), 0L, null, false, null, null
                 );
-                case MetadataMessageType.ACK_REQUEST -> {
-                    String nodeId = readNullable(input);
-                    long lastAppliedLogIndex = input.readLong();
-                    yield new MetadataWireMessage(
-                        type, requestId, null, 0L, lastAppliedLogIndex, nodeId, false, null, null
-                    );
-                }
                 case MetadataMessageType.ACK_RESPONSE -> new MetadataWireMessage(
-                    type, requestId, null, 0L, 0L, null, input.readBoolean(), null, null
+                        type, requestId, null, 0L, 0L, null, input.readBoolean(), null, null
                 );
                 case MetadataMessageType.RESET -> new MetadataWireMessage(
-                    type, requestId, null, input.readLong(), 0L, null, false, null, null
+                        type, requestId, null, input.readLong(), 0L, null, false, null, null
                 );
                 default -> throw new IllegalStateException("unsupported metadata message type: " + type);
             };
@@ -180,11 +171,11 @@ public final class MetadataWireCodec {
             return null;
         }
         return new MetadataCommand(
-            readNullable(input),
-            readNullable(input),
-            readNullable(input),
-            readNullable(input),
-            readNullable(input)
+                readNullable(input),
+                readNullable(input),
+                readNullable(input),
+                readNullable(input),
+                readNullable(input)
         );
     }
 

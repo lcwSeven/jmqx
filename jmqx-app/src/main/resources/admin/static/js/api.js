@@ -153,23 +153,6 @@ export function deleteBlacklistEntry(clusterId, type, value) {
     );
 }
 
-export function fetchClientTraces(clusterId) {
-    return request(API_BASE + "/client-traces?clusterId=" + encodeURIComponent(clusterId));
-}
-
-export function createClientTrace(clusterId, payload) {
-    return request(API_BASE + "/client-traces?clusterId=" + encodeURIComponent(clusterId), {
-        method: "POST",
-        body: JSON.stringify(payload)
-    });
-}
-
-export function deleteClientTrace(clusterId, taskId) {
-    return request(API_BASE + "/client-traces/" + encodeURIComponent(taskId) + "?clusterId=" + encodeURIComponent(clusterId), {
-        method: "DELETE"
-    });
-}
-
 export function fetchSecurityConfig(clusterId) {
     return request(API_BASE + "/security/config?clusterId=" + encodeURIComponent(clusterId));
 }

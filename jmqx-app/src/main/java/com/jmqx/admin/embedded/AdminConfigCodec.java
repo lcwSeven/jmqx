@@ -1,7 +1,5 @@
 package com.jmqx.admin.embedded;
 
-import com.jmqx.common.logging.ClientTraceManager;
-
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
@@ -76,21 +74,6 @@ public final class AdminConfigCodec {
         }
         try {
             return decodeBlacklistEntry(Base64.getDecoder().decode(raw));
-        } catch (IllegalArgumentException exception) {
-            return null;
-        }
-    }
-
-    public static String encodeClientTraceTaskToString(ClientTraceManager.ClientTraceTask task) {
-        return Base64.getEncoder().encodeToString(encodeClientTraceTask(task));
-    }
-
-    public static ClientTraceManager.ClientTraceTask decodeClientTraceTaskFromString(String raw) {
-        if (raw == null || raw.isBlank()) {
-            return null;
-        }
-        try {
-            return decodeClientTraceTask(Base64.getDecoder().decode(raw));
         } catch (IllegalArgumentException exception) {
             return null;
         }
@@ -408,45 +391,6 @@ public final class AdminConfigCodec {
                     in.readLong(),
                     readString(in)
             );
-        } catch (Exception ignored) {
-            return null;
-        }
-    }
-
-    private static byte[] encodeClientTraceTask(ClientTraceManager.ClientTraceTask task) {
-        try {
-            ByteArrayOutputStream out = new ByteArrayOutputStream();
-            DataOutputStream data = new DataOutputStream(out);
-            data.writeByte(1);
-            writeString(data, task.id());
-            writeString(data, task.clientId());
-            data.writeLong(task.startAt());
-            data.writeLong(task.endAt());
-            data.writeLong(task.createdAt());
-            writeString(data, task.createdBy());
-            writeString(data, task.filePath());
-            data.flush();
-            return out.toByteArray();
-        } catch (Exception exception) {
-            throw new IllegalStateException("encode client trace task failed", exception);
-        }
-    }
-
-    private static ClientTraceManager.ClientTraceTask decodeClientTraceTask(byte[] raw) {
-        try {
-            DataInputStream in = new DataInputStream(new ByteArrayInputStream(raw));
-            if (in.readByte() != 1) {
-                return null;
-            }
-            return new ClientTraceManager.ClientTraceTask(
-                    readString(in),
-                    readString(in),
-                    in.readLong(),
-                    in.readLong(),
-                    in.readLong(),
-                    readString(in),
-                    readString(in)
-            ).normalize();
         } catch (Exception ignored) {
             return null;
         }

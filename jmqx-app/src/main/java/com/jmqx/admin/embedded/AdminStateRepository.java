@@ -1,7 +1,5 @@
 package com.jmqx.admin.embedded;
 
-import com.jmqx.common.logging.ClientTraceManager;
-
 import java.util.List;
 
 /**
@@ -63,12 +61,6 @@ public interface AdminStateRepository extends AutoCloseable {
     void removeBlacklistEntry(String clusterId, String type, String value);
 
     List<EmbeddedAdminStateStore.BlacklistEntry> listBlacklistEntries(String clusterId);
-
-    void upsertClientTraceTask(String clusterId, ClientTraceManager.ClientTraceTask task);
-
-    void removeClientTraceTask(String clusterId, String taskId);
-
-    List<ClientTraceManager.ClientTraceTask> listClientTraceTasks(String clusterId);
 
     void appendAuditLog(String clusterId, EmbeddedAdminStateStore.AuditLogEntry entry);
 

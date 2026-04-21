@@ -1,3 +1,5 @@
+import { getStoredAdminAuth } from "../../api.js";
+
 export const dashboardMethods = {
     resolveDashboardWsUrl() {
         const protocol = window.location.protocol === "https:" ? "wss" : "ws";
@@ -11,11 +13,16 @@ export const dashboardMethods = {
         }
         this.disconnectDashboardStream();
         this.mqttStatus = "status.mqtt.connecting";
+        const auth = getStoredAdminAuth();
+        if (!auth.username) {
+            this.mqttStatus = "status.mqtt.disconnected";
+            return;
+        }
         const clientId = "admin-" + Math.random().toString(16).slice(2, 10);
         const client = window.mqtt.connect(mqttWsUrl, {
             clientId,
-            username: this.adminLoginForm.username || undefined,
-            password: this.adminLoginForm.password || undefined,
+            username: auth.username,
+            password: auth.password || undefined,
             reconnectPeriod: 2000,
             clean: true,
             connectTimeout: 5000

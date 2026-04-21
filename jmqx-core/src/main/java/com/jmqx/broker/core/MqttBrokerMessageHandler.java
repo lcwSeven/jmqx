@@ -16,7 +16,6 @@ import com.jmqx.bridge.MessageBridge;
 import com.jmqx.cluster.MetadataCommand;
 import com.jmqx.cluster.MetadataCommandGateway;
 import com.jmqx.common.SharedSubscription;
-import com.jmqx.common.logging.ClientLogContext;
 import com.jmqx.protocol.BrokerMessageHandler;
 import com.jmqx.protocol.AuthDecision;
 import com.jmqx.protocol.AuthResult;
@@ -84,11 +83,12 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * MQTT 核心消息处理器。
- * 负责连接鉴权、会话建立、订阅管理、消息路由和 ACL 校验。
+ * Core MQTT message handler.
  *
- * @author liucaiwen
- * @date 2026/4/2
+ * <p>This class owns the broker hot path for CONNECT, SUBSCRIBE, PUBLISH, inflight
+ * state transitions, routing, and a small amount of cluster synchronization glue.
+ * The implementation intentionally keeps the protocol flow explicit so each stage
+ * can be read from top to bottom.</p>
  */
 public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     private static final Logger LOG = Logger.getLogger(MqttBrokerMessageHandler.class.getName());
@@ -250,44 +250,42 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
 
     @Override
     public void onMessage(ChannelHandlerContext ctx, MqttMessage message) {
-        // 协议解码失败直接断开，避免非法报文继续占用连接。
+        // Close immediately on decode failure to avoid keeping an invalid connection alive.
         if (message.decoderResult().isFailure()) {
             LOG.warning(() -> "[PROTO] decode failed, remote=" + ctx.channel().remoteAddress());
             ctx.close();
             return;
         }
 
-        try (ClientLogContext.Scope ignored = ClientLogContext.open(resolveLoggingClientId(ctx.channel(), message))) {
-            // 按 MQTT 报文类型分发到对应处理函数。
-            MqttMessageType messageType = message.fixedHeader().messageType();
-            if (shouldRejectWhileConnectPending(ctx.channel(), messageType)) {
-                LOG.warning(() -> "[CONNECT] closing connection because protocol message arrived before CONNACK, remote="
-                    + ctx.channel().remoteAddress() + ", messageType=" + messageType);
-                ctx.close();
-                return;
+        // Dispatch by MQTT message type.
+        MqttMessageType messageType = message.fixedHeader().messageType();
+        if (shouldRejectWhileConnectPending(ctx.channel(), messageType)) {
+            LOG.warning(() -> "[CONNECT] closing connection because protocol message arrived before CONNACK, remote="
+                + ctx.channel().remoteAddress() + ", messageType=" + messageType);
+            ctx.close();
+            return;
+        }
+        switch (messageType) {
+            case CONNECT -> handleConnect(ctx, (MqttConnectMessage) message);
+            case SUBSCRIBE -> handleSubscribe(ctx, (MqttSubscribeMessage) message);
+            case UNSUBSCRIBE -> handleUnsubscribe(ctx, (MqttUnsubscribeMessage) message);
+            case PUBLISH -> handlePublish(ctx, (MqttPublishMessage) message);
+            case PUBACK -> handlePubAck(ctx, (MqttPubAckMessage) message);
+            case PUBREC -> handlePubRec(ctx, message);
+            case PUBREL -> handlePubRel(ctx, message);
+            case PUBCOMP -> handlePubComp(ctx, message);
+            case PINGREQ -> {
+                LOG.fine(() -> "[PING] clientId=" + currentClientId(ctx.channel()));
+                ctx.writeAndFlush(new MqttMessage(
+                        new MqttFixedHeader(MqttMessageType.PINGRESP, false, MqttQoS.AT_MOST_ONCE, false, 0)
+                ));
             }
-            switch (messageType) {
-                case CONNECT -> handleConnect(ctx, (MqttConnectMessage) message);
-                case SUBSCRIBE -> handleSubscribe(ctx, (MqttSubscribeMessage) message);
-                case UNSUBSCRIBE -> handleUnsubscribe(ctx, (MqttUnsubscribeMessage) message);
-                case PUBLISH -> handlePublish(ctx, (MqttPublishMessage) message);
-                case PUBACK -> handlePubAck(ctx, (MqttPubAckMessage) message);
-                case PUBREC -> handlePubRec(ctx, message);
-                case PUBREL -> handlePubRel(ctx, message);
-                case PUBCOMP -> handlePubComp(ctx, message);
-                case PINGREQ -> {
-                    LOG.fine(() -> "[PING] clientId=" + currentClientId(ctx.channel()));
-                    ctx.writeAndFlush(new MqttMessage(
-                            new MqttFixedHeader(MqttMessageType.PINGRESP, false, MqttQoS.AT_MOST_ONCE, false, 0)
-                    ));
-                }
-                case DISCONNECT -> {
-                    ctx.channel().attr(GRACEFUL_DISCONNECT).set(true);
-                    LOG.fine(() -> "[DISCONNECT] clientId=" + currentClientId(ctx.channel()));
-                    ctx.close();
-                }
-                default -> {
-                }
+            case DISCONNECT -> {
+                ctx.channel().attr(GRACEFUL_DISCONNECT).set(true);
+                LOG.fine(() -> "[DISCONNECT] clientId=" + currentClientId(ctx.channel()));
+                ctx.close();
+            }
+            default -> {
             }
         }
     }
@@ -299,160 +297,206 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             return;
         }
 
-        try (ClientLogContext.Scope ignored = ClientLogContext.open(clientId)) {
-            ClientSession session = sessionRegistry.get(clientId).orElse(null);
-            String username = session == null ? null : session.username();
-            String connectionType = session == null ? null : session.connectionType();
-            String serviceNodeIp = session == null ? null : session.serviceNodeIp();
-            int keepAliveSeconds = session == null ? 0 : session.keepAliveSeconds();
-            String clientIp = resolveClientIp(channel);
-            boolean cleanStart = Optional.ofNullable(channel.attr(CLEAN_START).get()).orElse(false);
-            long sessionExpirySeconds = session == null ? SESSION_EXPIRY_IMMEDIATE : session.sessionExpiryIntervalSeconds();
-            boolean gracefulDisconnect = Optional.ofNullable(channel.attr(GRACEFUL_DISCONNECT).get()).orElse(false);
+        ClientSession session = sessionRegistry.get(clientId).orElse(null);
+        String username = session == null ? null : session.username();
+        String connectionType = session == null ? null : session.connectionType();
+        String serviceNodeIp = session == null ? null : session.serviceNodeIp();
+        int keepAliveSeconds = session == null ? 0 : session.keepAliveSeconds();
+        String clientIp = resolveClientIp(channel);
+        boolean cleanStart = Optional.ofNullable(channel.attr(CLEAN_START).get()).orElse(false);
+        long sessionExpirySeconds = session == null ? SESSION_EXPIRY_IMMEDIATE : session.sessionExpiryIntervalSeconds();
+        boolean gracefulDisconnect = Optional.ofNullable(channel.attr(GRACEFUL_DISCONNECT).get()).orElse(false);
 
-            if (!gracefulDisconnect) {
-                publishWillMessageIfPresent(channel, clientId);
-            }
-            willMessageStore.remove(clientId);
-
-            clientAuthenticator.evictCache(clientId, username);
-            applyGlobalClientAuthCacheEvictAfterDisconnect(clientId, username);
-            adminReporter.removeClientSession(clientId);
-            sessionRegistry.remove(clientId);
-            inflightManager.removeRuntimeState(clientId);
-            if (shouldClearSessionState(cleanStart, sessionExpirySeconds)) {
-                inflightManager.clearPersistentState(clientId);
-                sharedSubscriptionManager.removeClient(clientId);
-                Set<String> removedLastTopics = subscriptionRegistry.removeClientAndCollectLastTopics(clientId);
-                removedLastTopics.forEach(this::applyGlobalUnregisterAfterLocal);
-            }
-            publishClientLifecycleEvent(
-                TOPIC_CLIENT_DISCONNECTED,
-                dashboardClusterId,
-                nodeId,
-                clientId,
-                clientIp,
-                username,
-                connectionType,
-                serviceNodeIp,
-                keepAliveSeconds,
-                gracefulDisconnect ? "graceful" : "unexpected"
-            );
-            publishClientLifecycleEvent(
-                dashboardTopic("client/disconnected"),
-                dashboardClusterId,
-                nodeId,
-                clientId,
-                clientIp,
-                username,
-                connectionType,
-                serviceNodeIp,
-                keepAliveSeconds,
-                gracefulDisconnect ? "graceful" : "unexpected"
-            );
-            LOG.fine(() -> "[SESSION] offline clientId=" + clientId
-                + ", cleanStart=" + cleanStart + ", sessionExpirySeconds=" + sessionExpirySeconds);
+        if (!gracefulDisconnect) {
+            publishWillMessageIfPresent(channel, clientId);
         }
+        willMessageStore.remove(clientId);
+
+        clientAuthenticator.evictCache(clientId, username);
+        applyGlobalClientAuthCacheEvictAfterDisconnect(clientId, username);
+        adminReporter.removeClientSession(clientId);
+        sessionRegistry.remove(clientId);
+        inflightManager.removeRuntimeState(clientId);
+        if (shouldClearSessionState(cleanStart, sessionExpirySeconds)) {
+            inflightManager.clearPersistentState(clientId);
+            sharedSubscriptionManager.removeClient(clientId);
+            Set<String> removedLastTopics = subscriptionRegistry.removeClientAndCollectLastTopics(clientId);
+            removedLastTopics.forEach(this::applyGlobalUnregisterAfterLocal);
+        }
+        publishClientLifecycleEvent(
+            TOPIC_CLIENT_DISCONNECTED,
+            dashboardClusterId,
+            nodeId,
+            clientId,
+            clientIp,
+            username,
+            connectionType,
+            serviceNodeIp,
+            keepAliveSeconds,
+            gracefulDisconnect ? "graceful" : "unexpected"
+        );
+        publishClientLifecycleEvent(
+            dashboardTopic("client/disconnected"),
+            dashboardClusterId,
+            nodeId,
+            clientId,
+            clientIp,
+            username,
+            connectionType,
+            serviceNodeIp,
+            keepAliveSeconds,
+            gracefulDisconnect ? "graceful" : "unexpected"
+        );
+        LOG.fine(() -> "[SESSION] offline clientId=" + clientId
+            + ", cleanStart=" + cleanStart + ", sessionExpirySeconds=" + sessionExpirySeconds);
     }
 
     private void handleConnect(ChannelHandlerContext ctx, MqttConnectMessage message) {
-        if (Boolean.TRUE.equals(ctx.channel().attr(CONNECT_IN_PROGRESS).get())) {
-            LOG.warning(() -> "[CONNECT] duplicate CONNECT while authentication in progress, remote=" + ctx.channel().remoteAddress());
-            ctx.close();
+        if (rejectDuplicateConnectWhilePending(ctx)) {
             return;
         }
+        MqttVersion mqttVersion = validateConnectVersion(ctx, message);
+        if (mqttVersion == null) {
+            return;
+        }
+        boolean mqtt5 = mqttVersion == MqttVersion.MQTT_5;
+        if (isConnectRateLimited(ctx, mqtt5)) {
+            return;
+        }
+        String clientId = validateConnectClientId(ctx, message, mqtt5);
+        if (clientId == null) {
+            return;
+        }
+        PendingConnectContext connectContext = buildPendingConnectContext(ctx, message, mqttVersion, mqtt5, clientId);
+        if (connectContext == null) {
+            return;
+        }
+        if (rejectBlacklistedConnect(ctx, connectContext.clientId(), connectContext.clientIp(), mqtt5)) {
+            return;
+        }
+        startConnectAuthentication(ctx, connectContext);
+    }
+
+    private boolean rejectDuplicateConnectWhilePending(ChannelHandlerContext ctx) {
+        if (!Boolean.TRUE.equals(ctx.channel().attr(CONNECT_IN_PROGRESS).get())) {
+            return false;
+        }
+        LOG.warning(() -> "[CONNECT] duplicate CONNECT while authentication in progress, remote=" + ctx.channel().remoteAddress());
+        ctx.close();
+        return true;
+    }
+
+    private MqttVersion validateConnectVersion(ChannelHandlerContext ctx, MqttConnectMessage message) {
         MqttVersion mqttVersion = resolveMqttVersion(message);
         if (mqttVersion == null) {
             LOG.warning(() -> "[CONNECT] rejected unknown protocol version, remote=" + ctx.channel().remoteAddress()
                 + ", version=" + message.variableHeader().version());
             rejectConnection(ctx, MqttConnectReturnCode.CONNECTION_REFUSED_UNACCEPTABLE_PROTOCOL_VERSION, false);
-            return;
+            return null;
         }
-        boolean mqtt5 = mqttVersion == MqttVersion.MQTT_5;
-        if (!mqtt5 && mqttVersion != MqttVersion.MQTT_3_1 && mqttVersion != MqttVersion.MQTT_3_1_1) {
-            LOG.warning(() -> "[CONNECT] rejected unsupported protocol version, remote=" + ctx.channel().remoteAddress()
-                + ", version=" + message.variableHeader().version());
-            rejectConnection(ctx, MqttConnectReturnCode.CONNECTION_REFUSED_UNACCEPTABLE_PROTOCOL_VERSION, false);
-            return;
+        if (mqttVersion == MqttVersion.MQTT_5
+            || mqttVersion == MqttVersion.MQTT_3_1
+            || mqttVersion == MqttVersion.MQTT_3_1_1) {
+            return mqttVersion;
         }
-        if (isConnectRateLimited(ctx, mqtt5)) {
-            return;
-        }
+        LOG.warning(() -> "[CONNECT] rejected unsupported protocol version, remote=" + ctx.channel().remoteAddress()
+            + ", version=" + message.variableHeader().version());
+        rejectConnection(ctx, MqttConnectReturnCode.CONNECTION_REFUSED_UNACCEPTABLE_PROTOCOL_VERSION, false);
+        return null;
+    }
 
-        // 第一步：校验 clientId，空 clientId 直接按协议拒绝，避免无身份连接进入后续流程。
+    private String validateConnectClientId(ChannelHandlerContext ctx, MqttConnectMessage message, boolean mqtt5) {
         String clientId = message.payload().clientIdentifier();
-        if (clientId == null || clientId.isBlank()) {
-            LOG.warning(() -> "[CONNECT] rejected empty clientId, remote=" + ctx.channel().remoteAddress());
-            rejectConnection(
-                ctx,
-                mqtt5
-                    ? MqttConnectReturnCode.CONNECTION_REFUSED_CLIENT_IDENTIFIER_NOT_VALID
-                    : MqttConnectReturnCode.CONNECTION_REFUSED_IDENTIFIER_REJECTED,
-                mqtt5
-            );
-            return;
+        if (clientId != null && !clientId.isBlank()) {
+            return clientId;
         }
+        LOG.warning(() -> "[CONNECT] rejected empty clientId, remote=" + ctx.channel().remoteAddress());
+        rejectConnection(
+            ctx,
+            mqtt5
+                ? MqttConnectReturnCode.CONNECTION_REFUSED_CLIENT_IDENTIFIER_NOT_VALID
+                : MqttConnectReturnCode.CONNECTION_REFUSED_IDENTIFIER_REJECTED,
+            mqtt5
+        );
+        return null;
+    }
 
-        // 第二步：组装连接上下文（优先使用 MQTT username，其次 WebSocket 握手注入的用户名，最后回退到 clientId）。
+    private PendingConnectContext buildPendingConnectContext(
+        ChannelHandlerContext ctx,
+        MqttConnectMessage message,
+        MqttVersion mqttVersion,
+        boolean mqtt5,
+        String clientId
+    ) {
+        if (rejectOversizeWillPayload(ctx, message, clientId, mqtt5)) {
+            return null;
+        }
+        boolean cleanStart = message.variableHeader().isCleanSession();
+        return new PendingConnectContext(
+            mqttVersion,
+            mqtt5,
+            clientId,
+            resolveConnectUsername(ctx, message, clientId),
+            resolveConnectPassword(message),
+            resolveClientIp(ctx.channel()),
+            resolveConnectionType(ctx.channel()),
+            cleanStart,
+            mqtt5
+                ? resolveSessionExpiryIntervalSeconds(message)
+                : (cleanStart ? SESSION_EXPIRY_IMMEDIATE : SESSION_EXPIRY_PERSISTENT),
+            Math.max(message.variableHeader().keepAliveTimeSeconds(), 0),
+            resolveServiceNodeIp(ctx.channel()),
+            buildWillMessage(message),
+            System.nanoTime()
+        );
+    }
+
+    private String resolveConnectUsername(ChannelHandlerContext ctx, MqttConnectMessage message, String clientId) {
         String username = normalize(message.payload().userName());
         if (username == null) {
             username = normalize(ctx.channel().attr(WS_USERNAME).get());
         }
-        if (username == null) {
-            username = clientId;
-        }
-        // 连接类型用于管理台展示与后续排障（mqtt / websocket）。
-        String connectionType = normalize(ctx.channel().attr(CONNECTION_TYPE).get());
-        if (connectionType == null) {
-            connectionType = "mqtt";
-        }
-        // MQTT CONNECT 中密码是二进制字段，这里统一按 UTF-8 解析为字符串供鉴权插件使用。
-        String password = message.payload().passwordInBytes() == null
-                ? null
-                : new String(message.payload().passwordInBytes(), StandardCharsets.UTF_8);
-        String clientIp = resolveClientIp(ctx.channel());
-        boolean cleanStart = message.variableHeader().isCleanSession();
-        long sessionExpirySeconds = mqtt5
-            ? resolveSessionExpiryIntervalSeconds(message)
-            : (cleanStart ? SESSION_EXPIRY_IMMEDIATE : SESSION_EXPIRY_PERSISTENT);
-        int keepAliveSeconds = Math.max(message.variableHeader().keepAliveTimeSeconds(), 0);
-        String serviceNodeIp = resolveServiceNodeIp(ctx.channel());
-        if (isWillPayloadTooLarge(message)) {
-            LOG.warning(() -> "[CONNECT] rejected oversize will payload, clientId=" + clientId
-                + ", maxWillPayloadBytes=" + maxWillPayloadBytes);
-            rejectConnection(ctx, MqttConnectReturnCode.CONNECTION_REFUSED_NOT_AUTHORIZED, mqtt5);
-            return;
-        }
-        WillMessage willMessage = buildWillMessage(message);
-        PendingConnectContext connectContext = new PendingConnectContext(
-            mqttVersion,
-            mqtt5,
-            clientId,
-            username,
-            password,
-            clientIp,
-            connectionType,
-            cleanStart,
-            sessionExpirySeconds,
-            keepAliveSeconds,
-            serviceNodeIp,
-            willMessage,
-            System.nanoTime()
-        );
+        return username == null ? clientId : username;
+    }
 
-        // 校验黑名单
-        if (clientBlacklist.isBlocked(clientId, clientIp)) {
-            LOG.warning(() -> "[CONNECT] blacklisted client rejected, clientId=" + clientId + ", clientIp=" + clientIp);
-            rejectConnection(
-                ctx,
-                mqtt5
-                    ? MqttConnectReturnCode.CONNECTION_REFUSED_NOT_AUTHORIZED
-                    : MqttConnectReturnCode.CONNECTION_REFUSED_NOT_AUTHORIZED,
-                mqtt5
-            );
-            return;
+    private String resolveConnectPassword(MqttConnectMessage message) {
+        byte[] passwordBytes = message.payload().passwordInBytes();
+        if (passwordBytes == null) {
+            return null;
         }
+        return new String(passwordBytes, StandardCharsets.UTF_8);
+    }
 
+    private String resolveConnectionType(Channel channel) {
+        String connectionType = normalize(channel.attr(CONNECTION_TYPE).get());
+        return connectionType == null ? "mqtt" : connectionType;
+    }
+
+    private boolean rejectOversizeWillPayload(
+        ChannelHandlerContext ctx,
+        MqttConnectMessage message,
+        String clientId,
+        boolean mqtt5
+    ) {
+        if (!isWillPayloadTooLarge(message)) {
+            return false;
+        }
+        LOG.warning(() -> "[CONNECT] rejected oversize will payload, clientId=" + clientId
+            + ", maxWillPayloadBytes=" + maxWillPayloadBytes);
+        rejectConnection(ctx, MqttConnectReturnCode.CONNECTION_REFUSED_NOT_AUTHORIZED, mqtt5);
+        return true;
+    }
+
+    private boolean rejectBlacklistedConnect(ChannelHandlerContext ctx, String clientId, String clientIp, boolean mqtt5) {
+        if (!clientBlacklist.isBlocked(clientId, clientIp)) {
+            return false;
+        }
+        LOG.warning(() -> "[CONNECT] blacklisted client rejected, clientId=" + clientId + ", clientIp=" + clientIp);
+        rejectConnection(ctx, MqttConnectReturnCode.CONNECTION_REFUSED_NOT_AUTHORIZED, mqtt5);
+        return true;
+    }
+
+    private void startConnectAuthentication(ChannelHandlerContext ctx, PendingConnectContext connectContext) {
         ctx.channel().attr(CONNECT_IN_PROGRESS).set(true);
         authenticateConnectAsync(connectContext).whenComplete((authResult, error) ->
             executeOnEventLoop(ctx, () -> completeConnectAfterAuth(ctx, connectContext, authResult, error))
@@ -488,7 +532,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
                         + ", topicFilter=" + topicFilter + ", limit=" + maxSubscriptionsPerClient);
                 continue;
             }
-            // ACL 鉴权
+            // ACL authorization
             if (isDenied(clientId, normalizedFilter, AclAction.SUBSCRIBE)) {
                 grantedQos.add(MqttQoS.FAILURE.value());
                 LOG.warning(() -> "[ACL] subscribe denied clientId=" + clientId + ", topicFilter=" + topicFilter);
@@ -503,7 +547,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
                     + ", group=" + shared.group() + ", topicFilter=" + topicFilter);
                 continue;
             }
-            // 先更新本地订阅，再在首次订阅时同步全局路由。
+            // Update local subscriptions first, then synchronize new global routes.
             boolean firstLocal = subscriptionRegistry.subscribeAndCheckFirst(clientId, topicFilter, effectiveQos);
             if (firstLocal) {
                 firstLocalTopicFilters.add(topicFilter);
@@ -558,53 +602,22 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     private void handlePublish(ChannelHandlerContext ctx, MqttPublishMessage message) {
-        String topic = message.variableHeader().topicName();
-        byte[] payload = ByteBufUtil.getBytes(message.payload());
-        int qos = normalizeQos(message.fixedHeader().qosLevel().value());
-        int effectiveQos = capByMaxQos(qos);
-        int packetId = message.variableHeader().packetId();
-        String clientId = currentClientId(ctx.channel());
-        if (clientId == null) {
-            ctx.close();
+        PreparedPublish preparedPublish = preparePublish(ctx, message);
+        if (preparedPublish == null) {
             return;
         }
-        if (qos > 0 && packetId <= 0) {
-            LOG.warning(() -> "[PUBLISH] invalid packetId clientId=" + clientId + ", qos=" + qos);
-            ctx.close();
-            return;
-        }
-        if (isPublishRateLimited(ctx, clientId, qos, packetId, topic)) {
-            return;
-        }
-        Optional<ClientSession> sessionOptional = sessionRegistry.get(clientId);
-        if (sessionOptional.isEmpty()) {
-            ctx.close();
-            return;
-        }
-        ClientSession session = sessionOptional.get();
-        PublishContext publishContext = new PublishContext(
-            clientId,
-            session.username(),
-            topic,
-            payload,
-            qos,
-            effectiveQos,
-            packetId,
-            message.fixedHeader().isRetain(),
-            System.nanoTime()
-        );
         publishSequencer(ctx.channel()).submit(() ->
-            authorizePublishAsync(session, publishContext)
+            authorizePublishAsync(preparedPublish.session(), preparedPublish.context())
                 .handle(PublishAclEvaluation::new)
                 .thenCompose(result -> executeOnEventLoop(
                     ctx,
-                    () -> completePublishAfterAcl(ctx, publishContext, result.decision(), result.error())
+                    () -> completePublishAfterAcl(ctx, preparedPublish.context(), result.decision(), result.error())
                 ))
         );
     }
 
     /**
-     * ACL 拒绝时按 QoS 返回协议应答。
+     * Returns protocol acknowledgements when ACL denies a publish.
      */
     private void handleDeniedPublish(ChannelHandlerContext ctx, String clientId, String topic, int qos, int packetId) {
         LOG.warning(() -> "[ACL] publish denied clientId=" + clientId + ", topic=" + topic);
@@ -618,7 +631,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     /**
-     * QoS2 第一阶段：缓存 PUBLISH 并回复 PUBREC，等待 PUBREL 后再真正投递。
+     * Stores inbound QoS2 PUBLISH and replies with PUBREC.
      */
     private void handleInboundQos2Publish(
         ChannelHandlerContext ctx,
@@ -633,7 +646,9 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     /**
-     * 普通业务发布处理（QoS0/QoS1 直接投递，QoS2 在 PUBREL 阶段调用）。
+     * Handles the application-level publish path.
+     *
+     * <p>QoS0 and QoS1 publish directly. QoS2 enters here later when PUBREL arrives.</p>
      */
     private void processApplicationPublish(String clientId, String topic, byte[] payload, int qos, boolean retain) {
         if (retain && retainedEnabled) {
@@ -652,6 +667,62 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         }
     }
 
+    private PreparedPublish preparePublish(ChannelHandlerContext ctx, MqttPublishMessage message) {
+        String clientId = currentClientId(ctx.channel());
+        if (clientId == null) {
+            ctx.close();
+            return null;
+        }
+        String topic = message.variableHeader().topicName();
+        int qos = normalizeQos(message.fixedHeader().qosLevel().value());
+        int packetId = message.variableHeader().packetId();
+        if (rejectInvalidPublishPacketId(ctx, clientId, qos, packetId)) {
+            return null;
+        }
+        if (isPublishRateLimited(ctx, clientId, qos, packetId, topic)) {
+            return null;
+        }
+        ClientSession session = requirePublishSession(ctx, clientId);
+        if (session == null) {
+            return null;
+        }
+        PublishContext publishContext = new PublishContext(
+            clientId,
+            session.username(),
+            topic,
+            ByteBufUtil.getBytes(message.payload()),
+            qos,
+            capByMaxQos(qos),
+            packetId,
+            message.fixedHeader().isRetain(),
+            System.nanoTime()
+        );
+        return new PreparedPublish(session, publishContext);
+    }
+
+    private boolean rejectInvalidPublishPacketId(
+        ChannelHandlerContext ctx,
+        String clientId,
+        int qos,
+        int packetId
+    ) {
+        if (qos <= 0 || packetId > 0) {
+            return false;
+        }
+        LOG.warning(() -> "[PUBLISH] invalid packetId clientId=" + clientId + ", qos=" + qos);
+        ctx.close();
+        return true;
+    }
+
+    private ClientSession requirePublishSession(ChannelHandlerContext ctx, String clientId) {
+        Optional<ClientSession> sessionOptional = sessionRegistry.get(clientId);
+        if (sessionOptional.isPresent()) {
+            return sessionOptional.get();
+        }
+        ctx.close();
+        return null;
+    }
+
     private void handlePubAck(ChannelHandlerContext ctx, MqttPubAckMessage message) {
         String clientId = currentClientId(ctx.channel());
         if (clientId == null || message == null || message.variableHeader() == null) {
@@ -662,9 +733,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     /**
-     * QoS2 第二阶段：收到 PUBREC 后回复 PUBREL，等待 PUBCOMP 后再删除缓存。
-     * @param ctx 通道
-     * @param message 消息
+     * QoS2 phase 2: reply with PUBREL after PUBREC and wait for PUBCOMP before clearing state.
      */
     private void handlePubRec(ChannelHandlerContext ctx, MqttMessage message) {
         String clientId = currentClientId(ctx.channel());
@@ -678,9 +747,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     /**
-     * QoS2 第三阶段：收到 PUBREL 后处理业务逻辑，并回复 PUBCOMP，等待 PUBCOMP 后再删除缓存。
-     * @param ctx 通道
-     * @param message 消息
+     * QoS2 phase 3: process the application publish after PUBREL and then reply with PUBCOMP.
      */
     private void handlePubRel(ChannelHandlerContext ctx, MqttMessage message) {
         String clientId = currentClientId(ctx.channel());
@@ -691,7 +758,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         BrokerInflightManager.InboundQos2ReleaseDecision decision = inflightManager.onPubRel(clientId, packetId);
         if (decision.shouldProcess()) {
             InboundQos2Publish publish = decision.publish();
-            // QoS2 业务处理
+            // QoS2 application publish
             processApplicationPublish(
                 clientId,
                 publish.topic(),
@@ -712,9 +779,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     /**
-     * QoS2 第四阶段：收到 PUBCOMP 后删除缓存。
-     * @param ctx 通道
-     * @param message 消息
+     * QoS2 phase 4: clear outbound inflight state after PUBCOMP.
      */
     private void handlePubComp(ChannelHandlerContext ctx, MqttMessage message) {
         String clientId = currentClientId(ctx.channel());
@@ -806,7 +871,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     /**
-     * 发布系统主题消息（用于 Dashboard 等内部主题）。
+     * Publishes an internal system topic, mainly for dashboard and other control-plane consumers.
      */
     public void publishSystemTopic(String topic, byte[] payload) {
         if (topic == null || topic.isBlank() || payload == null) {
@@ -822,35 +887,48 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     private void routeMessage(String topic, byte[] payload, int publishQos) {
-        // 匹配全局路由
         GlobalSubscriptionMatch globalMatch = resolveGlobalMatch(topic);
-        RouteScratch routeScratch = routeScratchHolder.get();
+        RouteScratch routeScratch = prepareRouteScratch();
         Set<String> localSubscribers = routeScratch.localSubscribers();
         Map<String, ClusterMessageDispatcher.DispatchTarget> remoteTargetPlans = routeScratch.remoteTargetPlans();
-        localSubscribers.clear();
-        remoteTargetPlans.clear();
-        // 始终基于本地订阅表进行一次匹配，避免本地订阅已生效但全局路由尚未传播时漏投递。
         SubscriptionMatchResult localMatch = subscriptionRegistry.findSubscriptionMatch(topic);
         localSubscribers.addAll(localMatch.getDirectSubscribers());
         buildRemoteNormalTargetPlans(globalMatch, remoteTargetPlans);
         selectSharedDeliveryTargets(localMatch, globalMatch, localSubscribers, remoteTargetPlans);
+        dispatchRouteResult(topic, payload, publishQos, localSubscribers, remoteTargetPlans);
+        clearRouteScratch(routeScratch);
+    }
 
+    private RouteScratch prepareRouteScratch() {
+        RouteScratch routeScratch = routeScratchHolder.get();
+        routeScratch.localSubscribers().clear();
+        routeScratch.remoteTargetPlans().clear();
+        return routeScratch;
+    }
+
+    private void dispatchRouteResult(
+        String topic,
+        byte[] payload,
+        int publishQos,
+        Set<String> localSubscribers,
+        Map<String, ClusterMessageDispatcher.DispatchTarget> remoteTargetPlans
+    ) {
         deliverToLocalSubscribers(topic, payload, localSubscribers, publishQos);
-        if (!remoteTargetPlans.isEmpty()) {
-            // payload 在路由链路内按只读使用，跨节点分发无需额外 clone，减少大消息拷贝开销。
-            clusterMessageDispatcher.dispatch(topic, payload, publishQos, remoteTargetPlans);
-            LOG.fine(() -> "[ROUTE][CLUSTER] topic=" + topic + ", remoteTargets=" + remoteTargetPlans.keySet());
+        if (remoteTargetPlans.isEmpty()) {
+            return;
         }
-        localSubscribers.clear();
-        remoteTargetPlans.clear();
+        clusterMessageDispatcher.dispatch(topic, payload, publishQos, remoteTargetPlans);
+        LOG.fine(() -> "[ROUTE][CLUSTER] topic=" + topic + ", remoteTargets=" + remoteTargetPlans.keySet());
+    }
+
+    private void clearRouteScratch(RouteScratch routeScratch) {
+        routeScratch.localSubscribers().clear();
+        routeScratch.remoteTargetPlans().clear();
     }
 
     /**
-     * 解析全局路由匹配结果（短 TTL + appliedLogIndex 一致性门控）。
-     * 命中条件：
-     * 1. 同 topic 存在缓存；
-     * 2. 缓存尚未过期；
-     * 3. 全局路由 appliedLogIndex 未变化。
+     * Resolves the global routing snapshot with a short TTL cache guarded by the
+     * applied log index.
      */
     private GlobalSubscriptionMatch resolveGlobalMatch(String topic) {
         if (topic == null || topic.isBlank() || globalSubscriptionRegistry == null) {
@@ -891,11 +969,10 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
 
 
     /**
-     * 集群远端消息入口。
-     * 远端投递只做本地订阅派发，不再继续向其他节点转发，避免形成环路。
+     * Cluster entrypoint for messages already dispatched by another node.
      *
-     * @param topic   topic
-     * @param payload payload
+     * <p>Remote deliveries only fan out to local subscribers and never dispatch
+     * again, which prevents routing loops.</p>
      */
     public void onClusterPublish(String topic, byte[] payload, int publishQos, boolean includeNormal, Set<String> sharedGroups) {
         if (topic == null || topic.isBlank() || payload == null) {
@@ -907,7 +984,6 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
                 : MqttQoS.AT_LEAST_ONCE.value())
             : MqttQoS.AT_MOST_ONCE.value();
         normalizedQos = capByMaxQos(normalizedQos);
-        // 路由到本地订阅客户端
         routeLocalOnly(topic, payload, includeNormal, sharedGroups, normalizedQos);
     }
 
@@ -916,6 +992,15 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             return;
         }
         SubscriptionMatchResult matchResult = subscriptionRegistry.findSubscriptionMatch(topic);
+        Set<String> subscribers = collectLocalOnlySubscribers(matchResult, includeNormal, sharedGroups);
+        deliverToLocalSubscribers(topic, payload, subscribers, publishQos);
+    }
+
+    private Set<String> collectLocalOnlySubscribers(
+        SubscriptionMatchResult matchResult,
+        boolean includeNormal,
+        Set<String> sharedGroups
+    ) {
         Set<String> subscribers = new LinkedHashSet<>();
         if (includeNormal) {
             subscribers.addAll(matchResult.getDirectSubscribers());
@@ -929,14 +1014,11 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
                 subscribers.add(selected);
             }
         });
-        deliverToLocalSubscribers(topic, payload, subscribers, publishQos);
+        return subscribers;
     }
 
     /**
-     * 本地订阅派发
-     * @param topic  topic
-     * @param payload  payload
-     * @param subscribers  subscribers
+     * Delivers a routed message to matching local subscribers.
      */
     private void deliverToLocalSubscribers(String topic, byte[] payload, Set<String> subscribers, int publishQos) {
         LOG.fine(() -> "[ROUTE][LOCAL] topic=" + topic + ", subscribers=" + subscribers.size());
@@ -944,42 +1026,65 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         Set<Channel> channelsToFlush = deliveryScratch.channelsToFlush();
         channelsToFlush.clear();
         for (String subscriber : subscribers) {
-            Optional<ClientSession> sessionOptional = sessionRegistry.get(subscriber);
-            if (sessionOptional.isEmpty()) {
+            ClientSession session = resolveActiveSubscriberSession(subscriber);
+            if (session == null) {
                 continue;
             }
-
-            Channel channel = sessionOptional.get().channel();
-            if (!channel.isActive()) {
-                continue;
-            }
-            int outboundQos = publishQos >= MqttQoS.EXACTLY_ONCE.value()
-                ? MqttQoS.EXACTLY_ONCE.value()
-                : (publishQos >= MqttQoS.AT_LEAST_ONCE.value()
-                    ? MqttQoS.AT_LEAST_ONCE.value()
-                    : MqttQoS.AT_MOST_ONCE.value());
-            outboundQos = capByMaxQos(outboundQos);
-            if (outboundQos == MqttQoS.AT_MOST_ONCE.value()) {
-                channel.write(MqttMessageBuilders.publish()
-                        .topicName(topic)
-                        .retained(false)
-                        .qos(MqttQoS.AT_MOST_ONCE)
-                        .payload(Unpooled.wrappedBuffer(payload))
-                .build());
-                channelsToFlush.add(channel);
-                continue;
-            }
-            int packetId = inflightManager.nextOutboundPacketId(subscriber);
-            if (outboundQos == MqttQoS.AT_LEAST_ONCE.value()) {
-                channel.write(MqttPacketFactory.buildQos1PublishMessage(topic, payload, packetId, false));
-                inflightManager.trackInflightQos1(subscriber, packetId, topic, payload);
-                channelsToFlush.add(channel);
-                continue;
-            }
-            inflightManager.trackInflightQos2(subscriber, packetId, topic, payload);
-            channel.write(MqttPacketFactory.buildQos2PublishMessage(topic, payload, packetId, false));
-            channelsToFlush.add(channel);
+            writeLocalDelivery(session.channel(), subscriber, topic, payload, publishQos, channelsToFlush);
         }
+        flushDeliveryChannels(channelsToFlush);
+    }
+
+    private ClientSession resolveActiveSubscriberSession(String subscriber) {
+        Optional<ClientSession> sessionOptional = sessionRegistry.get(subscriber);
+        if (sessionOptional.isEmpty()) {
+            return null;
+        }
+        ClientSession session = sessionOptional.get();
+        return session.channel().isActive() ? session : null;
+    }
+
+    private void writeLocalDelivery(
+        Channel channel,
+        String subscriber,
+        String topic,
+        byte[] payload,
+        int publishQos,
+        Set<Channel> channelsToFlush
+    ) {
+        int outboundQos = resolveOutboundQos(publishQos);
+        if (outboundQos == MqttQoS.AT_MOST_ONCE.value()) {
+            channel.write(MqttMessageBuilders.publish()
+                .topicName(topic)
+                .retained(false)
+                .qos(MqttQoS.AT_MOST_ONCE)
+                .payload(Unpooled.wrappedBuffer(payload))
+                .build());
+            channelsToFlush.add(channel);
+            return;
+        }
+        int packetId = inflightManager.nextOutboundPacketId(subscriber);
+        if (outboundQos == MqttQoS.AT_LEAST_ONCE.value()) {
+            channel.write(MqttPacketFactory.buildQos1PublishMessage(topic, payload, packetId, false));
+            inflightManager.trackInflightQos1(subscriber, packetId, topic, payload);
+            channelsToFlush.add(channel);
+            return;
+        }
+        inflightManager.trackInflightQos2(subscriber, packetId, topic, payload);
+        channel.write(MqttPacketFactory.buildQos2PublishMessage(topic, payload, packetId, false));
+        channelsToFlush.add(channel);
+    }
+
+    private int resolveOutboundQos(int publishQos) {
+        int outboundQos = publishQos >= MqttQoS.EXACTLY_ONCE.value()
+            ? MqttQoS.EXACTLY_ONCE.value()
+            : (publishQos >= MqttQoS.AT_LEAST_ONCE.value()
+                ? MqttQoS.AT_LEAST_ONCE.value()
+                : MqttQoS.AT_MOST_ONCE.value());
+        return capByMaxQos(outboundQos);
+    }
+
+    private void flushDeliveryChannels(Set<Channel> channelsToFlush) {
         for (Channel channel : channelsToFlush) {
             if (channel != null && channel.isActive()) {
                 channel.flush();
@@ -989,8 +1094,8 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     /**
-     * 共享订阅全局投递决策：
-     * 每个共享组只选择一个目标（本地客户端或远端节点），避免同组重复投递。
+     * Chooses exactly one delivery target per shared group to avoid duplicate
+     * delivery within the same group.
      */
     private void selectSharedDeliveryTargets(
         SubscriptionMatchResult localMatch,
@@ -1039,11 +1144,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     /**
-     * 共享订阅目标选择
-     * @param group 共享订阅组
-     * @param localCandidates 本地客户端候选
-     * @param globalNodes 全局节点候选
-     * @return 目标
+     * Selects one shared-delivery target from local clients and remote nodes.
      */
     private SharedDeliveryTarget selectSharedDeliveryTarget(
         String group,
@@ -1076,7 +1177,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     /**
-     * 获取共享组的全局节点有序快照，避免每条消息重复排序。
+     * Resolves a stable ordered node snapshot for one shared group.
      */
     private List<String> resolveOrderedGlobalNodes(String group, Set<String> globalNodes) {
         if (group == null || group.isBlank() || globalNodes == null || globalNodes.isEmpty()) {
@@ -1101,9 +1202,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     /**
-     * 组装本次共享投递的候选节点列表：
-     * 1. 使用全局有序节点快照；
-     * 2. 本地存在候选客户端时，把本节点插入有序位置。
+     * Builds the ordered candidate node list for one shared-delivery attempt.
      */
     private List<String> buildNodeCandidates(List<String> orderedGlobalNodes, boolean includeLocalNode) {
         if (!includeLocalNode) {
@@ -1125,7 +1224,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     /**
-     * 批量回放 retained，减少 SUBSCRIBE 场景的 flush 次数。
+     * Replays retained messages in batches to reduce flush frequency during SUBSCRIBE.
      */
     private void replayRetainedBatch(Channel channel, Set<String> topicFilters) {
         if (channel == null || !channel.isActive() || topicFilters == null || topicFilters.isEmpty()) {
@@ -1213,20 +1312,6 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         return clientId;
     }
 
-    private String resolveLoggingClientId(Channel channel, MqttMessage message) {
-        String current = currentClientId(channel);
-        if (current != null && !current.isBlank()) {
-            return current;
-        }
-        if (message instanceof MqttConnectMessage connectMessage
-                && connectMessage.payload() != null
-                && connectMessage.payload().clientIdentifier() != null
-                && !connectMessage.payload().clientIdentifier().isBlank()) {
-            return connectMessage.payload().clientIdentifier();
-        }
-        return null;
-    }
-
     private String normalize(String value) {
         if (value == null || value.isBlank()) {
             return null;
@@ -1247,7 +1332,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     /**
-     * 管理端订阅同步防抖，避免高频 SUB/UNSUB 每次都做全量快照与上报。
+     * Debounces admin subscription synchronization to avoid sending a full snapshot after every SUB/UNSUB.
      */
     private void scheduleClientSubscriptionsSync(String clientId) {
         if (clientId == null || clientId.isBlank()) {
@@ -1303,9 +1388,9 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     /**
-     * 桥接主题判定：
-     * 1. 配置了 topicFilters：仅桥接匹配过滤器的主题；
-     * 2. 未配置 topicFilters：桥接所有非 dashboard 主题。
+     * Bridge topic selection rules:
+     * 1. When topic filters exist, only bridge matched topics.
+     * 2. Without topic filters, bridge all non-dashboard topics.
      */
     private boolean shouldBridgeTopic(String topic) {
         if (!bridgeEnabled) {
@@ -1394,7 +1479,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     /**
-     * SUBSCRIBE 报文内首次订阅批量异步提交全局路由，避免阻塞 I/O 线程。
+     * Asynchronously submits global registrations for first-time subscriptions.
      */
     private void submitGlobalRegisterBatchAsync(List<String> topicFilters) {
         if (topicFilters == null || topicFilters.isEmpty()) {
@@ -1412,7 +1497,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     /**
-     * UNSUBSCRIBE 报文内本节点最后引用批量异步提交全局路由删除，避免阻塞 I/O 线程。
+     * Asynchronously submits global unregistrations when the local node removes the last reference.
      */
     private void submitGlobalUnregisterBatchAsync(Set<String> topicFilters) {
         if (topicFilters == null || topicFilters.isEmpty()) {
@@ -1446,9 +1531,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     /**
-     * CONNECT 成功后上报 client-online 事件，驱动集群内 clientId 唯一会话。
-     * @param clientId clientId
-     * @param connectedAtMs 连接时间
+     * Applies the local-online event after CONNECT succeeds so the cluster can enforce one session per clientId.
      */
     private void applyGlobalClientOnlineAfterLocalConnect(String clientId, long connectedAtMs) {
         if (clientId == null || clientId.isBlank()) {
@@ -1526,8 +1609,9 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     /**
-     * 提交元数据命令；失败时写入待重试队列，由周期任务异步重试。
-     * 这里不阻塞主协议线程，避免 SUB/UNSUB/CONNECT 处理链路被远端抖动拖慢。
+     * Submits one metadata command and queues it for retry on failure.
+     *
+     * <p>The caller stays simple and the periodic retry task owns later retries.</p>
      */
     private void submitMetadataCommand(MetadataCommand command, String context) {
         String retryKey = metadataRetryKey(command);
@@ -1545,7 +1629,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     /**
-     * 周期重试元数据命令，成功后从待重试队列移除。
+     * Periodically retries queued metadata commands and removes successful entries.
      */
     private void retryPendingMetadataCommands() {
         if (pendingMetadataCommands.isEmpty()) {
@@ -1571,9 +1655,10 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     /**
-     * 命令去重键：
-     * 1. 订阅命令按 namespace + key(topic) + value(group) + sourceNode 去重，后写覆盖前写。
-     * 2. 会话命令按 namespace + key(clientId) + sourceNode 去重，保留最新 online 事件。
+     * Builds the retry de-duplication key.
+     *
+     * <p>Subscription commands de-duplicate by namespace + topic + group + source node.
+     * Session commands de-duplicate by namespace + clientId + source node.</p>
      */
     private static String metadataRetryKey(MetadataCommand command) {
         if (command == null) {
@@ -1591,15 +1676,14 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
 
     private CompletableFuture<AuthResult> authenticateConnectAsync(PendingConnectContext connectContext) {
         try {
-            return CompletableFuture.supplyAsync(() -> {
-                try (ClientLogContext.Scope ignored = ClientLogContext.open(connectContext.clientId())) {
-                    return clientAuthenticator.authenticateAsync(
-                        connectContext.clientId(),
-                        connectContext.username(),
-                        connectContext.password()
-                    );
-                }
-            }, connectAuthExecutor).thenCompose(asyncFuture -> asyncFuture);
+            return CompletableFuture.supplyAsync(() ->
+                clientAuthenticator.authenticateAsync(
+                    connectContext.clientId(),
+                    connectContext.username(),
+                    connectContext.password()
+                ),
+                connectAuthExecutor
+            ).thenCompose(asyncFuture -> asyncFuture);
         } catch (RejectedExecutionException exception) {
             CompletableFuture<AuthResult> future = new CompletableFuture<>();
             future.completeExceptionally(exception);
@@ -1618,11 +1702,8 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             AclAction.PUBLISH
         );
         try {
-            return CompletableFuture.supplyAsync(() -> {
-                try (ClientLogContext.Scope ignored = ClientLogContext.open(publishContext.clientId())) {
-                    return aclAuthorizer.authorizeAsync(request);
-                }
-            }, publishAclExecutor).thenCompose(asyncFuture -> asyncFuture);
+            return CompletableFuture.supplyAsync(() -> aclAuthorizer.authorizeAsync(request), publishAclExecutor)
+                .thenCompose(asyncFuture -> asyncFuture);
         } catch (RejectedExecutionException exception) {
             CompletableFuture<AclDecision> future = new CompletableFuture<>();
             future.completeExceptionally(exception);
@@ -1641,114 +1722,10 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             return;
         }
         long authDurationNanos = System.nanoTime() - connectContext.authStartedAtNanos();
-        try (ClientLogContext.Scope ignored = ClientLogContext.open(connectContext.clientId())) {
-            if (error != null || authResult == null || authResult.decision() != AuthDecision.ALLOW) {
-                if (error != null) {
-                    securityPipelineMetrics.recordConnectAuthError(authDurationNanos, connectContext.clientId(), error);
-                    LOG.log(Level.WARNING, "[CONNECT] async auth failed clientId=" + connectContext.clientId(), error);
-                } else {
-                    securityPipelineMetrics.recordConnectAuthFailure(authDurationNanos, connectContext.clientId());
-                    LOG.warning("[CONNECT] auth failed clientId=" + connectContext.clientId()
-                        + ", username=" + connectContext.username());
-                }
-                rejectConnection(
-                    ctx,
-                    connectContext.mqtt5()
-                        ? MqttConnectReturnCode.CONNECTION_REFUSED_BAD_USERNAME_OR_PASSWORD
-                        : MqttConnectReturnCode.CONNECTION_REFUSED_BAD_USER_NAME_OR_PASSWORD,
-                    connectContext.mqtt5()
-                );
-                return;
-            }
-            securityPipelineMetrics.recordConnectAuthSuccess(authDurationNanos, connectContext.clientId());
-            boolean sessionPresent = !connectContext.cleanStart()
-                && inflightManager.hasPersistedSessionState(connectContext.clientId(), subscriptionRegistry);
-            ctx.channel().attr(CLIENT_ID).set(connectContext.clientId());
-            ctx.channel().attr(CLEAN_START).set(connectContext.cleanStart());
-            ctx.channel().attr(GRACEFUL_DISCONNECT).set(false);
-            if (connectContext.willMessage() != null) {
-                if (willPersistenceEnabled) {
-                    ctx.channel().attr(WILL_MESSAGE).set(null);
-                    willMessageStore.save(connectContext.clientId(), connectContext.willMessage());
-                } else {
-                    ctx.channel().attr(WILL_MESSAGE).set(connectContext.willMessage());
-                }
-            } else {
-                ctx.channel().attr(WILL_MESSAGE).set(null);
-                willMessageStore.remove(connectContext.clientId());
-            }
-            if (connectContext.mqtt5()) {
-                ctx.writeAndFlush(MqttMessageBuilders.connAck()
-                        .sessionPresent(sessionPresent)
-                        .returnCode(MqttConnectReturnCode.CONNECTION_ACCEPTED)
-                        .properties(buildConnAckProperties(connectContext.sessionExpirySeconds()))
-                        .build());
-            } else {
-                ctx.writeAndFlush(MqttMessageBuilders.connAck()
-                        .sessionPresent(sessionPresent)
-                        .returnCode(MqttConnectReturnCode.CONNECTION_ACCEPTED)
-                        .build());
-            }
-            inflightManager.restoreInflightState(connectContext.clientId(), sessionPresent, ctx.channel());
-            Instant connectedAt = Instant.now();
-            sessionRegistry.register(new ClientSession(
-                connectContext.clientId(),
-                ctx.channel(),
-                connectContext.connectionType(),
-                connectContext.cleanStart(),
-                connectContext.sessionExpirySeconds(),
-                connectContext.username(),
-                connectContext.serviceNodeIp(),
-                connectContext.keepAliveSeconds(),
-                authResult.superuser(),
-                connectedAt
-            ));
-            applyGlobalClientOnlineAfterLocalConnect(connectContext.clientId(), connectedAt.toEpochMilli());
-            publishClientLifecycleEvent(
-                TOPIC_CLIENT_CONNECTED,
-                dashboardClusterId,
-                nodeId,
-                connectContext.clientId(),
-                connectContext.clientIp(),
-                connectContext.username(),
-                connectContext.connectionType(),
-                connectContext.serviceNodeIp(),
-                connectContext.keepAliveSeconds(),
-                "connected"
-            );
-            publishClientLifecycleEvent(
-                dashboardTopic("client/connected"),
-                dashboardClusterId,
-                nodeId,
-                connectContext.clientId(),
-                connectContext.clientIp(),
-                connectContext.username(),
-                connectContext.connectionType(),
-                connectContext.serviceNodeIp(),
-                connectContext.keepAliveSeconds(),
-                "connected"
-            );
-            adminReporter.upsertClientSession(
-                connectContext.clientId(),
-                nodeId,
-                connectContext.clientIp(),
-                connectContext.keepAliveSeconds(),
-                connectContext.connectionType(),
-                connectContext.username(),
-                connectedAt.toEpochMilli()
-            );
-            scheduleClientSubscriptionsSync(connectContext.clientId());
-            if (LOG.isLoggable(Level.FINE)) {
-                LOG.fine("[CONNECT] accepted clientId=" + connectContext.clientId()
-                    + ", connectionType=" + connectContext.connectionType()
-                    + ", username=" + connectContext.username()
-                    + ", serviceNodeIp=" + connectContext.serviceNodeIp()
-                    + ", protocol=" + connectContext.mqttVersion()
-                    + ", cleanStart=" + connectContext.cleanStart()
-                    + ", sessionExpirySeconds=" + connectContext.sessionExpirySeconds()
-                    + ", keepAliveSeconds=" + connectContext.keepAliveSeconds());
-            }
+        if (handleFailedConnectAuthentication(ctx, connectContext, authResult, error, authDurationNanos)) {
+            return;
         }
+        finalizeSuccessfulConnect(ctx, connectContext, authResult, authDurationNanos);
     }
 
     private void completePublishAfterAcl(
@@ -1761,73 +1738,269 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             return;
         }
         long aclDurationNanos = System.nanoTime() - publishContext.aclStartedAtNanos();
-        try (ClientLogContext.Scope ignored = ClientLogContext.open(publishContext.clientId())) {
-            if (error != null) {
-                securityPipelineMetrics.recordPublishAclError(
-                    aclDurationNanos,
-                    publishContext.clientId(),
-                    publishContext.topic(),
-                    error
-                );
-                LOG.log(Level.WARNING, "[ACL] async publish acl failed clientId=" + publishContext.clientId()
-                    + ", topic=" + publishContext.topic(), error);
-                handleDeniedPublish(
-                    ctx,
-                    publishContext.clientId(),
-                    publishContext.topic(),
-                    publishContext.qos(),
-                    publishContext.packetId()
-                );
-                return;
-            }
-            if (decision != AclDecision.ALLOW) {
-                securityPipelineMetrics.recordPublishAclDeny(
-                    aclDurationNanos,
-                    publishContext.clientId(),
-                    publishContext.topic()
-                );
-                handleDeniedPublish(
-                    ctx,
-                    publishContext.clientId(),
-                    publishContext.topic(),
-                    publishContext.qos(),
-                    publishContext.packetId()
-                );
-                return;
-            }
-            securityPipelineMetrics.recordPublishAclAllow(
-                aclDurationNanos,
-                publishContext.clientId(),
-                publishContext.topic()
-            );
-            if (publishContext.qos() == 2) {
-                handleInboundQos2Publish(
-                    ctx,
-                    publishContext.clientId(),
-                    publishContext.topic(),
-                    publishContext.payload(),
-                    publishContext.packetId(),
-                    publishContext.retain()
-                );
-                return;
-            }
-            processApplicationPublish(
+        if (handlePublishAclError(ctx, publishContext, error, aclDurationNanos)) {
+            return;
+        }
+        if (handlePublishAclDeny(ctx, publishContext, decision, aclDurationNanos)) {
+            return;
+        }
+        completeAuthorizedPublish(ctx, publishContext, aclDurationNanos);
+    }
+
+    private boolean handleFailedConnectAuthentication(
+        ChannelHandlerContext ctx,
+        PendingConnectContext connectContext,
+        AuthResult authResult,
+        Throwable error,
+        long authDurationNanos
+    ) {
+        if (error == null && authResult != null && authResult.decision() == AuthDecision.ALLOW) {
+            return false;
+        }
+        if (error != null) {
+            securityPipelineMetrics.recordConnectAuthError(authDurationNanos, connectContext.clientId(), error);
+            LOG.log(Level.WARNING, "[CONNECT] async auth failed clientId=" + connectContext.clientId(), error);
+        } else {
+            securityPipelineMetrics.recordConnectAuthFailure(authDurationNanos, connectContext.clientId());
+            LOG.warning("[CONNECT] auth failed clientId=" + connectContext.clientId()
+                + ", username=" + connectContext.username());
+        }
+        rejectConnection(
+            ctx,
+            connectContext.mqtt5()
+                ? MqttConnectReturnCode.CONNECTION_REFUSED_BAD_USERNAME_OR_PASSWORD
+                : MqttConnectReturnCode.CONNECTION_REFUSED_BAD_USER_NAME_OR_PASSWORD,
+            connectContext.mqtt5()
+        );
+        return true;
+    }
+
+    private void finalizeSuccessfulConnect(
+        ChannelHandlerContext ctx,
+        PendingConnectContext connectContext,
+        AuthResult authResult,
+        long authDurationNanos
+    ) {
+        securityPipelineMetrics.recordConnectAuthSuccess(authDurationNanos, connectContext.clientId());
+        boolean sessionPresent = hasPersistedSession(connectContext);
+        prepareConnectedChannel(ctx.channel(), connectContext);
+        writeSuccessfulConnAck(ctx, connectContext, sessionPresent);
+        inflightManager.restoreInflightState(connectContext.clientId(), sessionPresent, ctx.channel());
+        Instant connectedAt = Instant.now();
+        registerConnectedSession(ctx.channel(), connectContext, authResult, connectedAt);
+        publishConnectedLifecycleEvents(connectContext);
+        adminReporter.upsertClientSession(
+            connectContext.clientId(),
+            nodeId,
+            connectContext.clientIp(),
+            connectContext.keepAliveSeconds(),
+            connectContext.connectionType(),
+            connectContext.username(),
+            connectedAt.toEpochMilli()
+        );
+        scheduleClientSubscriptionsSync(connectContext.clientId());
+        logAcceptedConnect(connectContext);
+    }
+
+    private boolean hasPersistedSession(PendingConnectContext connectContext) {
+        return !connectContext.cleanStart()
+            && inflightManager.hasPersistedSessionState(connectContext.clientId(), subscriptionRegistry);
+    }
+
+    private void prepareConnectedChannel(Channel channel, PendingConnectContext connectContext) {
+        channel.attr(CLIENT_ID).set(connectContext.clientId());
+        channel.attr(CLEAN_START).set(connectContext.cleanStart());
+        channel.attr(GRACEFUL_DISCONNECT).set(false);
+        applyWillMessageState(channel, connectContext);
+    }
+
+    private void applyWillMessageState(Channel channel, PendingConnectContext connectContext) {
+        if (connectContext.willMessage() == null) {
+            channel.attr(WILL_MESSAGE).set(null);
+            willMessageStore.remove(connectContext.clientId());
+            return;
+        }
+        if (willPersistenceEnabled) {
+            channel.attr(WILL_MESSAGE).set(null);
+            willMessageStore.save(connectContext.clientId(), connectContext.willMessage());
+            return;
+        }
+        channel.attr(WILL_MESSAGE).set(connectContext.willMessage());
+    }
+
+    private void writeSuccessfulConnAck(
+        ChannelHandlerContext ctx,
+        PendingConnectContext connectContext,
+        boolean sessionPresent
+    ) {
+        if (connectContext.mqtt5()) {
+            ctx.writeAndFlush(MqttMessageBuilders.connAck()
+                .sessionPresent(sessionPresent)
+                .returnCode(MqttConnectReturnCode.CONNECTION_ACCEPTED)
+                .properties(buildConnAckProperties(connectContext.sessionExpirySeconds()))
+                .build());
+            return;
+        }
+        ctx.writeAndFlush(MqttMessageBuilders.connAck()
+            .sessionPresent(sessionPresent)
+            .returnCode(MqttConnectReturnCode.CONNECTION_ACCEPTED)
+            .build());
+    }
+
+    private void registerConnectedSession(
+        Channel channel,
+        PendingConnectContext connectContext,
+        AuthResult authResult,
+        Instant connectedAt
+    ) {
+        sessionRegistry.register(new ClientSession(
+            connectContext.clientId(),
+            channel,
+            connectContext.connectionType(),
+            connectContext.cleanStart(),
+            connectContext.sessionExpirySeconds(),
+            connectContext.username(),
+            connectContext.serviceNodeIp(),
+            connectContext.keepAliveSeconds(),
+            authResult.superuser(),
+            connectedAt
+        ));
+        applyGlobalClientOnlineAfterLocalConnect(connectContext.clientId(), connectedAt.toEpochMilli());
+    }
+
+    private void publishConnectedLifecycleEvents(PendingConnectContext connectContext) {
+        publishClientLifecycleEvent(
+            TOPIC_CLIENT_CONNECTED,
+            dashboardClusterId,
+            nodeId,
+            connectContext.clientId(),
+            connectContext.clientIp(),
+            connectContext.username(),
+            connectContext.connectionType(),
+            connectContext.serviceNodeIp(),
+            connectContext.keepAliveSeconds(),
+            "connected"
+        );
+        publishClientLifecycleEvent(
+            dashboardTopic("client/connected"),
+            dashboardClusterId,
+            nodeId,
+            connectContext.clientId(),
+            connectContext.clientIp(),
+            connectContext.username(),
+            connectContext.connectionType(),
+            connectContext.serviceNodeIp(),
+            connectContext.keepAliveSeconds(),
+            "connected"
+        );
+    }
+
+    private void logAcceptedConnect(PendingConnectContext connectContext) {
+        if (!LOG.isLoggable(Level.FINE)) {
+            return;
+        }
+        LOG.fine("[CONNECT] accepted clientId=" + connectContext.clientId()
+            + ", connectionType=" + connectContext.connectionType()
+            + ", username=" + connectContext.username()
+            + ", serviceNodeIp=" + connectContext.serviceNodeIp()
+            + ", protocol=" + connectContext.mqttVersion()
+            + ", cleanStart=" + connectContext.cleanStart()
+            + ", sessionExpirySeconds=" + connectContext.sessionExpirySeconds()
+            + ", keepAliveSeconds=" + connectContext.keepAliveSeconds());
+    }
+
+    private boolean handlePublishAclError(
+        ChannelHandlerContext ctx,
+        PublishContext publishContext,
+        Throwable error,
+        long aclDurationNanos
+    ) {
+        if (error == null) {
+            return false;
+        }
+        securityPipelineMetrics.recordPublishAclError(
+            aclDurationNanos,
+            publishContext.clientId(),
+            publishContext.topic(),
+            error
+        );
+        LOG.log(Level.WARNING, "[ACL] async publish acl failed clientId=" + publishContext.clientId()
+            + ", topic=" + publishContext.topic(), error);
+        handleDeniedPublish(
+            ctx,
+            publishContext.clientId(),
+            publishContext.topic(),
+            publishContext.qos(),
+            publishContext.packetId()
+        );
+        return true;
+    }
+
+    private boolean handlePublishAclDeny(
+        ChannelHandlerContext ctx,
+        PublishContext publishContext,
+        AclDecision decision,
+        long aclDurationNanos
+    ) {
+        if (decision == AclDecision.ALLOW) {
+            return false;
+        }
+        securityPipelineMetrics.recordPublishAclDeny(
+            aclDurationNanos,
+            publishContext.clientId(),
+            publishContext.topic()
+        );
+        handleDeniedPublish(
+            ctx,
+            publishContext.clientId(),
+            publishContext.topic(),
+            publishContext.qos(),
+            publishContext.packetId()
+        );
+        return true;
+    }
+
+    private void completeAuthorizedPublish(
+        ChannelHandlerContext ctx,
+        PublishContext publishContext,
+        long aclDurationNanos
+    ) {
+        securityPipelineMetrics.recordPublishAclAllow(
+            aclDurationNanos,
+            publishContext.clientId(),
+            publishContext.topic()
+        );
+        if (publishContext.qos() == 2) {
+            handleInboundQos2Publish(
+                ctx,
                 publishContext.clientId(),
                 publishContext.topic(),
                 publishContext.payload(),
-                publishContext.effectiveQos(),
+                publishContext.packetId(),
                 publishContext.retain()
             );
-            LOG.fine(() -> "[PUBLISH] clientId=" + publishContext.clientId()
-                + ", topic=" + publishContext.topic()
-                + ", qos=" + publishContext.qos()
-                + ", effectiveQos=" + publishContext.effectiveQos()
-                + ", retain=" + publishContext.retain()
-                + ", bytes=" + publishContext.payload().length);
-            if (publishContext.qos() == 1) {
-                ctx.writeAndFlush(MqttMessageBuilders.pubAck().packetId(publishContext.packetId()).build());
-            }
+            return;
         }
+        processApplicationPublish(
+            publishContext.clientId(),
+            publishContext.topic(),
+            publishContext.payload(),
+            publishContext.effectiveQos(),
+            publishContext.retain()
+        );
+        logAcceptedPublish(publishContext);
+        if (publishContext.qos() == 1) {
+            ctx.writeAndFlush(MqttMessageBuilders.pubAck().packetId(publishContext.packetId()).build());
+        }
+    }
+
+    private void logAcceptedPublish(PublishContext publishContext) {
+        LOG.fine(() -> "[PUBLISH] clientId=" + publishContext.clientId()
+            + ", topic=" + publishContext.topic()
+            + ", qos=" + publishContext.qos()
+            + ", effectiveQos=" + publishContext.effectiveQos()
+            + ", retain=" + publishContext.retain()
+            + ", bytes=" + publishContext.payload().length);
     }
 
     private CompletableFuture<Void> executeOnEventLoop(ChannelHandlerContext ctx, Runnable task) {
@@ -1866,8 +2039,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
 
     private static int normalizedWorkerCount(String category) {
         int processors = Runtime.getRuntime().availableProcessors();
-        int workerCount = Math.max(2, Math.min(16, processors));
-        return workerCount;
+        return Math.max(2, Math.min(16, processors));
     }
 
     private record PendingConnectContext(
@@ -1906,6 +2078,12 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     ) {
     }
 
+    private record PreparedPublish(
+        ClientSession session,
+        PublishContext context
+    ) {
+    }
+
     private static final class ChannelTaskSequencer {
         private CompletableFuture<Void> tail = CompletableFuture.completedFuture(null);
 
@@ -1926,7 +2104,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     /**
-     * 元数据命令待重试快照。
+     * Retry snapshot for one metadata command.
      */
     private static final class PendingMetadataCommand {
         private final MetadataCommand command;
@@ -1941,7 +2119,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     /**
-     * 共享组节点有序快照。
+     * Ordered global-node snapshot for one shared group.
      */
     private record SharedGroupNodeOrderSnapshot(
         int size,
@@ -1954,7 +2132,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     /**
-     * topic -> 全局匹配缓存快照。
+     * Cached global match snapshot for one topic.
      */
     private record CachedGlobalMatch(
         GlobalSubscriptionMatch match,
@@ -1967,7 +2145,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     /**
-     * 路由热路径复用容器，减少每条 PUBLISH 的临时对象分配。
+     * Reusable routing scratch space for the publish hot path.
      */
     private static final class RouteScratch {
         private final Set<String> localSubscribers = new LinkedHashSet<>();
@@ -1983,7 +2161,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     /**
-     * 本地投递热路径复用容器，避免每条消息都创建 flush 集合。
+     * Reusable flush set for local delivery.
      */
     private static final class DeliveryScratch {
         private final Set<Channel> channelsToFlush = new LinkedHashSet<>();

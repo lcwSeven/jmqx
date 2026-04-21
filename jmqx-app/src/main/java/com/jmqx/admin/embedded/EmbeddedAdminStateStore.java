@@ -1,7 +1,5 @@
 package com.jmqx.admin.embedded;
 
-import com.jmqx.common.logging.ClientTraceManager;
-
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -214,29 +212,6 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
         List<BlacklistEntry> entries = new ArrayList<>(getOrCreate(clusterId).blacklistEntries.values());
         entries.sort(Comparator.comparing(BlacklistEntry::createdAt).reversed());
         return entries;
-    }
-
-    @Override
-    public void upsertClientTraceTask(String clusterId, ClientTraceManager.ClientTraceTask task) {
-        if (task == null || task.id() == null || task.id().isBlank()) {
-            return;
-        }
-        getOrCreate(clusterId).clientTraceTasks.put(task.id(), task.normalize());
-    }
-
-    @Override
-    public void removeClientTraceTask(String clusterId, String taskId) {
-        if (taskId == null || taskId.isBlank()) {
-            return;
-        }
-        getOrCreate(clusterId).clientTraceTasks.remove(taskId);
-    }
-
-    @Override
-    public List<ClientTraceManager.ClientTraceTask> listClientTraceTasks(String clusterId) {
-        List<ClientTraceManager.ClientTraceTask> tasks = new ArrayList<>(getOrCreate(clusterId).clientTraceTasks.values());
-        tasks.sort(Comparator.comparing(ClientTraceManager.ClientTraceTask::startAt).reversed());
-        return tasks;
     }
 
     @Override
@@ -925,7 +900,6 @@ public class EmbeddedAdminStateStore implements AdminStateRepository {
         private final Map<String, NodeMetrics> nodeMetrics = new ConcurrentHashMap<>();
         private final Map<String, ClientSnapshot> clientSnapshots = new ConcurrentHashMap<>();
         private final Map<String, BlacklistEntry> blacklistEntries = new ConcurrentHashMap<>();
-        private final Map<String, ClientTraceManager.ClientTraceTask> clientTraceTasks = new ConcurrentHashMap<>();
         private final List<AuditLogEntry> auditLogs = new CopyOnWriteArrayList<>();
 
         private ClusterState(ClusterSummary summary, ClusterConfig clusterConfig, SecurityConfig securityConfig, BridgeConfig bridgeConfig) {

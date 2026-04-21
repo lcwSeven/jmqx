@@ -28,12 +28,13 @@ public class AsyncClusterMessageDispatcher implements ClusterMessageDispatcher, 
     private final AtomicLong lastDropLogAtMs = new AtomicLong(0);
 
     public AsyncClusterMessageDispatcher(
-        ClusterMessageDispatcher delegate,
-        int queueCapacity,
-        int workerCount,
-        long enqueueTimeoutMs
+            ClusterMessageDispatcher delegate,
+            int queueCapacity,
+            int workerCount,
+            long enqueueTimeoutMs
     ) {
-        this.delegate = delegate == null ? (topic, payload, publishQos, targetPlans) -> { } : delegate;
+        this.delegate = delegate == null ? (topic, payload, publishQos, targetPlans) -> {
+        } : delegate;
         this.queue = new ArrayBlockingQueue<>(Math.max(1_024, queueCapacity));
         this.enqueueTimeoutMs = Math.max(0L, enqueueTimeoutMs);
         int normalizedWorkerCount = Math.max(1, workerCount);
@@ -56,8 +57,8 @@ public class AsyncClusterMessageDispatcher implements ClusterMessageDispatcher, 
         boolean offered;
         try {
             offered = enqueueTimeoutMs == 0
-                ? queue.offer(task)
-                : queue.offer(task, enqueueTimeoutMs, TimeUnit.MILLISECONDS);
+                    ? queue.offer(task)
+                    : queue.offer(task, enqueueTimeoutMs, TimeUnit.MILLISECONDS);
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
             return;
@@ -93,13 +94,20 @@ public class AsyncClusterMessageDispatcher implements ClusterMessageDispatcher, 
         queue.clear();
     }
 
+    /**
+     * 运行工作线程。
+     *
+     * @param index 工作线程索引
+     */
     private void runWorker(int index) {
         while (running.get()) {
             try {
+                // 从队列中获取任务
                 DispatchTask task = queue.poll(500, TimeUnit.MILLISECONDS);
                 if (task == null) {
                     continue;
                 }
+                // 分发任务
                 delegate.dispatch(task.topic(), task.payload(), task.publishQos(), task.targetPlans());
             } catch (InterruptedException exception) {
                 Thread.currentThread().interrupt();
@@ -110,6 +118,12 @@ public class AsyncClusterMessageDispatcher implements ClusterMessageDispatcher, 
         }
     }
 
+    /**
+     * 拷贝目标计划。
+     *
+     * @param targetPlans 目标计划
+     * @return 拷贝的目标计划
+     */
     private Map<String, DispatchTarget> copyTargetPlans(Map<String, DispatchTarget> targetPlans) {
         Map<String, DispatchTarget> copied = new HashMap<>(targetPlans.size());
         targetPlans.forEach((nodeId, target) -> {
@@ -121,6 +135,12 @@ public class AsyncClusterMessageDispatcher implements ClusterMessageDispatcher, 
         return copied;
     }
 
+    /**
+     * 丢弃消息日志的间隔。
+     *
+     * @param dropped 丢弃消息数量
+     * @param topic   丢弃消息的 topic
+     */
     private void logDropIfDue(long dropped, String topic) {
         long now = System.currentTimeMillis();
         long last = lastDropLogAtMs.get();
@@ -130,15 +150,16 @@ public class AsyncClusterMessageDispatcher implements ClusterMessageDispatcher, 
         if (!lastDropLogAtMs.compareAndSet(last, now)) {
             return;
         }
+        // 打印丢弃消息日志
         LOG.warning(() -> "[CLUSTER][ASYNC_DISPATCH] queue full, drop message"
-            + ", droppedTotal=" + dropped + ", queueSize=" + queue.size() + ", topic=" + topic);
+                + ", droppedTotal=" + dropped + ", queueSize=" + queue.size() + ", topic=" + topic);
     }
 
     private record DispatchTask(
-        String topic,
-        byte[] payload,
-        int publishQos,
-        Map<String, DispatchTarget> targetPlans
+            String topic,
+            byte[] payload,
+            int publishQos,
+            Map<String, DispatchTarget> targetPlans
     ) {
     }
 }
