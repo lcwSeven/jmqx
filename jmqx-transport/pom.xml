@@ -6,7 +6,7 @@
     <parent>
         <groupId>com.jmqx</groupId>
         <artifactId>jmqx</artifactId>
-        <version>1.0-SNAPSHOT</version>
+        <version>1.0.0</version>
     </parent>
 
     <artifactId>jmqx-transport</artifactId>
