@@ -31,6 +31,7 @@ public final class JmqxConfigMappers {
         properties.setWorkerThreads(config.getInt("jmqx.broker.workerThreads", properties.getWorkerThreads()));
         properties.setReaderIdleSeconds(config.getInt("jmqx.broker.readerIdleSeconds", properties.getReaderIdleSeconds()));
         properties.setMaxQos(config.getInt("jmqx.broker.maxQos", properties.getMaxQos()));
+        properties.setPublishNoLocalEnabled(config.getBoolean("jmqx.broker.publish.noLocalEnabled", properties.isPublishNoLocalEnabled()));
         properties.setMaxWillPayloadBytes(config.getInt("jmqx.broker.maxWillPayloadBytes", properties.getMaxWillPayloadBytes()));
         properties.setMaxSubscriptionsPerClient(config.getInt("jmqx.broker.maxSubscriptionsPerClient", properties.getMaxSubscriptionsPerClient()));
         properties.setWebsocketEnabled(config.getBoolean("jmqx.broker.websocket.enabled", properties.isWebsocketEnabled()));

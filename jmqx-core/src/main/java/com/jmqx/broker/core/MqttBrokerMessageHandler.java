@@ -142,6 +142,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     private final String dashboardClusterId;
     private volatile List<String> bridgeTopicFilters;
     private final int maxAllowedQos;
+    private final boolean publishNoLocalEnabled;
     private final int maxSubscriptionsPerClient;
     private final int maxWillPayloadBytes;
     private final ConcurrentMap<String, AtomicLong> sharedGroupNodeRoundRobin = new ConcurrentHashMap<>();
@@ -182,6 +183,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             String dashboardClusterId,
             String bridgeTopicFilters,
             int maxAllowedQos,
+            boolean publishNoLocalEnabled,
             int maxSubscriptionsPerClient,
             BrokerRateLimitConfig rateLimitConfig) {
         this.sessionRegistry = sessionRegistry;
@@ -209,6 +211,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             : dashboardClusterId.trim();
         this.bridgeTopicFilters = parseBridgeTopicFilters(bridgeTopicFilters);
         this.maxAllowedQos = normalizeMaxQos(maxAllowedQos);
+        this.publishNoLocalEnabled = publishNoLocalEnabled;
         this.maxSubscriptionsPerClient = Math.max(1, maxSubscriptionsPerClient);
         this.maxWillPayloadBytes = maxWillPayloadBytes <= 0 ? 1024 * 1024 : maxWillPayloadBytes;
         this.rateLimiter = new BrokerRateLimiter(rateLimitConfig);
@@ -654,7 +657,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         if (retain && retainedEnabled) {
             retainedCommandReplicator.submitRetainedWithClusterSync(topic, payload, qos);
         }
-        routeMessage(topic, payload, qos);
+        routeMessage(clientId, topic, payload, qos);
         if (shouldBridgeTopic(topic)) {
             messageBridge.publish(new BridgeMessage(
                 clientId,
@@ -886,7 +889,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         );
     }
 
-    private void routeMessage(String topic, byte[] payload, int publishQos) {
+    private void routeMessage(String sourceClientId, String topic, byte[] payload, int publishQos) {
         GlobalSubscriptionMatch globalMatch = resolveGlobalMatch(topic);
         RouteScratch routeScratch = prepareRouteScratch();
         Set<String> localSubscribers = routeScratch.localSubscribers();
@@ -895,7 +898,7 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
         localSubscribers.addAll(localMatch.getDirectSubscribers());
         buildRemoteNormalTargetPlans(globalMatch, remoteTargetPlans);
         selectSharedDeliveryTargets(localMatch, globalMatch, localSubscribers, remoteTargetPlans);
-        dispatchRouteResult(topic, payload, publishQos, localSubscribers, remoteTargetPlans);
+        dispatchRouteResult(sourceClientId, topic, payload, publishQos, localSubscribers, remoteTargetPlans);
         clearRouteScratch(routeScratch);
     }
 
@@ -907,13 +910,14 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     }
 
     private void dispatchRouteResult(
+        String sourceClientId,
         String topic,
         byte[] payload,
         int publishQos,
         Set<String> localSubscribers,
         Map<String, ClusterMessageDispatcher.DispatchTarget> remoteTargetPlans
     ) {
-        deliverToLocalSubscribers(topic, payload, localSubscribers, publishQos);
+        deliverToLocalSubscribers(sourceClientId, topic, payload, localSubscribers, publishQos);
         if (remoteTargetPlans.isEmpty()) {
             return;
         }
@@ -984,16 +988,23 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
                 : MqttQoS.AT_LEAST_ONCE.value())
             : MqttQoS.AT_MOST_ONCE.value();
         normalizedQos = capByMaxQos(normalizedQos);
-        routeLocalOnly(topic, payload, includeNormal, sharedGroups, normalizedQos);
+        routeLocalOnly(null, topic, payload, includeNormal, sharedGroups, normalizedQos);
     }
 
-    private void routeLocalOnly(String topic, byte[] payload, boolean includeNormal, Set<String> sharedGroups, int publishQos) {
+    private void routeLocalOnly(
+        String sourceClientId,
+        String topic,
+        byte[] payload,
+        boolean includeNormal,
+        Set<String> sharedGroups,
+        int publishQos
+    ) {
         if (!includeNormal && (sharedGroups == null || sharedGroups.isEmpty())) {
             return;
         }
         SubscriptionMatchResult matchResult = subscriptionRegistry.findSubscriptionMatch(topic);
         Set<String> subscribers = collectLocalOnlySubscribers(matchResult, includeNormal, sharedGroups);
-        deliverToLocalSubscribers(topic, payload, subscribers, publishQos);
+        deliverToLocalSubscribers(sourceClientId, topic, payload, subscribers, publishQos);
     }
 
     private Set<String> collectLocalOnlySubscribers(
@@ -1020,12 +1031,21 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
     /**
      * Delivers a routed message to matching local subscribers.
      */
-    private void deliverToLocalSubscribers(String topic, byte[] payload, Set<String> subscribers, int publishQos) {
+    private void deliverToLocalSubscribers(
+        String sourceClientId,
+        String topic,
+        byte[] payload,
+        Set<String> subscribers,
+        int publishQos
+    ) {
         LOG.fine(() -> "[ROUTE][LOCAL] topic=" + topic + ", subscribers=" + subscribers.size());
         DeliveryScratch deliveryScratch = deliveryScratchHolder.get();
         Set<Channel> channelsToFlush = deliveryScratch.channelsToFlush();
         channelsToFlush.clear();
         for (String subscriber : subscribers) {
+            if (shouldSkipLoopbackDelivery(sourceClientId, subscriber)) {
+                continue;
+            }
             ClientSession session = resolveActiveSubscriberSession(subscriber);
             if (session == null) {
                 continue;
@@ -1033,6 +1053,19 @@ public class MqttBrokerMessageHandler implements BrokerMessageHandler {
             writeLocalDelivery(session.channel(), subscriber, topic, payload, publishQos, channelsToFlush);
         }
         flushDeliveryChannels(channelsToFlush);
+    }
+
+    private boolean shouldSkipLoopbackDelivery(String sourceClientId, String subscriber) {
+        if (!publishNoLocalEnabled) {
+            return false;
+        }
+        if (sourceClientId == null || sourceClientId.isBlank()) {
+            return false;
+        }
+        if (subscriber == null || subscriber.isBlank()) {
+            return false;
+        }
+        return sourceClientId.equals(subscriber);
     }
 
     private ClientSession resolveActiveSubscriberSession(String subscriber) {

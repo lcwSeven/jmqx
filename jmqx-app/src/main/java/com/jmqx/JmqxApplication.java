@@ -520,6 +520,7 @@ public class JmqxApplication {
                 context.adminSyncSettings().clusterId(),
                 context.bridgeProperties().getTopicFilters(),
                 context.brokerProperties().getMaxQos(),
+                context.brokerProperties().isPublishNoLocalEnabled(),
                 context.brokerProperties().getMaxSubscriptionsPerClient(),
                 BrokerRateLimitConfig.of(
                         context.brokerProperties().isRateLimitClientIdEnabled(),

@@ -14,6 +14,7 @@ public class BrokerProperties {
     private int workerThreads = 0;
     private int readerIdleSeconds = 120;
     private int maxQos = 2;
+    private boolean publishNoLocalEnabled = true;
     private int maxWillPayloadBytes = 1024 * 1024;
     private int maxSubscriptionsPerClient = 1000;
     private boolean websocketEnabled = true;
@@ -109,6 +110,14 @@ public class BrokerProperties {
 
     public void setMaxQos(int maxQos) {
         this.maxQos = maxQos;
+    }
+
+    public boolean isPublishNoLocalEnabled() {
+        return publishNoLocalEnabled;
+    }
+
+    public void setPublishNoLocalEnabled(boolean publishNoLocalEnabled) {
+        this.publishNoLocalEnabled = publishNoLocalEnabled;
     }
 
     public int getMaxWillPayloadBytes() {

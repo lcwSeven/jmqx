@@ -11,6 +11,9 @@ jmqx:
     readerIdleSeconds: 120
     # Maximum QoS supported by broker (0/1/2).
     maxQos: 2
+    # Skip loopback delivery when a client publishes to a topic it also subscribes to.
+    publish:
+      noLocalEnabled: true
     # Maximum number of topic subscriptions allowed per client.
     maxSubscriptionsPerClient: 1000
     # Maximum allowed WILL payload bytes. CONNECT is rejected when exceeded.
