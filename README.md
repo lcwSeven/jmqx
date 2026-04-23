@@ -61,10 +61,52 @@ JMQX 是一个基于 Java + Netty 的 MQTT Broker，目标是提供可读、可�
 mvn -DskipTests compile
 ```
 
+### 打包可执行 JAR
+
+```bash
+mvn -pl jmqx-app -am -DskipTests package
+```
+
+构建完成后，可执行产物位于：
+
+- `jmqx-app/target/jmqx-app.jar`
+
+直接启动：
+
+```bash
+java -jar jmqx-app/target/jmqx-app.jar
+```
+
 ### 启动 Broker
 
 ```bash
 mvn -pl jmqx-app -am exec:java
+```
+
+### Docker 打包与运行
+
+构建镜像：
+
+```bash
+docker build -t jmqx:1.0.0 .
+```
+
+启动容器：
+
+```bash
+docker run --rm -p 1883:1883 -p 8083:8083 -p 18081:18081 -v $(pwd)/data:/opt/jmqx/data jmqx:1.0.0
+```
+
+如果需要覆盖配置，可以通过 `JMQX_JAVA_OPTS` 传入 JVM `-D` 参数，例如：
+
+```bash
+docker run --rm \
+  -p 1883:1883 \
+  -p 8083:8083 \
+  -p 18081:18081 \
+  -e JMQX_JAVA_OPTS="-Djmqx.broker.host=0.0.0.0 -Djmqx.admin.panel.port=18081" \
+  -v $(pwd)/data:/opt/jmqx/data \
+  jmqx:1.0.0
 ```
 
 ### 访问管理页面

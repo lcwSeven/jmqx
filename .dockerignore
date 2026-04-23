@@ -1,0 +1,12 @@
+.git
+.idea
+data
+target
+**/target
+node_modules
+**/node_modules
+dist
+**/dist
+.DS_Store
+*.iml
+
