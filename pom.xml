@@ -28,6 +28,7 @@
         <slf4j.version>2.0.13</slf4j.version>
         <logback.version>1.4.14</logback.version>
         <spring.boot.version>3.2.5</spring.boot.version>
+        <junit.jupiter.version>5.10.2</junit.jupiter.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
 
@@ -110,6 +111,11 @@
                 <artifactId>logback-core</artifactId>
                 <version>${logback.version}</version>
             </dependency>
+            <dependency>
+                <groupId>org.junit.jupiter</groupId>
+                <artifactId>junit-jupiter</artifactId>
+                <version>${junit.jupiter.version}</version>
+            </dependency>
         </dependencies>
     </dependencyManagement>
 
@@ -123,6 +129,14 @@
                     <configuration>
                         <release>${maven.compiler.release}</release>
                         <parameters>true</parameters>
+                    </configuration>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <version>3.2.5</version>
+                    <configuration>
+                        <useModulePath>false</useModulePath>
                     </configuration>
                 </plugin>
             </plugins>
